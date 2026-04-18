@@ -1,0 +1,40 @@
+## Interface: 120001
+## Title: Artisan Nexus
+## Notes: Professions and crafting QoL — aligned with Warband Nexus architecture (Midnight 12.0.1)
+## Author: Artisan Nexus
+## Version: 0.4.8
+## IconTexture: Interface\Icons\Trade_Fishing
+## SavedVariables: ArtisanNexusDB
+## OptionalDeps: Ace3, LibSharedMedia-3.0
+## X-Category: Professions
+
+# Libraries
+embeds.xml
+
+# Localization
+Locales\enUS.lua
+
+# Core (Constants and Migration before Core.lua — DB defaults use ns.Constants)
+Modules\Constants.lua
+Modules\DebugPrint.lua
+Modules\Utilities.lua
+Modules\MigrationService.lua
+Core.lua
+Modules\ErrorHandler.lua
+
+Modules\UI\ArtisanTheme.lua
+Modules\UI\ArtisanSharedWidgets.lua
+Modules\UI\ProfessionQualityAtlas.lua
+Modules\Data\GatheringCatalog.lua
+Modules\Data\FishingCatalog.lua
+Modules\SessionLootService.lua
+
+Modules\Fishing\FishingSpellData.lua
+Modules\Fishing\FishingService.lua
+Modules\Fishing\FishingInput.lua
+Modules\Fishing\FishingLootService.lua
+Modules\Gathering\GatheringSpellData.lua
+Modules\Gathering\GatheringLootService.lua
+Modules\LootWindowBridge.lua
+Modules\UI\FishingHistoryUI.lua
+Config.lua

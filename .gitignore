@@ -1,0 +1,24 @@
+# Track only: LICENSE, this file, and shipped addon sources (toc, lua, xml, Modules, Locales, libs).
+# IDE / Cursor / local tooling stay untracked (not committed).
+
+# --- Deny by default (root) ---
+/*
+!/.gitignore
+!/LICENSE
+!/ArtisanNexus.toc
+!/Core.lua
+!/Config.lua
+!/embeds.xml
+!/Modules/
+!/Modules/**
+!/Locales/
+!/Locales/**
+!/libs/
+!/libs/**
+
+# --- Dotfiles / paths not covered by /* (leading-dot names) ---
+.cursor/
+.vscode/
+.idea/
+.gitattributes
+link-to-wow-addons.bat
