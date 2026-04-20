@@ -1,5 +1,6 @@
 --[[
     Midnight (12.0.x) fish — reference grid. Most fish are a single rank; use ranks = { id }.
+    Extend when new Midnight fishing loot appears in patch notes or confirmed item IDs.
 ]]
 
 local ADDON_NAME, ns = ...

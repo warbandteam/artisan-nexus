@@ -39,6 +39,26 @@ local defaults = {
             width = nil,
             height = nil,
         },
+        --- Session loot window + loot-driven UI (catalog, auto-open). Slash /an loot still works when off.
+        lootHistoryEnabled = true,
+        --- Open Session loot window when fishing or gathering records a pickup (per-tab); requires lootHistoryEnabled.
+        lootHistoryAutoOpen = false,
+        --- Last Session loot tab (fishing / herb / mine / …); restored on reload + auto-open.
+        lootHistoryActiveTab = nil,
+        --- World indicator when hovering overloaded herb/ore nodes.
+        overloadNodeIndicatorEnabled = true,
+        --- Movable overload tracker frame anchor.
+        overloadTrackerFrame = {
+            point = "TOP",
+            relativePoint = "TOP",
+            x = 0,
+            y = -140,
+        },
+        --- Show gathering route density overlay on World Map.
+        routeHeatmapEnabled = true,
+        --- Warn when bag free slots are low while gathering.
+        bagPressureGuardEnabled = true,
+        bagPressureThreshold = 8,
     },
     global = {
         dataVersion = ns.Constants.DB_VERSION,
@@ -48,6 +68,12 @@ local defaults = {
         fishingLootHistory = {},
         --- Herb / ore / skinning (gathering) loot totals
         gatheringLootHistory = {},
+        --- Overall pickup event log (capped, never reset on login). fishing: { itemID, qty, t }
+        overallFishingEvents = {},
+        --- Overall pickup event log for gathering: { itemID, qty, t, cat }
+        overallGatheringEvents = {},
+        --- AH unit prices (copper). [itemID] = { buyout = number, updatedAt = unix }
+        ahPrices = {},
     },
     char = {},
 }
@@ -95,16 +121,22 @@ function ArtisanNexus:OnInitialize()
     self:RegisterMessage(E.FISHING_CHANNEL_STARTED, "OnMessageFishingChannelStarted")
     self:RegisterMessage(E.FISHING_CHANNEL_STOPPED, "OnMessageFishingChannelStopped")
 
-    if ns.FishingHistoryUI and ns.FishingHistoryUI.Init then
-        ns.FishingHistoryUI:Init()
+    if ns.LootHistoryUI and ns.LootHistoryUI.Init then
+        ns.LootHistoryUI:Init()
+    end
+    if ns.GatheringOverloadIndicator and ns.GatheringOverloadIndicator.Init then
+        ns.GatheringOverloadIndicator:Init()
+    end
+    if ns.GatheringRouteOverlay and ns.GatheringRouteOverlay.Init then
+        ns.GatheringRouteOverlay:Init()
     end
 end
 
 function ArtisanNexus:OnProfileChanged()
-    if ns.FishingHistoryUI and ns.FishingHistoryUI.main and ns.FishingHistoryUI.ApplySavedFrameSize then
-        ns.FishingHistoryUI:ApplySavedFrameSize(ns.FishingHistoryUI.main)
-        if ns.FishingHistoryUI.main:IsShown() and ns.FishingHistoryUI.Refresh then
-            ns.FishingHistoryUI:Refresh()
+    if ns.LootHistoryUI and ns.LootHistoryUI.main and ns.LootHistoryUI.ApplySavedFrameSize then
+        ns.LootHistoryUI:ApplySavedFrameSize(ns.LootHistoryUI.main)
+        if ns.LootHistoryUI.main:IsShown() and ns.LootHistoryUI.Refresh then
+            ns.LootHistoryUI:Refresh()
         end
     end
 end
@@ -126,6 +158,15 @@ function ArtisanNexus:OnEnable()
         if ns.GatheringLootService then
             ns.GatheringLootService:Enable()
         end
+        if ns.GatheringOverloadService then
+            ns.GatheringOverloadService:Enable()
+        end
+        if ns.GatheringRouteOverlay then
+            ns.GatheringRouteOverlay:Refresh()
+        end
+    end
+    if self.db.profile.enabled and ns.BagPressureGuard then
+        ns.BagPressureGuard:Enable()
     end
     self:SendMessage(E.LOADING_COMPLETE)
 
@@ -151,6 +192,12 @@ end
 function ArtisanNexus:OnDisable()
     if ns.GatheringLootService then
         ns.GatheringLootService:Disable()
+    end
+    if ns.GatheringOverloadService then
+        ns.GatheringOverloadService:Disable()
+    end
+    if ns.BagPressureGuard then
+        ns.BagPressureGuard:Disable()
     end
     if ns.FishingInput then
         ns.FishingInput:Disable()
@@ -181,38 +228,52 @@ function ArtisanNexus:SlashCommand(input)
         return
     end
     if input == "fish" then
-        if ns.FishingHistoryUI then
-            ns.FishingHistoryUI:Show("fishing")
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Show("fishing")
         end
         return
     end
     if input == "gather" or input == "gathering" or input == "herb" then
-        if ns.FishingHistoryUI then
-            ns.FishingHistoryUI:Show("herb")
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Show("herb")
         end
         return
     end
     if input == "mine" or input == "mining" or input == "ore" then
-        if ns.FishingHistoryUI then
-            ns.FishingHistoryUI:Show("mine")
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Show("mine")
         end
         return
     end
     if input == "leather" or input == "skinning" or input == "skin" then
-        if ns.FishingHistoryUI then
-            ns.FishingHistoryUI:Show("leather")
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Show("leather")
         end
         return
     end
     if input == "disenchant" or input == "de" or input == "enchant" then
-        if ns.FishingHistoryUI then
-            ns.FishingHistoryUI:Show("disenchant")
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Show("disenchant")
+        end
+        return
+    end
+    if input == "others" or input == "other" or input == "mote" or input == "shared" then
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Show("others")
         end
         return
     end
     if input == "history" or input == "loot" then
-        if ns.FishingHistoryUI then
-            ns.FishingHistoryUI:Toggle()
+        if ns.LootHistoryUI then
+            ns.LootHistoryUI:Toggle()
+        end
+        return
+    end
+    if input == "ah" or input == "ahprice" or input == "ahscan" then
+        if ns.AHPriceService and ns.AHPriceService.StartScan then
+            ns.AHPriceService:StartScan(true)
+        else
+            self:Print("AH price scan is unavailable.")
         end
         return
     end

@@ -22,23 +22,39 @@ local function Signature(counts)
     return s
 end
 
+local function ResetLootWindowSnapshots()
+    local g = ns.GatheringLootService
+    if g and g.ResetWindowCountSnapshot then
+        g:ResetWindowCountSnapshot()
+    end
+    local f = ns.FishingLootService
+    if f and f.ResetWindowCountSnapshot then
+        f:ResetWindowCountSnapshot()
+    end
+end
+
 local function TryScanFromWindow()
     local get = ns.GetLootSlotItemCounts
     if not get then
         return
     end
     local counts = get()
-    if not counts or not next(counts) then
+    if not counts then
         return
     end
+    --- Empty {} is required so delta logic sees items leave the window (loot claimed).
+    --- Skipping empty snapshots prevented matching chat totals.
 
-    local sig = Signature(counts)
     local now = GetTime()
-    --- Same snapshot can fire on multiple delayed scans; keep one processing window.
-    if sig == lastSig and (now - lastSigTime) < 0.85 then
-        return
+    --- Non-empty: dedupe identical snapshots from multi-timer retries. Empty {} must always run so
+    --- gathering delta sees items leave the window (signature is always "" — would block mining after fishing).
+    if next(counts) then
+        local sig = Signature(counts)
+        if sig == lastSig and (now - lastSigTime) < 0.85 then
+            return
+        end
+        lastSig, lastSigTime = sig, now
     end
-    lastSig, lastSigTime = sig, now
 
     local fish = ns.FishingLootService
     if fish and fish.ShouldAttributeLootToFishing and fish:ShouldAttributeLootToFishing() and fish.RecordWindowLootCounts then
@@ -65,6 +81,9 @@ bridge:RegisterEvent("LOOT_OPENED")
 bridge:RegisterEvent("LOOT_CLOSED")
 bridge:RegisterEvent("LOOT_SLOT_CHANGED")
 bridge:SetScript("OnEvent", function(_, event)
+    if event == "LOOT_OPENED" then
+        ResetLootWindowSnapshots()
+    end
     ScheduleScans()
     if event == "LOOT_CLOSED" then
         C_Timer.After(0.02, TryScanFromWindow)

@@ -122,7 +122,7 @@ function GatheringSpellData.IsGatheringSpell(spellId)
     return GatheringSpellData.InferGatheringCategoryFromSpell(spellId) ~= nil
 end
 
---- Fallback when no recent spell context: catalog IDs, then Trade Goods subclasses.
+--- Catalog first, then Trade Goods subclasses via C_Item.GetItemInfoInstant (works before GetItemInfo cache fills).
 ---@param itemID number|nil
 ---@return "herb"|"mine"|"leather"|"disenchant"|nil
 function GatheringSpellData.InferCategoryFromItemId(itemID)
@@ -133,8 +133,18 @@ function GatheringSpellData.InferCategoryFromItemId(itemID)
     if fromCat then
         return fromCat
     end
-    local classID = select(12, GetItemInfo(itemID))
-    local subID = select(13, GetItemInfo(itemID))
+    local classID, subID
+    if C_Item and C_Item.GetItemInfoInstant then
+        local ok, inst = pcall(C_Item.GetItemInfoInstant, itemID)
+        if ok and inst and type(inst) == "table" then
+            classID = inst.classID or inst.itemClassID
+            subID = inst.subclassID or inst.itemSubClassID
+        end
+    end
+    if not classID then
+        classID = select(12, GetItemInfo(itemID))
+        subID = select(13, GetItemInfo(itemID))
+    end
     if not classID then
         return nil
     end

@@ -28,6 +28,17 @@ function Utilities:GetCharacterKey(name, realm)
     return name .. "-" .. realm
 end
 
+--- Remove |T|t / |A|a / |K|k so "x6" after an inline rank icon is visible to stack parsers.
+local function StripInlineLootDecorators(s)
+    if not s or s == "" then
+        return ""
+    end
+    s = s:gsub("|T[^|]-|t", "")
+    s = s:gsub("|A[^|]-|a", "")
+    s = s:gsub("|K[^|]-|k", "")
+    return s
+end
+
 --- Parse self-loot chat lines: each |Hitem:ID:…|h…|h|r hyperlink may be followed by xN / ×N stack count.
 --- Counting raw "item:(%d+)" occurrences undercounts stacked loot (one link, quantity in text).
 ---@param msg string|nil
@@ -54,6 +65,7 @@ function Utilities.ParseChatLootItemQuantities(msg)
             -- Text belonging to this loot chunk (until next colored link)
             local nextColor = after:find("|c", 1, true)
             local chunk = nextColor and after:sub(1, nextColor - 1) or after
+            chunk = StripInlineLootDecorators(chunk)
 
             local qty = 1
             -- Stack size usually follows the link: " x5", " ×5" (Unicode multiply), " 5x"
@@ -64,6 +76,15 @@ function Utilities.ParseChatLootItemQuantities(msg)
             end
             if not x then
                 x = trimmed:match("^%s*(%d+)%s*[xX×]%s*$")
+            end
+            if not x then
+                x = trimmed:match("([%d]+)%s*[xX×]%s*$")
+            end
+            if not x then
+                x = trimmed:match("[xX]%s*(%d+)")
+            end
+            if not x then
+                x = trimmed:match("×%s*(%d+)")
             end
             if x then
                 qty = tonumber(x) or 1
@@ -89,6 +110,98 @@ function Utilities.ParseChatLootItemQuantities(msg)
 end
 
 ns.ParseChatLootItemQuantities = Utilities.ParseChatLootItemQuantities
+
+--- True if this CHAT_MSG_LOOT line is for the local player (Blizzard global LOOT_ITEM_SELF* — works localized).
+---@param msg string|nil
+---@return boolean
+function Utilities.IsSelfLootChatMessage(msg)
+    if not msg or type(msg) ~= "string" or not msg:find("|Hitem:", 1, true) then
+        return false
+    end
+    local function prefixMatch(globalFmt)
+        if not globalFmt or type(globalFmt) ~= "string" then
+            return false
+        end
+        local prefix = globalFmt:match("^(.*)%%s")
+        if not prefix or #prefix < 1 then
+            return false
+        end
+        return msg:sub(1, #prefix) == prefix
+    end
+    if LOOT_ITEM_SELF and prefixMatch(LOOT_ITEM_SELF) then
+        return true
+    end
+    if LOOT_ITEM_SELF_MULTIPLE and prefixMatch(LOOT_ITEM_SELF_MULTIPLE) then
+        return true
+    end
+    return false
+end
+
+ns.IsSelfLootChatMessage = Utilities.IsSelfLootChatMessage
+
+--- start, duration, isEnabled for own spell; used by UI (overload tracker, etc.).
+--- `C_Spell.GetSpellCooldown` may return **secret** values in combat; `GetSpellCooldown(id|name)` is the usual fallback.
+---@return number|nil startTime
+---@return number|nil duration
+---@return any|nil isEnabled
+function Utilities.GetPlayerSpellCooldownValues(spellID)
+    if not spellID or type(spellID) ~= "number" or spellID < 1 then
+        return nil, nil, nil
+    end
+    local function anySecret(st, dur, en)
+        if st ~= nil and issecretvalue and issecretvalue(st) then
+            return true
+        end
+        if dur ~= nil and issecretvalue and issecretvalue(dur) then
+            return true
+        end
+        if en ~= nil and issecretvalue and issecretvalue(en) then
+            return true
+        end
+        return false
+    end
+    local st, dur, en
+    if C_Spell and C_Spell.GetSpellCooldown then
+        local ok, info = pcall(C_Spell.GetSpellCooldown, spellID)
+        if ok and type(info) == "table" then
+            local a = info.startTime or info.start or 0
+            local b = info.duration or 0
+            local c = info.isEnabled
+            if not anySecret(a, b, c) then
+                st, dur, en = a, b, c
+            end
+        end
+    end
+    if GetSpellCooldown then
+        if st == nil or anySecret(st, dur, en) then
+            local a, b, c = GetSpellCooldown(spellID)
+            if not anySecret(a, b, c) then
+                st, dur, en = a or 0, b or 0, c
+            end
+        end
+        if st == nil or anySecret(st, dur, en) then
+            local name
+            if C_Spell and C_Spell.GetSpellName then
+                local ok, n = pcall(C_Spell.GetSpellName, spellID)
+                if ok and type(n) == "string" and n ~= "" and not (issecretvalue and issecretvalue(n)) then
+                    name = n
+                end
+            end
+            if name then
+                local a, b, c = GetSpellCooldown(name)
+                if not anySecret(a, b, c) then
+                    st, dur, en = a or 0, b or 0, c
+                end
+            end
+        end
+    end
+    if st == nil or anySecret(st, dur, en) then
+        return nil, nil, nil
+    end
+    return st, dur, en
+end
+
+ns.GetPlayerSpellCooldownValues = Utilities.GetPlayerSpellCooldownValues
 
 --- Loot frame: only GameObject sources (herb/ore node), no creature — gathering-style window.
 ---@return boolean
@@ -150,16 +263,16 @@ function Utilities.GetLootSlotItemCounts()
         return hex and tonumber(hex) or nil
     end
 
+    --- Mainline LootFrame: texture, itemName, quantity, currencyID, itemQuality, …
+    --- Do not scan arbitrary indices — index 4 is currencyID and index 5 is quality (misread as stack in old code).
     local function QuantityForSlot(index)
         if not GetLootSlotInfo then
             return 1
         end
-        local t = { GetLootSlotInfo(index) }
-        for _, idx in ipairs({ 3, 4, 2 }) do
-            local v = t[idx]
-            if type(v) == "number" and v >= 1 and v <= 10000 then
-                return math.floor(v)
-            end
+        local texture, itemName, quantity, currencyID, itemQuality, locked, isQuestItem, questID, isActive, isCoin =
+            GetLootSlotInfo(index)
+        if type(quantity) == "number" and quantity >= 1 and quantity <= 10000 then
+            return math.floor(quantity)
         end
         return 1
     end
@@ -254,3 +367,30 @@ end
 
 ns.GetQualityRGB = Utilities.GetQualityRGB
 ns.GetQualityLabel = Utilities.GetQualityLabel
+
+--- Open world only (not party/raid/arena/pvp/scenario instances).
+---@return boolean
+function Utilities.IsOpenWorld()
+    if not IsInInstance then
+        return true
+    end
+    local ok, inInstance, instanceType = pcall(IsInInstance)
+    if not ok then
+        return true
+    end
+    if issecretvalue and inInstance and issecretvalue(inInstance) then
+        return false
+    end
+    if issecretvalue and instanceType and issecretvalue(instanceType) then
+        return false
+    end
+    if inInstance == true then
+        return false
+    end
+    if type(instanceType) == "string" and instanceType ~= "" and instanceType ~= "none" then
+        return false
+    end
+    return true
+end
+
+ns.IsOpenWorld = Utilities.IsOpenWorld

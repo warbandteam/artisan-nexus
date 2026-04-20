@@ -32,10 +32,14 @@ local Constants = {
 
         GATHERING_LOOT_RECORDED = "AN_GATHERING_LOOT_RECORDED",
         GATHERING_HISTORY_UPDATED = "AN_GATHERING_HISTORY_UPDATED",
+        GATHERING_OVERLOAD_HINT_UPDATED = "AN_GATHERING_OVERLOAD_HINT_UPDATED",
 
         --- Either fishing or gathering history changed (refresh unified loot UI)
         LOOT_HISTORY_UPDATED = "AN_LOOT_HISTORY_UPDATED",
         SESSION_LOOT_UPDATED = "AN_SESSION_LOOT_UPDATED",
+
+        --- AH price scan completed; UI should refresh price columns.
+        AH_PRICES_UPDATED = "AN_AH_PRICES_UPDATED",
     },
 }
 

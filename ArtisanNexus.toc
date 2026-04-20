@@ -4,7 +4,7 @@
 ## Author: Artisan Nexus
 ## Version: 0.4.8
 ## IconTexture: Interface\Icons\Trade_Fishing
-## SavedVariables: ArtisanNexusDB
+## SavedVariables: ArtisanNexusDB GatherLogDB
 ## OptionalDeps: Ace3, LibSharedMedia-3.0
 ## X-Category: Professions
 
@@ -26,8 +26,11 @@ Modules\UI\ArtisanTheme.lua
 Modules\UI\ArtisanSharedWidgets.lua
 Modules\UI\ProfessionQualityAtlas.lua
 Modules\Data\GatheringCatalog.lua
+Modules\Data\GatheringNodeOverloadRegistry.lua
 Modules\Data\FishingCatalog.lua
 Modules\SessionLootService.lua
+Modules\AHPriceService.lua
+Modules\BagPressureGuard.lua
 
 Modules\Fishing\FishingSpellData.lua
 Modules\Fishing\FishingService.lua
@@ -35,6 +38,10 @@ Modules\Fishing\FishingInput.lua
 Modules\Fishing\FishingLootService.lua
 Modules\Gathering\GatheringSpellData.lua
 Modules\Gathering\GatheringLootService.lua
+Modules\Gathering\GatheringOverloadService.lua
+Modules\Gathering\GatheringRouteOverlay.lua
+Modules\GatherLog.lua
 Modules\LootWindowBridge.lua
-Modules\UI\FishingHistoryUI.lua
+Modules\UI\LootHistoryUI.lua
+Modules\UI\GatheringOverloadIndicator.lua
 Config.lua

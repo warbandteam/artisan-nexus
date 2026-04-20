@@ -151,7 +151,7 @@ end
 local function AccentColor()
     local c = ns.UI_COLORS and ns.UI_COLORS.accent
     if c then return c[1], c[2], c[3], 0.6 end
-    return 0.4, 0.2, 0.58, 0.6
+    return 0.44, 0.32, 0.58, 0.6
 end
 
 local function CreateIcon(parent, texture, size, isAtlas, borderColor, noBorder)
