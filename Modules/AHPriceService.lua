@@ -16,6 +16,9 @@ local ADDON_NAME, ns = ...
 
 local ArtisanNexus = ns.ArtisanNexus
 local E = ns.Constants.EVENTS
+local ApplyVisuals = ns.UI_ApplyVisuals
+local COLORS = ns.UI_COLORS
+local AHPriceService
 
 --- Seconds between individual commodity queries (Blizzard throttle headroom).
 --- Keep low for responsiveness; server-side throttling still applies.
@@ -25,6 +28,15 @@ local SCAN_STEP_SEC = 0.15
 local SEARCH_RESULT_TIMEOUT_SEC = 2.5
 
 local QUICK_SCAN_MAX_ITEMS = 28
+
+--- Per-item cache freshness. Items younger than this are skipped on incremental
+--- scans (force=true / right-click "Full scan" overrides). Tunable via DB.
+local DEFAULT_FRESH_TTL_SEC = 60 * 60 * 6   -- 6 hours
+local STALE_TTL_SEC         = 60 * 60 * 24  -- 24 hours
+
+--- Adaptive backoff cap. After repeated timeouts we slow the queue so we don't
+--- hammer the AH and trip Blizzard's rate limit.
+local SCAN_STEP_MAX_SEC = 0.6
 
 local function L(key, fallback)
     local loc = ns.L
@@ -72,31 +84,91 @@ local function After(delaySec, fn)
     end
 end
 
---- Alt sağ: sayfalama / satın alma çubuğu ile çakışır. Arama şeridinin altı (sol) veya cüzdan üstü.
+-- (GetFirstShownButton removed — sibling-button hunt was unreliable across
+-- AH tabs; the new chrome-relative anchor is independent of tab content.)
+
+--- Stable anchor: dock the button to the AH frame's title bar, just left of
+--- the close button. Independent of which AH tab is active, never shifts
+--- when the user switches Browse/Buy/Sell/Auctions, never collides with
+--- tab content because it lives in the chrome above it.
 local function ApplyAHSyncButtonAnchor(btn, parent)
-    if not btn or not parent then
-        return
-    end
+    if not btn or not parent then return end
     btn:ClearAllPoints()
-    local searchBar = parent.SearchBar
-    if searchBar then
-        btn:SetPoint("TOPLEFT", searchBar, "BOTTOMLEFT", 0, -10)
+    local closeBtn = parent.CloseButton or _G.AuctionHouseFrameCloseButton
+    if closeBtn and closeBtn.GetRight then
+        btn:SetPoint("TOPRIGHT", closeBtn, "TOPLEFT", -2, -2)
+    else
+        btn:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -28, -4)
+    end
+end
+
+local function ApplyAHButtonStyle(btn, isHover)
+    if not btn then
         return
     end
-    btn:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 20, 72)
+    local scanning = AHPriceService and AHPriceService._scanning
+    local colors = COLORS or {}
+    local bg = colors.tabInactive or { 0.12, 0.11, 0.13, 1 }
+    local border = colors.border or { 0.42, 0.38, 0.50, 0.9 }
+    if scanning then
+        bg = colors.tabActive or { 0.22, 0.18, 0.30, 1 }
+        border = colors.accent or { 0.52, 0.40, 0.66, 0.95 }
+    elseif isHover then
+        bg = colors.tabHover or { 0.24, 0.20, 0.32, 1 }
+        border = colors.borderLight or colors.accent or { 0.58, 0.50, 0.72, 0.95 }
+    end
+    if ApplyVisuals then
+        ApplyVisuals(btn, bg, { border[1], border[2], border[3], border[4] or 0.95 })
+    else
+        if btn.SetBackdrop then
+            btn:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8" })
+            btn:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
+        end
+    end
+    if btn._label then
+        local tc = colors.textBright or { 0.98, 0.97, 0.99, 1 }
+        btn._label:SetTextColor(tc[1], tc[2], tc[3], tc[4] or 1)
+    end
+    if btn._icon then
+        local ic = scanning and (colors.accent or { 0.52, 0.40, 0.66, 1 }) or (colors.textNormal or { 0.88, 0.84, 0.92, 1 })
+        btn._icon:SetVertexColor(ic[1], ic[2], ic[3], 1)
+    end
 end
 
 ---@class AHPriceService
-local AHPriceService = {
+AHPriceService = {
     _queue = {},
     _scanning = false,
+    _paused = false,
     _currentItemID = nil,
     _expectQueryId = nil,
     _ahButtonCreated = false,
     _ahButton = nil,
     _totalItems = 0,
     _scannedItems = 0,
+    _scanStartedAt = 0,
+    _consecutiveTimeouts = 0,
+    _currentStepSec = SCAN_STEP_SEC,
+    _lastFullScanAt = 0,
 }
+
+local function ScheduleAHSyncAnchorRefresh()
+    local btn = AHPriceService._ahButton
+    local af = _G.AuctionHouseFrame
+    if not btn or not af or not af.IsShown or not af:IsShown() then
+        return
+    end
+    After(0, function()
+        if AHPriceService._ahButton and _G.AuctionHouseFrame then
+            ApplyAHSyncButtonAnchor(AHPriceService._ahButton, _G.AuctionHouseFrame)
+        end
+    end)
+    After(0.12, function()
+        if AHPriceService._ahButton and _G.AuctionHouseFrame and _G.AuctionHouseFrame:IsShown() then
+            ApplyAHSyncButtonAnchor(AHPriceService._ahButton, _G.AuctionHouseFrame)
+        end
+    end)
+end
 
 --- Unit price in copper for itemID, or nil if never scanned / not on AH.
 ---@param itemID number
@@ -118,7 +190,8 @@ function AHPriceService:GetPrice(itemID)
     return row and row.buyout or nil
 end
 
---- Build the ordered list of all catalog itemIDs to scan.
+--- Build the ordered list of every catalog itemID to scan (gathering tabs: herb, mine, leather, disenchant, others + `GetFishingCatalogEntries`).
+--- Keep category lists in sync when adding new `BY_CAT` rows or fishing entries.
 local function BuildItemQueue(includeFresh)
     local ids = {}
     local seen = {}
@@ -148,17 +221,39 @@ local function BuildItemQueue(includeFresh)
     local db = ArtisanNexus and ArtisanNexus.db and ArtisanNexus.db.global and ArtisanNexus.db.global.ahPrices
     if not includeFresh and type(db) == "table" then
         local now = time()
+        local ttl = (ArtisanNexus.db.profile and ArtisanNexus.db.profile.ahFreshTTL) or DEFAULT_FRESH_TTL_SEC
         local filtered = {}
         for i = 1, #ids do
             local itemID = ids[i]
             local row = db[itemID]
-            if not row or not row.updatedAt or (now - row.updatedAt) >= (20 * 60) then
+            if not row or not row.updatedAt or (now - row.updatedAt) >= ttl then
                 filtered[#filtered + 1] = itemID
             end
         end
         ids = filtered
     end
     return ids
+end
+
+--- Stats for the AH button hover tooltip / future UI.
+function AHPriceService:GetCacheStats()
+    local db = ArtisanNexus and ArtisanNexus.db and ArtisanNexus.db.global and ArtisanNexus.db.global.ahPrices
+    if type(db) ~= "table" then return { total = 0, fresh = 0, stale = 0, missing = 0, oldest = 0, newest = 0 } end
+    local total, fresh, stale = 0, 0, 0
+    local oldest, newest = 0, 0
+    local now = time()
+    local ttl = (ArtisanNexus.db.profile and ArtisanNexus.db.profile.ahFreshTTL) or DEFAULT_FRESH_TTL_SEC
+    for _, row in pairs(db) do
+        if type(row) == "table" and row.updatedAt then
+            total = total + 1
+            local age = now - row.updatedAt
+            if age < ttl then fresh = fresh + 1
+            else stale = stale + 1 end
+            if oldest == 0 or row.updatedAt < oldest then oldest = row.updatedAt end
+            if row.updatedAt > newest then newest = row.updatedAt end
+        end
+    end
+    return { total = total, fresh = fresh, stale = stale, oldest = oldest, newest = newest }
 end
 
 --- Quick queue for responsiveness: currently relevant items first.
@@ -228,16 +323,39 @@ local function BuildQuickItemQueue()
     return ids
 end
 
+local function FormatRemaining(seconds)
+    if seconds < 60 then return string.format("%ds", math.max(1, math.floor(seconds))) end
+    if seconds < 3600 then return string.format("%dm", math.floor(seconds / 60)) end
+    return string.format("%dh", math.floor(seconds / 3600))
+end
+
 local function UpdateAHButtonText()
     local btn = AHPriceService._ahButton
     if not btn then return end
-    if AHPriceService._scanning then
+    local text
+    if AHPriceService._paused then
+        text = string.format("Paused %d/%d", AHPriceService._scannedItems, AHPriceService._totalItems)
+    elseif AHPriceService._scanning then
         local done = AHPriceService._scannedItems
         local total = AHPriceService._totalItems
-        btn:SetText(string.format("Scanning %d/%d...", done, total))
+        local elapsed = (GetTime and GetTime() or 0) - (AHPriceService._scanStartedAt or 0)
+        local rate = (done > 0 and elapsed > 0) and (done / elapsed) or 0
+        local remaining = #AHPriceService._queue
+        if rate > 0 and remaining > 0 then
+            local eta = remaining / rate
+            text = string.format("Scanning %d/%d · %s", done, total, FormatRemaining(eta))
+        else
+            text = string.format("Scanning %d/%d", done, total)
+        end
     else
-        btn:SetText(L("AH_SYNC_PRICES", "Sync AH Prices"))
+        text = L("AH_SYNC_PRICES", "Sync AH Prices")
     end
+    if btn._label then
+        btn._label:SetText(text)
+    else
+        btn:SetText(text)
+    end
+    ApplyAHButtonStyle(btn, btn._isHover == true)
 end
 
 local function AHIsOpen()
@@ -259,17 +377,24 @@ end
 
 function AHPriceService:ScanNext()
     if not self._scanning then return end
+    if self._paused then return end
     if not AHIsOpen() then
+        -- AH closed mid-scan: keep the queue intact and surface a "resume"
+        -- prompt the next time the AH is opened.
         self._scanning = false
         self._expectQueryId = nil
         self._currentItemID = nil
+        self._paused = (#self._queue > 0)
         UpdateAHButtonText()
         return
     end
     if #self._queue == 0 then
         self._scanning = false
+        self._paused = false
         self._currentItemID = nil
         self._expectQueryId = nil
+        self._consecutiveTimeouts = 0
+        self._currentStepSec = SCAN_STEP_SEC
         UpdateAHButtonText()
         Notify(L("AH_SCAN_DONE", "AH price scan finished."))
         if ArtisanNexus and ArtisanNexus.SendMessage then
@@ -289,7 +414,7 @@ function AHPriceService:ScanNext()
     local itemKey = MakeQueryItemKey(itemID)
     if not itemKey then
         self._expectQueryId = nil
-        After(SCAN_STEP_SEC, function() AHPriceService:ScanNext() end)
+        After(self._currentStepSec, function() AHPriceService:ScanNext() end)
         return
     end
 
@@ -303,20 +428,85 @@ function AHPriceService:ScanNext()
     if not ok then
         self._expectQueryId = nil
         Notify(L("AH_SCAN_QUERY_FAIL", "Auction search failed for one item; skipping."))
-        After(SCAN_STEP_SEC, function() AHPriceService:ScanNext() end)
+        After(self._currentStepSec, function() AHPriceService:ScanNext() end)
         return
     end
 
     After(SEARCH_RESULT_TIMEOUT_SEC, function()
-        if not AHPriceService._scanning then
-            return
-        end
-        if AHPriceService._expectQueryId ~= qid then
-            return
-        end
+        if not AHPriceService._scanning then return end
+        if AHPriceService._expectQueryId ~= qid then return end
         AHPriceService._expectQueryId = nil
-        After(SCAN_STEP_SEC, function() AHPriceService:ScanNext() end)
+        -- Adaptive backoff: each consecutive timeout slows the next step by
+        -- 25% (capped) so we don't pile queries during AH rate-limit spikes.
+        AHPriceService._consecutiveTimeouts = (AHPriceService._consecutiveTimeouts or 0) + 1
+        if AHPriceService._consecutiveTimeouts >= 2 then
+            AHPriceService._currentStepSec = math.min(SCAN_STEP_MAX_SEC, AHPriceService._currentStepSec * 1.25)
+        end
+        After(AHPriceService._currentStepSec, function() AHPriceService:ScanNext() end)
     end)
+end
+
+--- Pause/resume controls for the right-click menu and scan-on-AH-close logic.
+function AHPriceService:Pause()
+    if not self._scanning then return end
+    self._paused = true
+    self._scanning = false
+    UpdateAHButtonText()
+end
+
+function AHPriceService:Resume()
+    if self._scanning then return end
+    if not AHIsOpen() then
+        Notify(L("AH_SCAN_NEED_OPEN", "Open the Auction House window first."))
+        return
+    end
+    if #self._queue == 0 then
+        self._paused = false
+        UpdateAHButtonText()
+        return
+    end
+    self._paused = false
+    self._scanning = true
+    self._scanStartedAt = GetTime and GetTime() or 0
+    UpdateAHButtonText()
+    self:ScanNext()
+end
+
+function AHPriceService:ShowContextMenu(anchor)
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        MenuUtil.CreateContextMenu(anchor or UIParent, function(_, root)
+            root:CreateTitle(L("AH_SYNC_PRICES", "Sync AH Prices"))
+            if self._scanning then
+                root:CreateButton("Pause scan", function() self:Pause() end)
+                root:CreateButton("Cancel scan", function() self:Cancel() end)
+            elseif self._paused then
+                root:CreateButton("Resume scan", function() self:Resume() end)
+                root:CreateButton("Cancel scan", function() self:Cancel() end)
+            else
+                root:CreateButton("Quick scan (recent items)", function() self:StartScan(false, false) end)
+                root:CreateButton("Refresh stale items", function() self:StartScan(false, true) end)
+                root:CreateButton("Force full rescan", function() self:StartScan(true, true) end)
+            end
+            root:CreateDivider()
+            local stats = self:GetCacheStats()
+            root:CreateTitle(string.format("Cache: %d items (%d fresh)", stats.total, stats.fresh))
+        end)
+    else
+        Notify("Context menu API unavailable on this client; use left-click.")
+    end
+end
+
+function AHPriceService:Cancel()
+    self._scanning = false
+    self._paused = false
+    self._queue = {}
+    self._currentItemID = nil
+    self._expectQueryId = nil
+    self._totalItems = 0
+    self._scannedItems = 0
+    self._consecutiveTimeouts = 0
+    self._currentStepSec = SCAN_STEP_SEC
+    UpdateAHButtonText()
 end
 
 ---@param force boolean|nil If true, clears an in-progress or stuck scan and starts over.
@@ -324,6 +514,7 @@ end
 function AHPriceService:StartScan(force, fullScan)
     if force then
         self._scanning = false
+        self._paused = false
         self._expectQueryId = nil
         self._currentItemID = nil
         self._queue = {}
@@ -338,24 +529,26 @@ function AHPriceService:StartScan(force, fullScan)
     end
     local useFull = (fullScan ~= false)
     if useFull then
-        self._queue = BuildItemQueue(true)
+        -- Force=true means "rescan everything"; force=false honors TTL (skip fresh items).
+        self._queue = BuildItemQueue(force == true)
     else
         self._queue = BuildQuickItemQueue()
     end
     local n = #self._queue
     if n == 0 then
-        Notify(L("AH_SCAN_NO_ITEMS", "No catalog items to scan."))
+        Notify(L("AH_SCAN_UP_TO_DATE", "AH cache is up to date — no items need a refresh."))
         return
     end
     self._scanning = true
+    self._paused = false
     self._totalItems = n
     self._scannedItems = 0
+    self._consecutiveTimeouts = 0
+    self._currentStepSec = SCAN_STEP_SEC
+    self._scanStartedAt = GetTime and GetTime() or 0
+    if useFull then self._lastFullScanAt = time() end
     UpdateAHButtonText()
-    Notify(string.format(
-        useFull and L("AH_SCAN_STARTED", "Starting AH price scan (%d items).")
-            or L("AH_SCAN_STARTED", "Starting AH price scan (%d items)."),
-        n
-    ))
+    Notify(string.format(L("AH_SCAN_STARTED", "Starting AH price scan (%d items)."), n))
     self:ScanNext()
 end
 
@@ -366,10 +559,14 @@ local function SavePrice(itemID, unitPrice)
         g.ahPrices = {}
     end
     g.ahPrices[itemID] = { buyout = unitPrice, updatedAt = time() }
+    --- Loot History totals/session lines multiply stack sizes by **latest** unit price; notify UI after each commodity/item result.
+    if ArtisanNexus and ArtisanNexus.SendMessage then
+        ArtisanNexus:SendMessage(E.AH_PRICES_UPDATED)
+    end
 end
 
 local function ScheduleScanStep()
-    After(SCAN_STEP_SEC, function() AHPriceService:ScanNext() end)
+    After(AHPriceService._currentStepSec or SCAN_STEP_SEC, function() AHPriceService:ScanNext() end)
 end
 
 --- Consume this query id once; duplicate events or late timeouts are ignored.
@@ -400,6 +597,11 @@ local function OnCommodityResults(itemID, qid)
             SavePrice(itemID, result.unitPrice)
         end
     end
+    -- Successful round → cool the adaptive backoff back down.
+    AHPriceService._consecutiveTimeouts = 0
+    if AHPriceService._currentStepSec > SCAN_STEP_SEC then
+        AHPriceService._currentStepSec = math.max(SCAN_STEP_SEC, AHPriceService._currentStepSec * 0.85)
+    end
     ScheduleScanStep()
 end
 
@@ -414,8 +616,10 @@ local function OnItemSearchResults(itemKey, qid)
     if itemKey.itemID ~= AHPriceService._currentItemID then
         return
     end
+    --- Commodity items sometimes deliver `ITEM_SEARCH_RESULTS_UPDATED` before or without a separate commodity callback; process here or the queue stalls.
     local okComm, numComm = pcall(C_AuctionHouse.GetNumCommoditySearchResults, itemKey.itemID)
     if okComm and numComm and numComm > 0 then
+        OnCommodityResults(itemKey.itemID, qid)
         return
     end
     if not TryConsumeQuery(qid) then
@@ -437,6 +641,11 @@ local function OnItemSearchResults(itemKey, qid)
             SavePrice(itemKey.itemID, best)
         end
     end
+    -- Successful round → cool the adaptive backoff back down.
+    AHPriceService._consecutiveTimeouts = 0
+    if AHPriceService._currentStepSec > SCAN_STEP_SEC then
+        AHPriceService._currentStepSec = math.max(SCAN_STEP_SEC, AHPriceService._currentStepSec * 0.85)
+    end
     ScheduleScanStep()
 end
 
@@ -444,24 +653,91 @@ local function TryCreateAHButton()
     if AHPriceService._ahButtonCreated then return end
     local parent = _G.AuctionHouseFrame
     if not parent then return end
-    local btn = CreateFrame("Button", "ArtisanNexusAHSyncBtn", parent, "UIPanelButtonTemplate")
+    local btn = CreateFrame("Button", "ArtisanNexusAHSyncBtn", parent, "BackdropTemplate")
     if not btn then return end
-    btn:SetSize(140, 26)
+    btn:SetSize(176, 28)
     ApplyAHSyncButtonAnchor(btn, parent)
-    btn:SetText(L("AH_SYNC_PRICES", "Sync AH Prices"))
     btn:SetFrameStrata("HIGH")
     btn:SetFrameLevel(parent:GetFrameLevel() + 50)
     btn:EnableMouse(true)
-    btn:RegisterForClicks("LeftButtonUp")
-    btn:SetScript("OnClick", function()
-        AHPriceService:StartScan(true, true)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetHitRectInsets(0, 0, 0, 0)
+
+    local icon = btn:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(14, 14)
+    icon:SetPoint("LEFT", btn, "LEFT", 8, 0)
+    icon:SetTexture("Interface\\Icons\\INV_Misc_Coin_02")
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    btn._icon = icon
+
+    local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    text:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+    text:SetPoint("RIGHT", btn, "RIGHT", -8, 0)
+    text:SetJustifyH("CENTER")
+    text:SetWordWrap(false)
+    btn._label = text
+
+    btn:SetScript("OnClick", function(self, mouseButton)
+        if mouseButton == "RightButton" then
+            AHPriceService:ShowContextMenu(self)
+            return
+        end
+        if AHPriceService._paused then
+            AHPriceService:Resume()
+        elseif AHPriceService._scanning then
+            AHPriceService:Pause()
+        else
+            -- Default left-click: incremental scan that respects the per-item
+            -- TTL. Right-click menu offers "Force full scan" for a clean rescan.
+            AHPriceService:StartScan(false, true)
+        end
     end)
+    btn:SetScript("OnEnter", function(self)
+        self._isHover = true
+        ApplyAHButtonStyle(self, true)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L("AH_SYNC_PRICES", "Sync AH Prices"), 1, 1, 1)
+        local stats = AHPriceService:GetCacheStats()
+        local now = time()
+        local lastAge = (stats.newest > 0) and (now - stats.newest) or nil
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddDoubleLine("Cached items", string.format("%d", stats.total), 0.7,0.7,0.7, 1,1,1)
+        GameTooltip:AddDoubleLine("Fresh / stale", string.format("|cff44ff44%d|r / |cffd4af37%d|r", stats.fresh, stats.stale), 0.7,0.7,0.7, 1,1,1)
+        if lastAge then
+            GameTooltip:AddDoubleLine("Last update", FormatRemaining(lastAge) .. " ago", 0.7,0.7,0.7, 1,1,1)
+        end
+        if AHPriceService._scanning then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("|cffaaaaaaLeft-click: pause|r")
+            GameTooltip:AddLine("|cffaaaaaaRight-click: menu|r")
+        elseif AHPriceService._paused then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(string.format("|cffffd700Paused %d/%d — left-click to resume|r",
+                AHPriceService._scannedItems, AHPriceService._totalItems))
+            GameTooltip:AddLine("|cffaaaaaaRight-click: menu|r")
+        else
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("|cffaaaaaaLeft-click: refresh stale items|r")
+            GameTooltip:AddLine("|cffaaaaaaRight-click: menu (full / quick / clear)|r")
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function(self)
+        self._isHover = false
+        ApplyAHButtonStyle(self, false)
+        GameTooltip:Hide()
+    end)
+    ApplyAHButtonStyle(btn, false)
+    UpdateAHButtonText()
     AHPriceService._ahButtonCreated = true
     AHPriceService._ahButton = btn
+    ScheduleAHSyncAnchorRefresh()
 end
 
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("AUCTION_HOUSE_SHOW")
+eventFrame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("COMMODITY_SEARCH_RESULTS_UPDATED")
 eventFrame:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
@@ -476,6 +752,7 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1, ...)
                     TryCreateAHButton()
                     if AHPriceService._ahButton then
                         ApplyAHSyncButtonAnchor(AHPriceService._ahButton, af)
+                        ScheduleAHSyncAnchorRefresh()
                     end
                 end)
             end
@@ -487,8 +764,26 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1, ...)
         local af = _G.AuctionHouseFrame
         if AHPriceService._ahButton and af then
             ApplyAHSyncButtonAnchor(AHPriceService._ahButton, af)
+            ScheduleAHSyncAnchorRefresh()
         end
-        -- Manual trigger only: user starts scans via "Sync AH Prices" button.
+        -- Auto-resume any paused scan from a previous AH session so the user
+        -- doesn't have to click again. Skip if AH was reopened on a different toon.
+        if AHPriceService._paused and #AHPriceService._queue > 0 then
+            After(0.5, function()
+                if AHIsOpen() and AHPriceService._paused then
+                    Notify(string.format(L("AH_SCAN_AUTO_RESUME", "Resuming AH scan (%d items left)."),
+                        #AHPriceService._queue))
+                    AHPriceService:Resume()
+                end
+            end)
+        end
+    elseif event == "AUCTION_HOUSE_CLOSED" then
+        -- Don't drop the queue; ScanNext will detect AHIsOpen()==false and pause.
+        if AHPriceService._scanning then
+            AHPriceService._paused = (#AHPriceService._queue > 0)
+            AHPriceService._scanning = false
+            UpdateAHButtonText()
+        end
     elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
         local itemID = arg1
         local qid = AHPriceService._expectQueryId
