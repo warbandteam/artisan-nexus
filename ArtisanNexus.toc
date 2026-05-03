@@ -67,5 +67,6 @@ Modules\LootWindowBridge.lua
 Modules\UI\LootHistoryUI.lua
 Modules\UI\GatheringOverloadIndicator.lua
 Modules\UI\RecipeMatcherUI.lua
+Modules\UI\ArtisanHubUI.lua
 Config.lua
 Modules\MinimapButton.lua

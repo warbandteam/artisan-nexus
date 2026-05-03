@@ -34,10 +34,15 @@ local defaults = {
             fishing = true,
             gathering = true,
         },
-        --- Loot history window size (nil = theme defaults on first open).
+        --- Loot history window size + anchor (nil = theme defaults / first open centered).
         lootHistoryFrame = {
             width = nil,
             height = nil,
+            point = nil,
+            relativePoint = nil,
+            relativeTo = nil,
+            x = nil,
+            y = nil,
         },
         --- Session loot window + loot-driven UI (catalog, auto-open). Slash /an loot still works when off.
         lootHistoryEnabled = true,
@@ -47,6 +52,8 @@ local defaults = {
         lootHistoryActiveTab = nil,
         --- World indicator when hovering overloaded herb/ore nodes.
         overloadNodeIndicatorEnabled = true,
+        --- Floating herb/mining overload CD tracker (requires Herbalism and/or Mining).
+        overloadTrackerHudEnabled = true,
         --- Movable overload tracker frame anchor.
         overloadTrackerFrame = {
             point = "TOP",
@@ -59,6 +66,10 @@ local defaults = {
         --- Warn when bag free slots are low while gathering.
         bagPressureGuardEnabled = true,
         bagPressureThreshold = 8,
+        --- LibDBIcon: hide, minimapPos (angle) persisted by the library inside this table.
+        minimap = {
+            hide = false,
+        },
     },
     global = {
         dataVersion = ns.Constants.DB_VERSION,
@@ -74,6 +85,9 @@ local defaults = {
         overallGatheringEvents = {},
         --- AH unit prices (copper). [itemID] = { buyout = number, updatedAt = unix }
         ahPrices = {},
+        --- Midnight recipe schematics harvested from C_TradeSkillUI.
+        --- [spellID] = { name, profession, reagents = { {itemID, qty, slotType}, ... }, updated }
+        recipeSchematics = {},
     },
     char = {},
 }
@@ -118,6 +132,8 @@ function ArtisanNexus:OnInitialize()
         ns.Config.RegisterOptions(self)
     end
 
+    self:InitializeMinimapButton()
+
     self:RegisterMessage(E.FISHING_CHANNEL_STARTED, "OnMessageFishingChannelStarted")
     self:RegisterMessage(E.FISHING_CHANNEL_STOPPED, "OnMessageFishingChannelStopped")
 
@@ -129,6 +145,9 @@ function ArtisanNexus:OnInitialize()
     end
     if ns.GatheringRouteOverlay and ns.GatheringRouteOverlay.Init then
         ns.GatheringRouteOverlay:Init()
+    end
+    if ns.GatheringOverloadActionButton and ns.GatheringOverloadActionButton.Init then
+        ns.GatheringOverloadActionButton:Init()
     end
 end
 
@@ -168,6 +187,9 @@ function ArtisanNexus:OnEnable()
     if self.db.profile.enabled and ns.BagPressureGuard then
         ns.BagPressureGuard:Enable()
     end
+    if self.db.profile.enabled and ns.RecipeService then
+        ns.RecipeService:Enable()
+    end
     self:SendMessage(E.LOADING_COMPLETE)
 
     if self.db.profile.showLoginChat then
@@ -190,6 +212,9 @@ function ArtisanNexus:OnMessageFishingChannelStopped(_, spellID)
 end
 
 function ArtisanNexus:OnDisable()
+    if ns.RecipeService then
+        ns.RecipeService:Disable()
+    end
     if ns.GatheringLootService then
         ns.GatheringLootService:Disable()
     end
@@ -225,6 +250,10 @@ function ArtisanNexus:SlashCommand(input)
     if input == "help" or input == "?" or input == "" then
         self:Print((L and L["SLASH_HELP_HEADER"]) or "Commands:")
         self:Print((L and L["SLASH_HELP_LINE"]) or "/an debug, /an version")
+        return
+    end
+    if input == "minimap" or input == "minimapbutton" or input == "icon" then
+        self:ToggleMinimapButton()
         return
     end
     if input == "fish" then
@@ -269,11 +298,33 @@ function ArtisanNexus:SlashCommand(input)
         end
         return
     end
+    if input == "recipe" or input == "recipes" or input == "craft" or input == "matcher" then
+        if ns.RecipeMatcherUI then
+            ns.RecipeMatcherUI:Toggle()
+        end
+        return
+    end
+    if input == "scanrecipes" or input == "harvest" then
+        if ns.RecipeService then
+            local n = ns.RecipeService:HarvestOpenProfession()
+            self:Print(string.format("Harvested %d recipe schematics.", n))
+        end
+        return
+    end
     if input == "ah" or input == "ahprice" or input == "ahscan" then
         if ns.AHPriceService and ns.AHPriceService.StartScan then
-            ns.AHPriceService:StartScan(true)
+            --- force + full catalog (same as AH window “Sync AH Prices” button)
+            ns.AHPriceService:StartScan(true, true)
         else
             self:Print("AH price scan is unavailable.")
+        end
+        return
+    end
+    if input == "hub" or input == "profit" or input == "profitability" or input == "shop" or input == "shopping" or input == "queue" then
+        if ns.ArtisanHubUI then
+            ns.ArtisanHubUI:Toggle()
+        else
+            self:Print("Artisan Hub is unavailable.")
         end
         return
     end
