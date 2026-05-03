@@ -1,18 +1,31 @@
 ## Interface: 120001
 ## Title: Artisan Nexus
-## Notes: Professions and crafting QoL — aligned with Warband Nexus architecture (Midnight 12.0.1)
+## Notes: Professions QoL for WoW Midnight — session loot (fishing & gathering), AH prices, overload hints, route heatmap, minimap launcher.
 ## Author: Artisan Nexus
 ## Version: 0.4.8
-## IconTexture: Interface\Icons\Trade_Fishing
+## IconTexture: Interface\AddOns\ArtisanNexus\Media\anlogo.tga
 ## SavedVariables: ArtisanNexusDB GatherLogDB
 ## OptionalDeps: Ace3, LibSharedMedia-3.0
 ## X-Category: Professions
+## X-License: All Rights Reserved
 
 # Libraries
 embeds.xml
 
-# Localization
+# Bindings.xml is auto-loaded by Blizzard from the addon root — do NOT list it here.
+
+# Localization (enUS first as default locale for AceLocale)
 Locales\enUS.lua
+Locales\deDE.lua
+Locales\esES.lua
+Locales\esMX.lua
+Locales\frFR.lua
+Locales\itIT.lua
+Locales\koKR.lua
+Locales\ptBR.lua
+Locales\ruRU.lua
+Locales\zhCN.lua
+Locales\zhTW.lua
 
 # Core (Constants and Migration before Core.lua — DB defaults use ns.Constants)
 Modules\Constants.lua
@@ -20,6 +33,7 @@ Modules\DebugPrint.lua
 Modules\Utilities.lua
 Modules\MigrationService.lua
 Core.lua
+Modules\ProfessionLocale.lua
 Modules\ErrorHandler.lua
 
 Modules\UI\ArtisanTheme.lua
@@ -28,9 +42,16 @@ Modules\UI\ProfessionQualityAtlas.lua
 Modules\Data\GatheringCatalog.lua
 Modules\Data\GatheringNodeOverloadRegistry.lua
 Modules\Data\FishingCatalog.lua
+Modules\Data\MidnightRecipeCatalog.lua
 Modules\SessionLootService.lua
 Modules\AHPriceService.lua
+Modules\PriceHistoryService.lua
 Modules\BagPressureGuard.lua
+Modules\RecipeService.lua
+Modules\ProfitabilityService.lua
+Modules\ShoppingListService.lua
+Modules\CraftingQueueService.lua
+Modules\PostingHelperService.lua
 
 Modules\Fishing\FishingSpellData.lua
 Modules\Fishing\FishingService.lua
@@ -40,8 +61,11 @@ Modules\Gathering\GatheringSpellData.lua
 Modules\Gathering\GatheringLootService.lua
 Modules\Gathering\GatheringOverloadService.lua
 Modules\Gathering\GatheringRouteOverlay.lua
+Modules\Gathering\GatheringOverloadActionButton.lua
 Modules\GatherLog.lua
 Modules\LootWindowBridge.lua
 Modules\UI\LootHistoryUI.lua
 Modules\UI\GatheringOverloadIndicator.lua
+Modules\UI\RecipeMatcherUI.lua
 Config.lua
+Modules\MinimapButton.lua

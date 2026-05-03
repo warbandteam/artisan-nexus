@@ -559,6 +559,10 @@ local function SavePrice(itemID, unitPrice)
         g.ahPrices = {}
     end
     g.ahPrices[itemID] = { buyout = unitPrice, updatedAt = time() }
+    -- Append to rolling history (cheap; PriceHistoryService dedups within 5min).
+    if ns.PriceHistoryService and ns.PriceHistoryService.Push then
+        ns.PriceHistoryService:Push(itemID, unitPrice)
+    end
     --- Loot History totals/session lines multiply stack sizes by **latest** unit price; notify UI after each commodity/item result.
     if ArtisanNexus and ArtisanNexus.SendMessage then
         ArtisanNexus:SendMessage(E.AH_PRICES_UPDATED)
