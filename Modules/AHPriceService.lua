@@ -329,31 +329,43 @@ local function FormatRemaining(seconds)
     return string.format("%dh", math.floor(seconds / 3600))
 end
 
+--- Update the visual state of the icon-only button: progress fill bar
+--- when scanning, "II" overlay when paused, otherwise plain coin.
 local function UpdateAHButtonText()
     local btn = AHPriceService._ahButton
     if not btn then return end
-    local text
-    if AHPriceService._paused then
-        text = string.format("Paused %d/%d", AHPriceService._scannedItems, AHPriceService._totalItems)
-    elseif AHPriceService._scanning then
-        local done = AHPriceService._scannedItems
-        local total = AHPriceService._totalItems
-        local elapsed = (GetTime and GetTime() or 0) - (AHPriceService._scanStartedAt or 0)
-        local rate = (done > 0 and elapsed > 0) and (done / elapsed) or 0
-        local remaining = #AHPriceService._queue
-        if rate > 0 and remaining > 0 then
-            local eta = remaining / rate
-            text = string.format("Scanning %d/%d · %s", done, total, FormatRemaining(eta))
-        else
-            text = string.format("Scanning %d/%d", done, total)
+
+    if AHPriceService._scanning then
+        -- Show the progress bar across the bottom of the icon
+        if btn._progressBg then btn._progressBg:Show() end
+        if btn._progressFill then
+            btn._progressFill:Show()
+            local total = AHPriceService._totalItems
+            local done = AHPriceService._scannedItems
+            local pct = (total > 0) and math.min(1, done / total) or 0
+            local fullW = btn:GetWidth() - 2
+            btn._progressFill:SetWidth(math.max(1, fullW * pct))
         end
+        if btn._pauseGlyph then btn._pauseGlyph:Hide() end
+        if btn._icon then btn._icon:SetDesaturated(false) end
+    elseif AHPriceService._paused then
+        -- Pause overlay; keep progress bar visible (shows where we stopped)
+        if btn._progressBg then btn._progressBg:Show() end
+        if btn._progressFill then
+            btn._progressFill:Show()
+            local total = AHPriceService._totalItems
+            local done = AHPriceService._scannedItems
+            local pct = (total > 0) and math.min(1, done / total) or 0
+            local fullW = btn:GetWidth() - 2
+            btn._progressFill:SetWidth(math.max(1, fullW * pct))
+        end
+        if btn._pauseGlyph then btn._pauseGlyph:Show() end
+        if btn._icon then btn._icon:SetDesaturated(true) end
     else
-        text = L("AH_SYNC_PRICES", "Sync AH Prices")
-    end
-    if btn._label then
-        btn._label:SetText(text)
-    else
-        btn:SetText(text)
+        if btn._progressBg then btn._progressBg:Hide() end
+        if btn._progressFill then btn._progressFill:Hide() end
+        if btn._pauseGlyph then btn._pauseGlyph:Hide() end
+        if btn._icon then btn._icon:SetDesaturated(false) end
     end
     ApplyAHButtonStyle(btn, btn._isHover == true)
 end
@@ -653,13 +665,18 @@ local function OnItemSearchResults(itemKey, qid)
     ScheduleScanStep()
 end
 
+--- Compact, single-purpose icon button. Sits flush with the AH portrait;
+--- no text label, no progress text bleed into the chrome. Visual state:
+---   * idle      → coin icon, soft border
+---   * scanning  → spinning highlight + progress fill bar across the bottom
+---   * paused    → amber border + "II" overlay
 local function TryCreateAHButton()
     if AHPriceService._ahButtonCreated then return end
     local parent = _G.AuctionHouseFrame
     if not parent then return end
     local btn = CreateFrame("Button", "ArtisanNexusAHSyncBtn", parent, "BackdropTemplate")
     if not btn then return end
-    btn:SetSize(176, 28)
+    btn:SetSize(22, 22)
     ApplyAHSyncButtonAnchor(btn, parent)
     btn:SetFrameStrata("HIGH")
     btn:SetFrameLevel(parent:GetFrameLevel() + 50)
@@ -668,31 +685,51 @@ local function TryCreateAHButton()
     btn:SetHitRectInsets(0, 0, 0, 0)
 
     local icon = btn:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(14, 14)
-    icon:SetPoint("LEFT", btn, "LEFT", 8, 0)
+    icon:SetPoint("TOPLEFT", 1, -1)
+    icon:SetPoint("BOTTOMRIGHT", -1, 1)
     icon:SetTexture("Interface\\Icons\\INV_Misc_Coin_02")
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     btn._icon = icon
 
-    local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    text:SetPoint("LEFT", icon, "RIGHT", 6, 0)
-    text:SetPoint("RIGHT", btn, "RIGHT", -8, 0)
-    text:SetJustifyH("CENTER")
-    text:SetWordWrap(false)
-    btn._label = text
+    -- Pause overlay glyph (only shown when paused)
+    local pauseGlyph = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    pauseGlyph:SetPoint("CENTER")
+    pauseGlyph:SetText("|cffffd700II|r")
+    pauseGlyph:Hide()
+    btn._pauseGlyph = pauseGlyph
+
+    -- Progress fill bar (bottom edge), 0..100% width
+    local progressBg = btn:CreateTexture(nil, "OVERLAY")
+    progressBg:SetPoint("BOTTOMLEFT", 1, 1)
+    progressBg:SetPoint("BOTTOMRIGHT", -1, 1)
+    progressBg:SetHeight(2)
+    progressBg:SetColorTexture(0, 0, 0, 0.6)
+    progressBg:Hide()
+    btn._progressBg = progressBg
+
+    local progressFill = btn:CreateTexture(nil, "OVERLAY")
+    progressFill:SetPoint("BOTTOMLEFT", 1, 1)
+    progressFill:SetHeight(2)
+    progressFill:SetColorTexture(0.85, 0.65, 1.0, 1)
+    progressFill:Hide()
+    btn._progressFill = progressFill
+
+    btn._label = nil  -- legacy field; no in-chrome label any more
 
     btn:SetScript("OnClick", function(self, mouseButton)
         if mouseButton == "RightButton" then
             AHPriceService:ShowContextMenu(self)
             return
         end
+        -- Single coherent left-click action:
+        --   idle      → start incremental scan (TTL-aware; "up to date" toast if nothing stale)
+        --   scanning  → pause
+        --   paused    → resume
         if AHPriceService._paused then
             AHPriceService:Resume()
         elseif AHPriceService._scanning then
             AHPriceService:Pause()
         else
-            -- Default left-click: incremental scan that respects the per-item
-            -- TTL. Right-click menu offers "Force full scan" for a clean rescan.
             AHPriceService:StartScan(false, true)
         end
     end)
@@ -701,29 +738,36 @@ local function TryCreateAHButton()
         ApplyAHButtonStyle(self, true)
         GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
         GameTooltip:ClearLines()
-        GameTooltip:AddLine(L("AH_SYNC_PRICES", "Sync AH Prices"), 1, 1, 1)
+        GameTooltip:AddLine(L("AH_SYNC_PRICES", "AH price sync"), 1, 1, 1)
         local stats = AHPriceService:GetCacheStats()
-        local now = time()
-        local lastAge = (stats.newest > 0) and (now - stats.newest) or nil
+        local lastAge = (stats.newest > 0) and (time() - stats.newest) or nil
         GameTooltip:AddLine(" ")
-        GameTooltip:AddDoubleLine("Cached items", string.format("%d", stats.total), 0.7,0.7,0.7, 1,1,1)
-        GameTooltip:AddDoubleLine("Fresh / stale", string.format("|cff44ff44%d|r / |cffd4af37%d|r", stats.fresh, stats.stale), 0.7,0.7,0.7, 1,1,1)
-        if lastAge then
-            GameTooltip:AddDoubleLine("Last update", FormatRemaining(lastAge) .. " ago", 0.7,0.7,0.7, 1,1,1)
-        end
         if AHPriceService._scanning then
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("|cffaaaaaaLeft-click: pause|r")
-            GameTooltip:AddLine("|cffaaaaaaRight-click: menu|r")
+            local pct = AHPriceService._totalItems > 0
+                and math.floor(AHPriceService._scannedItems / AHPriceService._totalItems * 100 + 0.5) or 0
+            GameTooltip:AddDoubleLine("Scanning",
+                string.format("%d/%d  (%d%%)", AHPriceService._scannedItems, AHPriceService._totalItems, pct),
+                0.7,0.7,0.7, 1,1,1)
         elseif AHPriceService._paused then
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine(string.format("|cffffd700Paused %d/%d — left-click to resume|r",
-                AHPriceService._scannedItems, AHPriceService._totalItems))
-            GameTooltip:AddLine("|cffaaaaaaRight-click: menu|r")
+            GameTooltip:AddDoubleLine("Paused",
+                string.format("%d/%d", AHPriceService._scannedItems, AHPriceService._totalItems),
+                1,0.84,0, 1,1,1)
+        end
+        GameTooltip:AddDoubleLine("Cached", string.format("%d items", stats.total), 0.7,0.7,0.7, 1,1,1)
+        GameTooltip:AddDoubleLine("Fresh / stale",
+            string.format("|cff44ff44%d|r / |cffd4af37%d|r", stats.fresh, stats.stale),
+            0.7,0.7,0.7, 1,1,1)
+        if lastAge then
+            GameTooltip:AddDoubleLine("Last update", FormatRemaining(lastAge) .. " ago",
+                0.7,0.7,0.7, 1,1,1)
+        end
+        GameTooltip:AddLine(" ")
+        if AHPriceService._scanning then
+            GameTooltip:AddLine("|cffaaaaaaLeft-click: pause   ·   Right-click: menu|r")
+        elseif AHPriceService._paused then
+            GameTooltip:AddLine("|cffaaaaaaLeft-click: resume   ·   Right-click: menu|r")
         else
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("|cffaaaaaaLeft-click: refresh stale items|r")
-            GameTooltip:AddLine("|cffaaaaaaRight-click: menu (full / quick / clear)|r")
+            GameTooltip:AddLine("|cffaaaaaaLeft-click: refresh stale   ·   Right-click: full / quick / clear|r")
         end
         GameTooltip:Show()
     end)
