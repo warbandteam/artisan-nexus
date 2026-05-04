@@ -273,8 +273,15 @@ local function RenderProfitability()
             GameTooltip:AddLine("|cffaaaaaaLeft-click: add to crafting queue|r")
             GameTooltip:AddLine("|cffaaaaaaRight-click: add to shopping list|r")
             GameTooltip:Show()
+            -- Price history sparkline for the output item (when available).
+            if r.outputItem and ns.PriceHistoryUI then
+                ns.PriceHistoryUI:ShowPopup(r.outputItem, self, "TOPLEFT")
+            end
         end)
-        row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+            if ns.PriceHistoryUI then ns.PriceHistoryUI:HidePopup() end
+        end)
     end
 
     FRAME.status:SetText(string.format("|cff66ff66%d profitable|r · |cffd4af37%d break-even|r · |cffff6666%d losses|r · |cff888888%d no data|r",
