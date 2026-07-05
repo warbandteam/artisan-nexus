@@ -204,6 +204,25 @@ function ns.UI_GetClassicDialogInset()
     return (ns.UI_LAYOUT and ns.UI_LAYOUT.CLASSIC_DIALOG_INSET) or 8
 end
 
+--- Horizontal inset for classic shell body rows and title strip (matches SHELL_PAD).
+function ns.UI_GetClassicShellHorizontalInset()
+    local layout = ns.UI_LAYOUT or {}
+    return layout.SHELL_PAD or layout.BASE_INDENT or 12
+end
+
+--- Wing width for UI-DialogBox-Header caps; shrinks on narrow windows (overload tracker).
+function ns.UI_ComputeClassicTitleWingWidth(parent, hInset)
+    local layout = ns.UI_LAYOUT or {}
+    local wingDefault = layout.CLASSIC_SHELL_TITLE_WING or 28
+    local pw = (parent and parent.GetWidth and parent:GetWidth()) or 600
+    local minCenter = layout.CLASSIC_SHELL_TITLE_MIN_CENTER or 96
+    local maxWing = math.floor((pw - 2 * hInset - minCenter) * 0.5)
+    if maxWing < 14 then
+        maxWing = 14
+    end
+    return math.min(wingDefault, maxWing)
+end
+
 
 
 function ns.UI_ApplyClassicDialogBackdrop(frame)
@@ -462,8 +481,12 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
     local layout = ns.UI_LAYOUT or {}
     local topY = layout.CLASSIC_TITLE_TOP_OFFSET or 12
     local stripH = layout.CLASSIC_SHELL_TITLE_STRIP_HEIGHT or 40
-    local wingInset = layout.CLASSIC_DIALOG_INSET or 8
+    local hInset = (ns.UI_GetClassicShellHorizontalInset and ns.UI_GetClassicShellHorizontalInset())
+        or layout.SHELL_PAD or 12
+    local wingW = (ns.UI_ComputeClassicTitleWingWidth and ns.UI_ComputeClassicTitleWingWidth(parent, hInset))
+        or (layout.CLASSIC_SHELL_TITLE_WING or 28)
     local contentTop = ns.UI_GetClassicShellContentTop()
+    local padV = 4
 
     if headerBar.SetBackdrop then
         headerBar:SetBackdrop(nil)
@@ -474,35 +497,114 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
     LayoutClassicDialogTitleTextures(parent, {
         topOffset = topY,
         height = stripH,
-        wingWidth = 56,
-        inset = wingInset,
+        wingWidth = wingW,
+        inset = hInset,
     })
+
+    if not parent._anClassicShellLayoutHooked and parent.HookScript then
+        parent._anClassicShellLayoutHooked = true
+        parent._anShellHeaderBar = headerBar
+        parent:HookScript("OnSizeChanged", function()
+            local hb = parent._anShellHeaderBar or parent.headerBar
+            if hb and ns.UI_LayoutClassicShellHeader then
+                ns.UI_LayoutClassicShellHeader(hb)
+            end
+        end)
+    elseif parent and not parent._anShellHeaderBar then
+        parent._anShellHeaderBar = headerBar
+    end
 
     headerBar:ClearAllPoints()
     headerBar:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
     headerBar:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, 0)
     headerBar:SetHeight(contentTop)
 
+    local titleCenter = parent._anClassicTitleBgC or parent
+    local titleWingL = parent._anClassicTitleBgL or parent
+    local titleWingR = parent._anClassicTitleBgR or parent
+
+    --- Square controls vertically centered in the title strip via TOP+BOTTOM on center bg.
+    local function FitSquareControlInStrip(widget, point, rel, relPoint, x)
+        if not widget or not titleCenter then
+            return
+        end
+        widget:ClearAllPoints()
+        local sz = math.max(18, math.min(26, stripH - padV * 2))
+        if point and rel then
+            widget:SetPoint(point, rel, relPoint or point, x or 0, 0)
+        end
+        widget:SetPoint("TOP", titleCenter, "TOP", 0, -padV)
+        widget:SetPoint("BOTTOM", titleCenter, "BOTTOM", 0, padV)
+        if widget.SetWidth then
+            widget:SetWidth(sz)
+        end
+    end
+
     if headerBar._anShellLogo then
+        local logoSz = math.max(18, math.min(24, stripH - padV * 2))
         headerBar._anShellLogo:ClearAllPoints()
-        headerBar._anShellLogo:SetSize(24, 24)
-        headerBar._anShellLogo:SetPoint("LEFT", parent._anClassicTitleBgL, "LEFT", 16, 0)
+        headerBar._anShellLogo:SetSize(logoSz, logoSz)
+        headerBar._anShellLogo:SetPoint("CENTER", titleWingL, "CENTER", 8, 0)
         headerBar._anShellLogo:Show()
     end
+
+    local rightClip = headerBar._anShellClose
+    if rightClip then
+        FitSquareControlInStrip(rightClip, "RIGHT", titleWingR, "RIGHT", -5)
+    end
+    local settingsBtn = headerBar._anShellSettings
+    if settingsBtn then
+        if rightClip then
+            FitSquareControlInStrip(settingsBtn, "RIGHT", rightClip, "LEFT", -4)
+        else
+            FitSquareControlInStrip(settingsBtn, "RIGHT", titleWingR, "RIGHT", -30)
+        end
+        rightClip = settingsBtn
+    end
+    local utilities = headerBar._anShellUtilities
+    if utilities then
+        for i = 1, #utilities do
+            local btn = utilities[i]
+            if btn and btn.ClearAllPoints then
+                if rightClip then
+                    FitSquareControlInStrip(btn, "RIGHT", rightClip, "LEFT", -4)
+                else
+                    FitSquareControlInStrip(btn, "RIGHT", titleWingR, "RIGHT", -6)
+                end
+                rightClip = btn
+            end
+        end
+    end
+    local extras = headerBar._anShellExtraRight
+    if extras then
+        for i = 1, #extras do
+            local btn = extras[i]
+            if btn and btn.ClearAllPoints then
+                if rightClip then
+                    FitSquareControlInStrip(btn, "RIGHT", rightClip, "LEFT", -4)
+                else
+                    FitSquareControlInStrip(btn, "RIGHT", titleWingR, "RIGHT", -6)
+                end
+                rightClip = btn
+            end
+        end
+    end
+    headerBar._anShellRightClip = rightClip
+
     if headerBar._anShellTitle then
         headerBar._anShellTitle:ClearAllPoints()
         if headerBar._anShellLogo then
             headerBar._anShellTitle:SetPoint("LEFT", headerBar._anShellLogo, "RIGHT", 6, 0)
-            headerBar._anShellTitle:SetPoint("TOP", parent._anClassicTitleBgC, "TOP", 0, -14)
         else
-            headerBar._anShellTitle:SetPoint("LEFT", parent._anClassicTitleBgL, "LEFT", 56, 0)
-            headerBar._anShellTitle:SetPoint("TOP", parent._anClassicTitleBgC, "TOP", 0, -14)
+            headerBar._anShellTitle:SetPoint("LEFT", titleWingL, "LEFT", 8, 0)
+        end
+        headerBar._anShellTitle:SetPoint("TOP", titleCenter, "TOP", 0, -14)
+        if rightClip then
+            headerBar._anShellTitle:SetPoint("RIGHT", rightClip, "LEFT", -8, 0)
+        else
+            headerBar._anShellTitle:SetPoint("RIGHT", titleWingR, "LEFT", -8, 0)
         end
         headerBar._anShellTitle:SetTextColor(1, 0.82, 0, 1)
-    end
-    if headerBar._anShellClose then
-        headerBar._anShellClose:ClearAllPoints()
-        headerBar._anShellClose:SetPoint("TOPRIGHT", parent._anClassicTitleBgR or parent, "TOPRIGHT", -2, -6)
     end
 end
 

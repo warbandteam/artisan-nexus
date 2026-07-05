@@ -6,6 +6,27 @@ local ADDON_NAME, ns = ...
 
 local ProfessionSidecarUI = { frame = nil }
 
+local function SafeL(key, fallback)
+    if ns.SafeLocaleString then
+        local s = ns.SafeLocaleString(key, fallback)
+        if s and s ~= "" then
+            return s
+        end
+    end
+    return fallback
+end
+
+local function SafeUiLine(val, fallback)
+    fallback = fallback or ""
+    if ns.CoerceUiString then
+        return ns.CoerceUiString(val, fallback)
+    end
+    if type(val) ~= "string" or val == "" or (issecretvalue and issecretvalue(val)) then
+        return fallback
+    end
+    return val
+end
+
 local function Hidden()
     local p = ns.db and ns.db.profile and ns.db.profile.professionSidecar
     return p and p.hidden == true
@@ -35,8 +56,8 @@ local function Paint()
     local lines = {}
     local snap = ns.ProfessionSnapshotService
     if snap and snap.GetChipText then
-        local chip = snap:GetChipText()
-        if chip and chip ~= "" then
+        local chip = SafeUiLine(snap:GetChipText(), "")
+        if chip ~= "" then
             lines[#lines + 1] = chip
         end
     end
@@ -44,7 +65,9 @@ local function Paint()
     if qs and qs.GetSummary then
         local sum = qs:GetSummary()
         if sum and sum.recipes and sum.recipes > 0 then
-            lines[#lines + 1] = string.format("Queue %d/%d", sum.completed or 0, sum.total or 0)
+            lines[#lines + 1] = string.format(
+                SafeL("SIDECAR_QUEUE_FMT", "Queue %d/%d"),
+                sum.completed or 0, sum.total or 0)
         end
     end
     local p = ns.db and ns.db.profile
@@ -52,13 +75,22 @@ local function Paint()
         local pes = ns.ProfessionEquipmentService
         local hints = pes and pes.GetHints and pes:GetHints()
         if type(hints) == "table" and hints[1] and hints[1].message then
-            lines[#lines + 1] = hints[1].message
+            local msg = SafeUiLine(hints[1].message, "")
+            if msg ~= "" then
+                lines[#lines + 1] = msg
+            end
         end
     end
     if #lines < 1 then
-        lines[#lines + 1] = (ns.L and ns.L["SIDECAR_EMPTY"]) or "Open a profession to see queue info."
+        lines[#lines + 1] = SafeL("SIDECAR_EMPTY", "Open a profession to see queue and concentration info.")
     end
     f.body:SetText(table.concat(lines, "\n"))
+    --- MIN height only — three stacked lines (chip + queue + equipment hint)
+    --- exceed 108px and used to clip silently at the bottom.
+    local layout = ns.UI_LAYOUT or {}
+    local minH = layout.SIDECAR_MIN_HEIGHT or 108
+    local textH = math.ceil(f.body:GetStringHeight() or 0)
+    f:SetHeight(math.max(minH, 26 + textH + 10))
 end
 
 function ProfessionSidecarUI:Ensure()
@@ -84,7 +116,7 @@ function ProfessionSidecarUI:Ensure()
     end
     local title = f:CreateFontString(nil, "OVERLAY", fonts.WINDOW_SECTION or "GameFontHighlightMedium")
     title:SetPoint("TOPLEFT", 8, -6)
-    title:SetText((ns.L and ns.L["SIDECAR_TITLE"]) or "Artisan Nexus")
+    title:SetText(SafeL("SIDECAR_TITLE", "Artisan Nexus"))
     local body = f:CreateFontString(nil, "OVERLAY", fonts.WINDOW_BODY or "GameFontNormal")
     body:SetPoint("TOPLEFT", 8, -26)
     body:SetPoint("BOTTOMRIGHT", -8, 8)
@@ -143,6 +175,9 @@ end
 function ProfessionSidecarUI:ResetForUiMode()
     if self.frame then
         self.frame:Hide()
+        if ns.UI_UnregisterVisuals then
+            ns.UI_UnregisterVisuals(self.frame)
+        end
         self.frame = nil
     end
 end

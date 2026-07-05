@@ -40,12 +40,28 @@ end
 
 local LAYOUT = ns.UI_LAYOUT or {}
 
+--- Skin-branching surface styler: UI_StylePanelInset draws the classic
+--- tooltip-border inset in Classic and pixel chrome in Modern. Bare
+--- UI_ApplyVisuals is a NO-OP in Classic — using it alone shipped this panel
+--- borderless there.
 local function Apply(frame, bg, border)
-    if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(frame, bg, border)
+    if ns.UI_StylePanelInset then
+        ns.UI_StylePanelInset(frame, bg, border)
+    elseif ns.UI_ApplyVisuals then
+        ns.UI_ApplyVisuals(frame, bg, border)
     elseif frame.SetBackdrop then
         frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
         frame:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
     end
+end
+
+--- Semantic hex from the live palette (arrows / bullet markers).
+local function HexRole(text, kind)
+    local hex = ns.UI_GetSemanticHex and ns.UI_GetSemanticHex(kind)
+    if not hex then
+        return text
+    end
+    return "|cff" .. hex .. text .. "|r"
 end
 
 --- Shared money formatter (Modules/Utilities.lua; loads before this file per
@@ -121,16 +137,28 @@ local function Build()
     stats:SetTextColor(tn[1], tn[2], tn[3])
     p._stats = stats
 
-    -- Strategy cycle button
+    -- Strategy cycle button (toolbar factory: native art in Classic,
+    -- themed pixel chrome in Modern)
     local btnH = LAYOUT.POSTING_BUTTON_HEIGHT or 26
-    local stratBtn = CreateFrame("Button", nil, p)
+    local stratBtn = (ns.UI_CreateToolbarButton and ns.UI_CreateToolbarButton(p, btnH))
+        or CreateFrame("Button", nil, p)
     stratBtn:SetSize(148, btnH)
     stratBtn:SetPoint("BOTTOMLEFT", 8, 8)
-    local hov = C().tabHover or { 0.18, 0.14, 0.25, 1 }
-    Apply(stratBtn, { hov[1], hov[2], hov[3], 1 }, { ac[1], ac[2], ac[3], 0.85 })
-    local stratLbl = stratBtn:CreateFontString(nil, "OVERLAY", Font("WINDOW_TOOLBAR"))
-    stratLbl:SetPoint("CENTER")
-    p._stratLbl = stratLbl
+    if ns.UI_StylePanelButton then
+        ns.UI_StylePanelButton(stratBtn)
+    end
+    --- Bound the label inside the 148px button; the strategy names are long
+    --- ("max(undercut, avg)") and used to bleed over the neighbouring button.
+    local stratLbl = stratBtn._lbl or (stratBtn.GetFontString and stratBtn:GetFontString())
+    if stratLbl then
+        stratLbl:ClearAllPoints()
+        stratLbl:SetPoint("LEFT", stratBtn, "LEFT", 4, 0)
+        stratLbl:SetPoint("RIGHT", stratBtn, "RIGHT", -4, 0)
+        stratLbl:SetJustifyH("CENTER")
+        stratLbl:SetWordWrap(false)
+        stratLbl:SetMaxLines(1)
+    end
+    p._stratBtn = stratBtn
     stratBtn:SetScript("OnClick", function()
         local svc = ns.PostingHelperService
         if not svc then return end
@@ -148,17 +176,20 @@ local function Build()
     stratBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     -- Copy-to-chat button (so the player can paste / read the price easily)
-    local copyBtn = CreateFrame("Button", nil, p)
+    local copyBtn = (ns.UI_CreateToolbarButton and ns.UI_CreateToolbarButton(p, btnH))
+        or CreateFrame("Button", nil, p)
     copyBtn:SetSize(104, btnH)
     copyBtn:SetPoint("BOTTOMRIGHT", -8, 8)
     local warnBg, warnBd
     if ns.UI_GetSemanticButtonChrome then
         warnBg, warnBd = ns.UI_GetSemanticButtonChrome("warning")
     end
-    Apply(copyBtn, warnBg or { 0.20, 0.18, 0.10, 1 }, warnBd or { 0.85, 0.65, 0.30, 0.85 })
-    local copyLbl = copyBtn:CreateFontString(nil, "OVERLAY", Font("WINDOW_TOOLBAR"))
-    copyLbl:SetPoint("CENTER")
-    copyLbl:SetText((L and L["POSTING_PRINT_TO_CHAT"]) or "Print to chat")
+    if ns.UI_StylePanelButton then
+        ns.UI_StylePanelButton(copyBtn, { bg = warnBg, border = warnBd })
+    end
+    if ns.UI_SetToolbarButtonText then
+        ns.UI_SetToolbarButtonText(copyBtn, (L and L["POSTING_PRINT_TO_CHAT"]) or "Print to chat")
+    end
     copyBtn:SetScript("OnClick", function()
         if not CURRENT_ITEMID or not ns.PostingHelperService then return end
         local price, reason = ns.PostingHelperService:SuggestPrice(CURRENT_ITEMID)
@@ -187,12 +218,17 @@ function PostingHelperUI:Refresh()
 
     PANEL._priceVal:SetText(FormatCopper(price))
     PANEL._reasonRow:SetText(reason or "")
-    PANEL._stratLbl:SetText(string.format((L and L["POSTING_STRATEGY_LABEL_FMT"]) or "Strategy: %s", StrategyLabel(cfg.strategy)))
+    local stratText = string.format((L and L["POSTING_STRATEGY_LABEL_FMT"]) or "Strategy: %s", StrategyLabel(cfg.strategy))
+    if ns.UI_SetToolbarButtonText and PANEL._stratBtn then
+        ns.UI_SetToolbarButtonText(PANEL._stratBtn, stratText)
+    end
 
     local hist = ns.PriceHistoryService and ns.PriceHistoryService:GetStats(CURRENT_ITEMID, 7 * 24 * 3600) or { count = 0 }
     if hist.count >= 2 then
         local trend = ns.PriceHistoryService:GetTrend(CURRENT_ITEMID, 7 * 24 * 3600)
-        local arrow = (trend > 0 and "|cff66ff66▲|r") or (trend < 0 and "|cffff6666▼|r") or "|cffaaaaaa•|r"
+        local arrow = (trend > 0 and HexRole("▲", "success"))
+            or (trend < 0 and HexRole("▼", "danger"))
+            or HexRole("•", "dim")
         PANEL._stats:SetText(string.format((L and L["POSTING_STATS_FMT"]) or "%s 7d avg %s - last %s",
             arrow, FormatCopper(hist.avg), FormatCopper(hist.latest)))
     else
@@ -258,6 +294,11 @@ end)
 function PostingHelperUI:ResetForUiMode()
     if PANEL then
         PANEL:Hide()
+        --- Panel + buttons went through ApplyVisuals — leave BORDER_REGISTRY
+        --- before discarding (THEME_CHANGED rebuild comes through here too).
+        if ns.UI_UnregisterVisuals then
+            ns.UI_UnregisterVisuals(PANEL)
+        end
         PANEL = nil
     end
 end

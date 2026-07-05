@@ -4,11 +4,13 @@
         AceDB profile writes, theme backdrops (ArtisanTheme / SharedWidgets), and localization.
         Shared pattern: section title frames + UICheckButtonTemplate checkboxes — reuse for future UI ports.
     -->
+    <!-- DIALOG (level 200): same stratum as the addon's main windows (level 100),
+         so /an config always opens above an open Hub/Recipes/Loot window. -->
     <Frame
         name="ArtisanNexusSettingsFrame"
         parent="UIParent"
         inherits="BackdropTemplate"
-        frameStrata="HIGH"
+        frameStrata="DIALOG"
         frameLevel="200"
         enableMouse="true"
         movable="true"

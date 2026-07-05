@@ -5,8 +5,6 @@ local L = ns.L
 local COLORS = ns.UI_COLORS
 local LAYOUT = ns.UI_LAYOUT
 local ApplyVisuals = ns.UI_ApplyVisuals
-local CreateIcon = ns.UI_CreateIcon
-local ResolveRanks = ns.ResolveCatalogEntryRanks
 local SetProfessionRankAtlasForItem = ns.SetProfessionRankAtlasForItem
 local SetProfessionRankAtlas = ns.SetProfessionRankAtlas
 local GetCatalogRankIndexForItem = ns.GetCatalogRankIndexForItem
@@ -26,8 +24,6 @@ local SESSION_ROW_TEXT_FONT = FONTS.WINDOW_EMPHASIS or "GameFontNormalLarge"
 local SESSION_ROW_META_FONT = FONTS.WINDOW_BODY or "GameFontNormal"
 local SESSION_ROW_COIN_ICON_H = 14
 local CAT_SZ = LAYOUT.CATALOG_ICON or 36
---- Overall earnings: default visible characters before expand (catalog-style cap).
-local CHAR_EARNINGS_VISIBLE_DEFAULT = 10
 local MAX_QUALITY_TIERS = (ns.PROFESSION_QUALITY_MAX_TIER) or 5
 local CELL_PAD = (LAYOUT.LOOT_CATALOG_CELL_PAD) or 8
 --- Resolve at call time: UI_RefreshColors replaces the palette sub-tables, so
@@ -143,6 +139,45 @@ local function CatalogColumnCount(innerW)
         return 2
     end
     return 1
+end
+
+local RANK_ICON_GAP = 10
+
+--- Rank text block width: icon + gap + right pad must fit inside the cell.
+local function CatalogRankBlockWidth(cellW)
+    return math.max(52, cellW - CAT_SZ - CELL_PAD * 3)
+end
+
+--- Keep count + copper value inside the rank line without bleeding past the cell edge.
+---@param showValue boolean When false (×0 rows), count uses the full line — no price column reserve.
+local function LayoutCatalogValueLine(line, lineW, atlasSz, showValue)
+    local val = line._val
+    local cnt = line._cnt
+    local tex = line._tex
+    if not val or not cnt or not tex then
+        return
+    end
+    local atlasW = atlasSz + 4
+    local minCntW = 36
+    cnt:ClearAllPoints()
+    val:ClearAllPoints()
+    if showValue then
+        local valW = math.max(24, math.min(math.floor(lineW * 0.42), 72))
+        if valW + atlasW + minCntW + 2 > lineW then
+            valW = math.max(20, lineW - atlasW - minCntW - 2)
+        end
+        local cntW = math.max(minCntW, lineW - atlasW - valW - 2)
+        val:SetWidth(valW)
+        cnt:SetWidth(cntW)
+        val:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+        cnt:SetPoint("LEFT", tex, "RIGHT", 4, 0)
+        cnt:SetPoint("RIGHT", val, "LEFT", -4, 0)
+    else
+        val:SetWidth(1)
+        val:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+        cnt:SetPoint("LEFT", tex, "RIGHT", 4, 0)
+        cnt:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+    end
 end
 
 --- Ease-out for fade curves (smooth end toward default).
@@ -272,7 +307,7 @@ end
 --- Reagent icon (left); R1 + R2 profession atlases stacked (right); amounts x(N) in white. Responsive grid.
 --- Fishing grid: caught items (qty>0) first; within those, AH value desc then items missing AH price; uncaught (×0) last.
 local function SortFishingCatalogEntries(entries, totals)
-    local Resolve = ResolveRanks or ns.ResolveCatalogEntryRanks
+    local Resolve = ns.ResolveCatalogEntryRanks
     if not Resolve or type(entries) ~= "table" or type(totals) ~= "table" then
         return entries
     end
@@ -333,11 +368,40 @@ local function AccentIconBorder()
     return { ac[1], ac[2], ac[3], 0.72 }
 end
 
+--- Minimal icon frame when SharedWidgets is unavailable (must never block catalog paint).
+local function LootFallbackCreateIcon(parent, _texture, size)
+    if not parent then
+        return nil
+    end
+    size = size or CAT_SZ
+    local frame = CreateFrame("Frame", nil, parent)
+    frame:SetSize(size, size)
+    local tex = frame:CreateTexture(nil, "ARTWORK")
+    tex:SetPoint("TOPLEFT", 2, -2)
+    tex:SetPoint("BOTTOMRIGHT", -2, 2)
+    frame.texture = tex
+    return frame
+end
+
+local function LootResolveCatalogRanks(entry)
+    if ns.ResolveCatalogEntryRanks then
+        return ns.ResolveCatalogEntryRanks(entry)
+    end
+    if entry and entry.ranks and type(entry.ranks) == "table" and #entry.ranks > 0 then
+        return entry.ranks
+    end
+    if entry and entry.id then
+        return { entry.id }
+    end
+    return {}
+end
+
 --- Create a catalog cell once (icon + rank block); rank lines are added
 --- lazily via GetCellLine. Per-render code only reconfigures children.
 local function CreateCatalogCell(content, classicUi)
+    local createIcon = ns.UI_CreateIcon or LootFallbackCreateIcon
     local cell = CreateFrame("Frame", nil, content)
-    local ic = CreateIcon(cell, nil, CAT_SZ, false, nil, classicUi and true or false)
+    local ic = createIcon(cell, nil, CAT_SZ, false, nil, classicUi and true or false)
     if ic then
         ic:SetPoint("TOPLEFT", cell, "TOPLEFT", CELL_PAD, -CELL_PAD)
     end
@@ -379,6 +443,10 @@ local function GetCellLine(cell, r, rowLineH, atlasSz)
     local val = line:CreateFontString(nil, "OVERLAY", CATALOG_CELL_TEXT_FONT)
     val:SetJustifyH("RIGHT")
     val:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+    --- Narrow 2-col band: count must yield to the money string, never overlap it.
+    cntStr:SetPoint("RIGHT", val, "LEFT", -4, 0)
+    cntStr:SetWordWrap(false)
+    cntStr:SetMaxLines(1)
     local dr, dg, db, da = val:GetTextColor()
     line._valR, line._valG, line._valB, line._valA = dr, dg, db, da or 1
     line._val = val
@@ -409,10 +477,16 @@ local function ResetCatalogCell(cell)
 end
 
 ---@param tabKey string|nil Active tab — `GetReferenceGlowStrength` ile katalog kenar solması
-local function PopulateCatalog(content, entries, totals, tabKey)
+---@param innerWOverride number|nil Scroll viewport width when content:GetWidth() is stale
+local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
     content:SetScript("OnUpdate", nil)
+    if content.SetClipsChildren then
+        content:SetClipsChildren(true)
+    end
     totals = totals or {}
-    if not CreateIcon or not ResolveRanks then return end
+    entries = entries or {}
+    local createIcon = ns.UI_CreateIcon or LootFallbackCreateIcon
+    local resolveRanks = LootResolveCatalogRanks
     local function qtyForItem(id)
         if not id then
             return 0
@@ -427,10 +501,10 @@ local function PopulateCatalog(content, entries, totals, tabKey)
         return totals[tonumber(id)] or 0
     end
 
-    local innerW = content:GetWidth()
-    if not innerW or innerW < 100 then innerW = 360 end
+    local innerW = innerWOverride or content:GetWidth()
+    if not innerW or innerW < 100 then innerW = 280 end
     local cols = CatalogColumnCount(innerW)
-    local gapX = 8
+    local gapX = CELL_PAD
    --- Kalan piksel `remPx` ilk sütunlara +1: grid genişliği tam `innerW` (scroll içi ile hizalı, sütunlar eşit ±1px).
     local availForCells = math.max(1, innerW - gapX * (cols - 1))
     local baseCellW = cols > 0 and math.floor(availForCells / cols) or 108
@@ -455,7 +529,7 @@ local function PopulateCatalog(content, entries, totals, tabKey)
     local maxRankLines = 1
     for idx = 1, n do
         local entry = entries[idx]
-        local ranks = ResolveRanks(entry)
+        local ranks = resolveRanks(entry)
         if #ranks < 1 and entry and entry.id then
             ranks = { entry.id }
         end
@@ -477,7 +551,7 @@ local function PopulateCatalog(content, entries, totals, tabKey)
 
     for idx = 1, n do
         local entry = entries[idx]
-        local ranks = ResolveRanks(entry)
+        local ranks = resolveRanks(entry)
         if #ranks < 1 and entry.id then
             ranks = { entry.id }
         end
@@ -495,6 +569,9 @@ local function PopulateCatalog(content, entries, totals, tabKey)
             cellFrame._glowEntryId = entry and entry.id or nil
             cellFrame._glowRankIds = ranks
             cellFrame:SetSize(cellW, fixedCellH)
+            if cellFrame.SetClipsChildren then
+                cellFrame:SetClipsChildren(true)
+            end
             cellFrame:ClearAllPoints()
             cellFrame:SetPoint("TOPLEFT", content, "TOPLEFT", cellX, -row * (fixedCellH + gapX))
             cellFrame:Show()
@@ -525,12 +602,13 @@ local function PopulateCatalog(content, entries, totals, tabKey)
             end
 
             local blockH = showRanks * rowLineH
+            local rankW = CatalogRankBlockWidth(cellW)
             local rankBlock = cellFrame._rankBlock
-            rankBlock:SetSize(cellW - CAT_SZ - CELL_PAD * 3, blockH)
+            rankBlock:SetSize(rankW, blockH)
             rankBlock:ClearAllPoints()
             if ic then
                 --- Snap to icon’s right; stack vertically centered on the icon (WoW: +y is up).
-                rankBlock:SetPoint("LEFT", ic, "RIGHT", 10, 0)
+                rankBlock:SetPoint("LEFT", ic, "RIGHT", RANK_ICON_GAP, 0)
                 rankBlock:SetPoint("TOP", ic, "TOP", 0, (blockH - CAT_SZ) / 2)
             else
                 rankBlock:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", CELL_PAD + CAT_SZ, -CELL_PAD)
@@ -543,7 +621,7 @@ local function PopulateCatalog(content, entries, totals, tabKey)
                     break
                 end
                 local line = GetCellLine(cellFrame, r, rowLineH, atlasSz)
-                line:SetSize(rankBlock:GetWidth(), rowLineH)
+                line:SetSize(rankW, rowLineH)
                 line:Show()
                 usedLines = r
                 if line._rankOk then
@@ -553,6 +631,7 @@ local function PopulateCatalog(content, entries, totals, tabKey)
                 end
 
                 local cnt = qtyForItem(rid)
+                LayoutCatalogValueLine(line, rankW, atlasSz, cnt > 0)
                 local cntStr = line._cnt
                 cntStr:SetFormattedText(fmt, cnt)
                 local qc = (cnt > 0) and QTY_ON() or QTY_ZERO()
@@ -730,8 +809,8 @@ local function CreateSessionRow(content, classicUi)
     local ib = COLORS.lootCellBorder
     local iconBr = ib and { ib[1], ib[2], ib[3], 0.62 }
         or { COLORS.border[1], COLORS.border[2], COLORS.border[3], 0.56 }
-    local iconFrame = CreateIcon
-        and CreateIcon(row, nil, ICON_SZ, false, iconBr, classicUi and true or false)
+    local createIcon = ns.UI_CreateIcon or LootFallbackCreateIcon
+    local iconFrame = createIcon(row, nil, ICON_SZ, false, iconBr, classicUi and true or false)
     if iconFrame then
         iconFrame:SetPoint("LEFT", 0, 0)
     end
@@ -863,7 +942,10 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
 
         local countStr = row._count
         countStr:SetText(tostring(qty) .. "×")
-        countStr:SetTextColor(1, 1, 1, 1)
+        --- Same semantic as catalog counts: theme token, not hardcoded white
+        --- (light theme needs the dark lootQtyOn variant).
+        local qc = QTY_ON()
+        countStr:SetTextColor(qc[1], qc[2], qc[3], 1)
 
         local unitPrice = LootUnitCopper(itemID)
         local priceStr = row._price
@@ -907,7 +989,10 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
                     local rname = rs:GetRecipeName(e.spellID)
                     if rname and not (issecretvalue and issecretvalue(rname)) then
                         display = nm .. " — " .. rname
-                    elseif e.profession and type(e.profession) == "string" then
+                    elseif e.profession and type(e.profession) == "string"
+                        and not (issecretvalue and issecretvalue(e.profession)) then
+                        --- Profession names originate from profession APIs; guard
+                        --- like `rname` above or a secret value errors the row paint.
                         display = nm .. " — " .. e.profession
                     end
                 end
@@ -987,8 +1072,8 @@ function Draw.SortFishingCatalogEntries(entries, totals)
     return SortFishingCatalogEntries(entries, totals)
 end
 
-function Draw.PopulateCatalog(content, entries, totals, tabKey)
-    return PopulateCatalog(content, entries, totals, tabKey)
+function Draw.PopulateCatalog(content, entries, totals, tabKey, innerW)
+    return PopulateCatalog(content, entries, totals, tabKey, innerW)
 end
 
 function Draw.PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)

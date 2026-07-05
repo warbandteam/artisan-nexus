@@ -22,6 +22,40 @@ local tinsert = table.insert
 
 local L = ns.L
 
+local function SafeL(key, fallback)
+    if ns.SafeLocaleString then
+        local s = ns.SafeLocaleString(key, fallback)
+        if s and s ~= "" then
+            return s
+        end
+    end
+    return fallback
+end
+
+local function SafeNumber(val)
+    if val == nil then
+        return nil
+    end
+    if issecretvalue and issecretvalue(val) then
+        return nil
+    end
+    return tonumber(val)
+end
+
+local function RecipeRowName(r)
+    if not r then
+        return "?"
+    end
+    local fallback = "Recipe " .. tostring(r.spellID or "?")
+    if ns.CoerceUiString then
+        return ns.CoerceUiString(r.name, fallback)
+    end
+    if type(r.name) == "string" and r.name ~= "" and not (issecretvalue and issecretvalue(r.name)) then
+        return r.name
+    end
+    return fallback
+end
+
 local E = ns.Constants and ns.Constants.EVENTS
 
 local ArtisanHubUI = {}
@@ -85,7 +119,28 @@ local function HexDim(text)
         math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255), text)
 end
 
+--- Wrap `text` in a live semantic color (light/dark safe) — replaces the old
+--- baked `|cff66ff66` / `|cffff6666` escapes in cell paint.
+local function HexRole(text, kind)
+    if ns.CoerceUiString then
+        text = ns.CoerceUiString(text, "")
+    elseif type(text) ~= "string" or text == "" or (issecretvalue and issecretvalue(text)) then
+        return ""
+    end
+    if text == "" then
+        return ""
+    end
+    local hex = ns.UI_GetSemanticHex and ns.UI_GetSemanticHex(kind)
+    if not hex then
+        return text
+    end
+    return "|cff" .. hex .. text .. "|r"
+end
+
 local HUB_COL_DIVIDER_W = 1
+--- Queue rows keep +1/^/v/X buttons on the right edge (~138px); the Progress
+--- header AND cell must both stop short of that strip to stay aligned.
+local HUB_QUEUE_BTN_RESERVE = 150
 
 local function HubLayout()
     local layout = ns.UI_LAYOUT or {}
@@ -109,7 +164,12 @@ end
 local function HubGrid()
     local h = HubLayout()
     local shellPad = (ns.UI_LAYOUT and ns.UI_LAYOUT.SHELL_PAD) or 12
-    local sw = (FRAME and FRAME.scroll and FRAME.scroll:GetWidth()) or (h.windowW - shellPad * 2 - 12)
+    local sw = (FRAME and FRAME.scroll and FRAME.scroll:GetWidth()) or 0
+    --- First build can see an unresolved rect (0) — fall back like nil, or
+    --- every column x/width goes negative until the next refresh.
+    if not sw or sw < 40 then
+        sw = h.windowW - shellPad * 2 - 12
+    end
     local scrollPad = 12
     local cw = sw - scrollPad
     local rightPad = 10
@@ -192,7 +252,13 @@ local function EnsureHubColumnHeader(columnDefs, headerTop)
     end
     local chrome = Colors().surfaceHeaderChrome or Colors().bgCard or { 0.10, 0.09, 0.12, 1 }
     local bdr = Colors().border or { 0.26, 0.24, 0.30, 1 }
-    Apply(hdr, chrome, { bdr[1], bdr[2], bdr[3], 0.42 })
+    --- StylePanelInset branches per skin; bare Apply is a no-op in Classic and
+    --- left the header without any background there (rows DO get classic inset).
+    if ns.UI_StylePanelInset then
+        ns.UI_StylePanelInset(hdr, chrome, { bdr[1], bdr[2], bdr[3], 0.42 })
+    else
+        Apply(hdr, chrome, { bdr[1], bdr[2], bdr[3], 0.42 })
+    end
     hdr:SetSize(grid.cw, hdrH)
     hdr:ClearAllPoints()
     hdr:SetPoint("TOPLEFT", 4, -headerTop)
@@ -245,9 +311,10 @@ local function EnsureHubColumnHeader(columnDefs, headerTop)
         tex:SetColorTexture(ruleC[1], ruleC[2], ruleC[3], 0.35)
         tex:SetWidth(HUB_COL_DIVIDER_W)
         tex:ClearAllPoints()
-        tex:SetPoint("TOP", hdr, "TOP", 0, -6)
-        tex:SetPoint("BOTTOM", hdr, "BOTTOM", 0, 2)
-        tex:SetPoint("LEFT", hdr, "LEFT", dividerXs[di], 0)
+        --- Left-edge anchors only: a TOP/BOTTOM pair would pin the texture's
+        --- center-x to the header center and zero out SetWidth.
+        tex:SetPoint("TOPLEFT", hdr, "TOPLEFT", dividerXs[di], -6)
+        tex:SetPoint("BOTTOMLEFT", hdr, "BOTTOMLEFT", dividerXs[di], 2)
         tex:Show()
     end
 
@@ -286,7 +353,9 @@ local function HubQueueColumnHeaderDefs(grid)
         { label = (L and L["HUB_COL_RECIPE"]) or "Recipe", x = 8, justify = "LEFT" },
         {
             label = (L and L["HUB_COL_PROGRESS"]) or "Progress",
-            x = grid.valueX, w = grid.valueW + grid.profitW, justify = "RIGHT",
+            x = grid.valueX,
+            w = math.max(60, grid.valueW + grid.profitW - HUB_QUEUE_BTN_RESERVE),
+            justify = "RIGHT",
             dividerAfter = grid.valueX - 4,
         },
     }
@@ -486,6 +555,21 @@ end
 -- ─────────────────────────────────────────────────────────────────
 -- Window chrome
 -- ─────────────────────────────────────────────────────────────────
+function ArtisanHubUI:RefreshClassicShellChrome()
+    if not FRAME then
+        return
+    end
+    if ns.UI_RefreshClassicMainWindowShell then
+        ns.UI_RefreshClassicMainWindowShell(FRAME)
+    elseif FRAME.headerBar and ns.UI_RefreshWindowHeader then
+        ns.UI_RefreshWindowHeader(FRAME.headerBar)
+    end
+    if FRAME.tabBar and ns.UI_AnchorClassicShellBodyRow then
+        local shellPad = (ns.UI_LAYOUT and ns.UI_LAYOUT.SHELL_PAD) or 12
+        ns.UI_AnchorClassicShellBodyRow(FRAME.tabBar, FRAME, FRAME.headerBar, shellPad, 0)
+    end
+end
+
 local function BuildChrome()
     local h = HubLayout()
     local shellPad = (ns.UI_LAYOUT and ns.UI_LAYOUT.SHELL_PAD) or 12
@@ -657,7 +741,8 @@ local function BuildChrome()
 
     local scrollHost = CreateFrame("Frame", nil, body)
     scrollHost:SetPoint("TOPLEFT", body, "TOPLEFT", 0, 0)
-    scrollHost:SetPoint("BOTTOMRIGHT", statusBar, "TOPRIGHT", 0, -2)
+    --- +2: stop ABOVE the status bar rule (negative y overlapped it by 2px).
+    scrollHost:SetPoint("BOTTOMRIGHT", statusBar, "TOPRIGHT", 0, 2)
     scrollHost:SetClipsChildren(true)
     f.scrollHost = scrollHost
 
@@ -687,14 +772,17 @@ local function BuildChrome()
     status:SetPoint("LEFT", 6, 0)
     status:SetPoint("RIGHT", -6, 0)
     status:SetJustifyH("RIGHT")
-    status:SetMaxLines(2)
-    status:SetWordWrap(true)
+    --- Single line: the 26px bar cannot host a wrapped second line without
+    --- spilling over the rule above / window pad below.
+    status:SetMaxLines(1)
+    status:SetWordWrap(false)
     f.status = status
     SetFSRole(status, "dim")
 
     RefreshProfFilterButton()
     RefreshSessionToggle()
     LayoutHubToolbar()
+    ArtisanHubUI:RefreshClassicShellChrome()
     return f
 end
 
@@ -704,11 +792,15 @@ local function RefreshHubBanners()
     end
     local banner = FRAME.harvestBanner
     local briefingBanner = FRAME.briefingBanner
-    local body = FRAME.body
+    local bodyHost = FRAME.bodyHost
     local filterBar = FRAME.filterBar
     local shellPad = (ns.UI_LAYOUT and ns.UI_LAYOUT.SHELL_PAD) or 12
     local anchor = filterBar
-    if not anchor or not body then
+    --- Banners push the OUTER host down; the inner `body` viewport keeps its
+    --- UI_ApplyViewportInset anchors (re-anchoring `body` here used to wipe the
+    --- scrollbar gutter reservation on every refresh).
+    local bannerDrop = 0
+    if not anchor or not bodyHost then
         return
     end
 
@@ -730,6 +822,7 @@ local function RefreshHubBanners()
                 banner:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", -4, -4)
                 banner:Show()
                 anchor = banner
+                bannerDrop = bannerDrop + 4 + (banner:GetHeight() or 18)
                 show = true
             end
         end
@@ -748,8 +841,8 @@ local function RefreshHubBanners()
                 local r = top[i]
                 local profit = FormatCopper(r.margin) or "?"
                 local line = string.format(
-                    (L and L["HUB_BRIEFING_LINE_FMT"]) or "%s - %s (%s)",
-                    r.name or ("Recipe " .. tostring(r.spellID)), profit, r.profession or "?")
+                    SafeL("HUB_BRIEFING_LINE_FMT", "%s - %s (%s)"),
+                    RecipeRowName(r), profit, r.profession or "?")
                 if r.recommendConcentration and r.concProfitDelta and r.concProfitDelta > 0 then
                     line = line .. " " .. string.format(
                         (L and L["HUB_BRIEFING_CONC_SUFFIX"]) or "(conc +%s)",
@@ -766,8 +859,13 @@ local function RefreshHubBanners()
             briefingBanner:ClearAllPoints()
             briefingBanner:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 4, -4)
             briefingBanner:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", -4, -4)
+            --- Height follows the wrapped text (header + up to 3 crafts +
+            --- equipment hint ≈ 5 lines); the old fixed 40px clipped line 3+.
+            local wantH = math.ceil(briefingBanner:GetStringHeight() or 0) + 2
+            briefingBanner:SetHeight(math.max(40, wantH))
             briefingBanner:Show()
             anchor = briefingBanner
+            bannerDrop = bannerDrop + 4 + briefingBanner:GetHeight()
         else
             briefingBanner:Hide()
         end
@@ -775,9 +873,9 @@ local function RefreshHubBanners()
         briefingBanner:Hide()
     end
 
-    body:ClearAllPoints()
-    body:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -6)
-    body:SetPoint("BOTTOMRIGHT", FRAME, "BOTTOMRIGHT", -shellPad, shellPad)
+    bodyHost:ClearAllPoints()
+    bodyHost:SetPoint("TOPLEFT", filterBar, "BOTTOMLEFT", 0, -(6 + bannerDrop))
+    bodyHost:SetPoint("BOTTOMRIGHT", FRAME, "BOTTOMRIGHT", -shellPad, shellPad)
 end
 
 local function ApplyTabState()
@@ -826,8 +924,10 @@ local function ClearRows()
     end
 end
 
-local function NewRow(yOffset)
-    local grid = HubGrid()
+--- `grid` optional: render loops pass their per-pass HubGrid() so acquiring a
+--- row does not re-allocate the grid table for every list entry.
+local function NewRow(yOffset, grid)
+    grid = grid or HubGrid()
     local pool = FRAME._rowPool
     local row = pool[#pool]
     if row then
@@ -871,13 +971,16 @@ local function RowFS(row, template)
         fs:ClearAllPoints()
         fs:SetWidth(0)
         fs:SetJustifyH("LEFT")
-        fs:SetWordWrap(true)
         local obj = _G[template]
         if obj and obj.GetTextColor then
             local r, g, b, a = obj:GetTextColor()
             fs:SetTextColor(r, g, b, a or 1)
         end
     end
+    --- Rows are fixed-height single-line surfaces: a wrapped 2nd line bleeds
+    --- over the next row (rows do not clip). Multi-line cells opt in explicitly.
+    fs:SetWordWrap(false)
+    fs:SetMaxLines(1)
     fs:SetText("")
     fs:Show()
     return fs
@@ -915,7 +1018,9 @@ local function RowBtn(row, label, bg, bd, onClick)
         b:ClearAllPoints()
     end
     if ns.UI_StylePanelButton then
-        ns.UI_StylePanelButton(b, { pressed = false })
+        --- Forward the caller's semantic chrome — dropping it rendered danger
+        --- buttons (Remove/X) with neutral colors.
+        ns.UI_StylePanelButton(b, { pressed = false, bg = bg, border = bd })
     else
         Apply(b, bg, bd)
     end
@@ -964,7 +1069,7 @@ local function RenderProfitability()
 
     for ri = 1, #rows do
         local r = rows[ri]
-        local row = NewRow(y); y = y + grid.rowH
+        local row = NewRow(y, grid); y = y + grid.rowH
 
         local icon = RowTex(row)
         icon:SetSize(grid.iconSz, grid.iconSz); icon:SetPoint("LEFT", 6, 0)
@@ -974,7 +1079,7 @@ local function RenderProfitability()
         local name = RowFS(row, Font("WINDOW_BODY"))
         name:SetPoint("LEFT", icon, "RIGHT", 8, 0)
         name:SetWidth(grid.recipeW); name:SetJustifyH("LEFT"); name:SetWordWrap(false)
-        name:SetText(r.name or ("Recipe " .. r.spellID))
+        name:SetText(RecipeRowName(r))
 
         local costFS = RowFS(row, Font("WINDOW_BODY"))
         costFS:SetPoint("LEFT", grid.costX, 0); costFS:SetWidth(grid.costW); costFS:SetJustifyH("RIGHT")
@@ -994,25 +1099,30 @@ local function RenderProfitability()
 
         local pFS = RowFS(row, Font("WINDOW_BODY"))
         pFS:SetPoint("LEFT", grid.profitX, 0); pFS:SetWidth(grid.profitW); pFS:SetJustifyH("RIGHT")
-        if (r.missingReagentPrices or 0) > 0 then
+        local noDataText = SafeL("HUB_NO_DATA", "no data")
+        local marginNum = SafeNumber(r.margin)
+        local costNum = SafeNumber(r.cost)
+        local marginPct = SafeNumber(r.marginPct) or 0
+        if (SafeNumber(r.missingReagentPrices) or 0) > 0 then
             --- Unpriced reagents contribute 0 to cost — the margin would be a
             --- fake fat profit. Show "no data" instead of a misleading number.
-            pFS:SetText(HexDim("no data"))
+            pFS:SetText(HexDim(noDataText))
             nodata = nodata + 1
-        elseif r.margin and r.cost and r.cost > 0 then
-            local color = (r.margin >= 0) and "|cff66ff66" or "|cffff6666"
-            pFS:SetText(string.format("%s%s (%+d%%)|r",
-                color, FormatCopper(r.margin) or "0", math.floor((r.marginPct or 0) + 0.5)))
-            if r.margin > 0 then profitable = profitable + 1
-            elseif r.margin == 0 then breakeven = breakeven + 1
+        elseif marginNum and costNum and costNum > 0 then
+            pFS:SetText(HexRole(string.format("%s (%+d%%)",
+                FormatCopper(marginNum) or "0", math.floor(marginPct + 0.5)),
+                (marginNum >= 0) and "success" or "danger"))
+            if marginNum > 0 then profitable = profitable + 1
+            elseif marginNum == 0 then breakeven = breakeven + 1
             else losses = losses + 1 end
-            if r.recommendConcentration and r.concProfitDelta and r.concProfitDelta > 0 then
-                local pct = FormatCopper(r.concProfitDelta) or "?"
+            local concDelta = SafeNumber(r.concProfitDelta)
+            if r.recommendConcentration and concDelta and concDelta > 0 then
+                local pct = FormatCopper(concDelta) or "?"
                 pFS:SetText(pFS:GetText() .. " " .. HexDim(string.format(
-                    (L and L["HUB_PROFIT_CONC_BADGE"]) or "conc +%s", pct)))
+                    SafeL("HUB_PROFIT_CONC_BADGE", "conc +%s"), pct)))
             end
         else
-            pFS:SetText(HexDim("no data"))
+            pFS:SetText(HexDim(noDataText))
             nodata = nodata + 1
         end
 
@@ -1022,27 +1132,32 @@ local function RenderProfitability()
             if btn == "LeftButton" and ns.CraftingQueueService then
                 ns.CraftingQueueService:Add(r.spellID, 1)
                 if ns.ArtisanNexus and ns.ArtisanNexus.Print then
-                    ns.ArtisanNexus:Print(string.format("|cffd4af37+1 to queue:|r %s", r.name or ""))
+                    ns.ArtisanNexus:Print(string.format(
+                        SafeL("HUB_CHAT_QUEUE_ADD_FMT", "|cffd4af37+1 to queue:|r %s"), RecipeRowName(r)))
                 end
             elseif btn == "RightButton" and ns.ShoppingListService then
                 ns.ShoppingListService:Add(r.spellID, 1)
                 if ns.ArtisanNexus and ns.ArtisanNexus.Print then
-                    ns.ArtisanNexus:Print(string.format("|cffd4af37+1 to shopping:|r %s", r.name or ""))
+                    ns.ArtisanNexus:Print(string.format(
+                        SafeL("HUB_CHAT_SHOP_ADD_FMT", "|cffd4af37+1 to shopping:|r %s"), RecipeRowName(r)))
                 end
             end
         end)
         row:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(r.name or ("Recipe " .. r.spellID), 1, 1, 1)
-            if r.outputItem then GameTooltip:AddLine("Item: " .. ItemName(r.outputItem), 0.7, 0.7, 0.7) end
+            GameTooltip:AddLine(RecipeRowName(r), 1, 1, 1)
+            if r.outputItem then
+                GameTooltip:AddLine(string.format(
+                    (L and L["HUB_TT_ITEM_FMT"]) or "Item: %s", ItemName(r.outputItem)), 0.7, 0.7, 0.7)
+            end
             if r.recommendConcentration and r.concProfitDelta and r.concProfitDelta > 0 then
                 GameTooltip:AddLine(string.format(
                     (L and L["HUB_PROFIT_CONC_BADGE"]) or "conc +%s",
                     FormatCopper(r.concProfitDelta) or "?"), 0.82, 0.72, 0.35)
             end
             GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("|cffaaaaaaLeft-click: add to crafting queue|r")
-            GameTooltip:AddLine("|cffaaaaaaRight-click: add to shopping list|r")
+            GameTooltip:AddLine((L and L["HUB_TT_LEFT_CLICK_QUEUE"]) or "Left-click: add to crafting queue", 0.7, 0.7, 0.7)
+            GameTooltip:AddLine((L and L["HUB_TT_RIGHT_CLICK_SHOP"]) or "Right-click: add to shopping list", 0.7, 0.7, 0.7)
             GameTooltip:Show()
             profitHoverToken = profitHoverToken + 1
             local token = profitHoverToken
@@ -1066,8 +1181,12 @@ local function RenderProfitability()
     end
     local hubProf = GetHubProfessionFilter()
     if hubProf and hubProf ~= "All" then
+        local profLabel = hubProf
+        if ns.CoerceUiString then
+            profLabel = ns.CoerceUiString(hubProf, "All")
+        end
         statusSuffix = statusSuffix .. "  " .. HexDim(string.format(
-            (L and L["HUB_PROF_FILTER_ACTIVE"]) or "(%s only)", hubProf))
+            SafeL("HUB_PROF_FILTER_ACTIVE", "(%s only)"), profLabel))
     end
     SetHubStatus(string.format(
         (L and L["HUB_STATUS_PROFIT_FMT"]) or "|cff66ff66%d profitable|r - |cffd4af37%d break-even|r - |cffff6666%d losses|r - %s%s",
@@ -1107,14 +1226,14 @@ local function RenderShopping()
     local y = 4
 
     -- Section: queued recipes
-    local hdr = NewRow(y); y = y + grid.rowH
+    local hdr = NewRow(y, grid); y = y + grid.rowH
     local h1 = RowFS(hdr, Font("WINDOW_SECTION"))
     h1:SetPoint("LEFT", 8, 0); h1:SetText((L and L["HUB_SHOPPING_RECIPES_HEADER"]) or "Recipes to craft")
     SetFSRole(h1, "muted")
 
     local rs = ns.RecipeService
     if #entries == 0 then
-        local empty = NewRow(y); y = y + grid.rowH
+        local empty = NewRow(y, grid); y = y + grid.rowH
         local fs = RowFS(empty, "GameFontNormal")
         fs:SetPoint("LEFT", 12, 0)
         fs:SetText(HexDim((L and L["HUB_SHOPPING_EMPTY_HINT"])
@@ -1122,7 +1241,7 @@ local function RenderShopping()
     else
         for ei = 1, #entries do
             local e = entries[ei]
-            local row = NewRow(y); y = y + grid.rowH
+            local row = NewRow(y, grid); y = y + grid.rowH
             local icon = RowTex(row)
             icon:SetSize(grid.iconSz, grid.iconSz); icon:SetPoint("LEFT", 6, 0)
             local outID = rs and rs:GetOutputItem(e.spellID) or nil
@@ -1136,7 +1255,8 @@ local function RenderShopping()
             name:SetText((rs and rs:GetRecipeName(e.spellID)) or ("Recipe " .. e.spellID))
 
             local count = RowFS(row, Font("WINDOW_BODY"))
-            count:SetPoint("RIGHT", -80, 0); count:SetText("x" .. (e.count or 1))
+            count:SetPoint("RIGHT", -80, 0)
+            count:SetText(string.format((L and L["HUB_COUNT_FMT"]) or "x%d", e.count or 1))
 
             local dangerBg, dangerBd
             if ns.UI_GetSemanticButtonChrome then
@@ -1145,14 +1265,16 @@ local function RenderShopping()
             local removeBtn = RowBtn(row, (L and L["HUB_REMOVE_BTN"]) or "Remove",
                 dangerBg or { 0.20, 0.10, 0.10, 0.9 }, dangerBd or { 0.6, 0.2, 0.2, 0.7 },
                 function() svc:Remove(e.spellID) end)
-            removeBtn:SetSize(60, 18)
+            --- Width follows the localized label (deDE "Entfernen" > 60px).
+            local lblW = (removeBtn._lbl and removeBtn._lbl:GetStringWidth()) or 0
+            removeBtn:SetSize(math.max(60, math.ceil(lblW) + 16), 18)
             removeBtn:SetPoint("RIGHT", -8, 0)
         end
     end
 
     -- Section: aggregated reagents
     y = y + 6
-    local rhdr = NewRow(y); y = y + grid.rowH
+    local rhdr = NewRow(y, grid); y = y + grid.rowH
     local rh = RowFS(rhdr, Font("WINDOW_SECTION"))
     rh:SetPoint("LEFT", 8, 0); rh:SetText((L and L["HUB_SHOPPING_REAGENTS_HEADER"]) or "Reagents to acquire (after bags)")
     SetFSRole(rh, "muted")
@@ -1177,14 +1299,14 @@ local function RenderShopping()
     end
 
     if #sortedAgg == 0 then
-        local none = NewRow(y); y = y + grid.rowH
+        local none = NewRow(y, grid); y = y + grid.rowH
         local nfs = RowFS(none, "GameFontNormal")
         nfs:SetPoint("LEFT", 12, 0)
-        nfs:SetText("|cff66ff66" .. ((L and L["HUB_SHOPPING_ALL_IN_BAGS"]) or "All reagents already in bags.") .. "|r")
+        nfs:SetText(HexRole((L and L["HUB_SHOPPING_ALL_IN_BAGS"]) or "All reagents already in bags.", "success"))
     else
         for ai = 1, #sortedAgg do
             local aggRow = sortedAgg[ai]
-            local r = NewRow(y); y = y + grid.rowH
+            local r = NewRow(y, grid); y = y + grid.rowH
             local icon = RowTex(r)
             icon:SetSize(grid.iconSz, grid.iconSz); icon:SetPoint("LEFT", 6, 0)
             icon:SetTexture(ItemIcon(aggRow.itemID))
@@ -1197,10 +1319,13 @@ local function RenderShopping()
             local need = RowFS(r, Font("WINDOW_BODY"))
             need:SetPoint("LEFT", grid.costX, 0); need:SetWidth(grid.costW + grid.valueW)
             need:SetJustifyH("LEFT")
-            need:SetText(string.format("|cffff8866need %d|r %s", aggRow.short, HexDim(string.format("(have %d)", aggRow.have or 0))))
+            need:SetText(
+                HexRole(string.format((L and L["HUB_NEED_FMT"]) or "need %d", aggRow.short), "warning")
+                .. " "
+                .. HexDim(string.format((L and L["HUB_HAVE_FMT"]) or "(have %d)", aggRow.have or 0)))
             local cost = RowFS(r, Font("WINDOW_BODY"))
             cost:SetPoint("LEFT", grid.profitX, 0); cost:SetWidth(grid.profitW); cost:SetJustifyH("RIGHT")
-            cost:SetText(FormatCopper(aggRow.cost) or HexDim("no price"))
+            cost:SetText(FormatCopper(aggRow.cost) or HexDim((L and L["HUB_NO_PRICE"]) or "no price"))
         end
     end
 
@@ -1212,7 +1337,7 @@ local function RenderShopping()
     local purchaseShorts = svc.GetPurchaseShorts and svc:GetPurchaseShorts(purchaseOpts) or {}
     if #purchaseShorts > 0 then
         y = y + 6
-        local phdr = NewRow(y); y = y + grid.rowH
+        local phdr = NewRow(y, grid); y = y + grid.rowH
         local ph = RowFS(phdr, Font("WINDOW_SECTION"))
         ph:SetPoint("LEFT", 8, 0)
         ph:SetText((L and L["HUB_PURCHASE_SHORTS_HEADER"]) or "Buy on AH / vendor")
@@ -1220,7 +1345,7 @@ local function RenderShopping()
 
         for pi = 1, #purchaseShorts do
             local ps = purchaseShorts[pi]
-            local row = NewRow(y); y = y + grid.rowH
+            local row = NewRow(y, grid); y = y + grid.rowH
             local icon = RowTex(row)
             icon:SetSize(grid.iconSz, grid.iconSz); icon:SetPoint("LEFT", 6, 0)
             icon:SetTexture(ItemIcon(ps.itemID))
@@ -1233,10 +1358,10 @@ local function RenderShopping()
             local need = RowFS(row, Font("WINDOW_BODY"))
             need:SetPoint("LEFT", grid.costX, 0); need:SetWidth(grid.costW)
             need:SetJustifyH("LEFT")
-            need:SetText(string.format("|cffff8866need %d|r", ps.short or 0))
+            need:SetText(HexRole(string.format((L and L["HUB_NEED_FMT"]) or "need %d", ps.short or 0), "warning"))
             local cost = RowFS(row, Font("WINDOW_BODY"))
             cost:SetPoint("LEFT", grid.valueX, 0); cost:SetWidth(grid.valueW); cost:SetJustifyH("RIGHT")
-            cost:SetText(FormatCopper(ps.cost) or HexDim("no price"))
+            cost:SetText(FormatCopper(ps.cost) or HexDim((L and L["HUB_NO_PRICE"]) or "no price"))
             local srcLbl = RowFS(row, Font("WINDOW_BODY"))
             srcLbl:SetPoint("LEFT", grid.profitX, 0); srcLbl:SetWidth(grid.profitW); srcLbl:SetJustifyH("RIGHT")
             srcLbl:SetText(HexDim((L and L["HUB_PURCHASE_SHORTS_SOURCE"]) or "AH / vendor"))
@@ -1251,7 +1376,7 @@ local function RenderShopping()
     local farmTargets = svc.GetFarmTargets and svc:GetFarmTargets(farmOpts) or {}
     if #farmTargets > 0 then
         y = y + 6
-        local fhdr = NewRow(y); y = y + grid.rowH
+        local fhdr = NewRow(y, grid); y = y + grid.rowH
         local fh = RowFS(fhdr, Font("WINDOW_SECTION"))
         fh:SetPoint("LEFT", 8, 0)
         fh:SetText((L and L["HUB_FARM_TARGETS_HEADER"]) or "Gathering farm targets")
@@ -1259,7 +1384,7 @@ local function RenderShopping()
 
         for fi = 1, #farmTargets do
             local ft = farmTargets[fi]
-            local row = NewRow(y); y = y + grid.rowH
+            local row = NewRow(y, grid); y = y + grid.rowH
             row:EnableMouse(true)
             local icon = RowTex(row)
             icon:SetSize(grid.iconSz, grid.iconSz); icon:SetPoint("LEFT", 6, 0)
@@ -1273,7 +1398,7 @@ local function RenderShopping()
             local need = RowFS(row, Font("WINDOW_BODY"))
             need:SetPoint("LEFT", grid.costX, 0); need:SetWidth(grid.costW + grid.valueW)
             need:SetJustifyH("LEFT")
-            need:SetText(string.format("|cffff8866need %d|r", ft.short or 0))
+            need:SetText(HexRole(string.format((L and L["HUB_NEED_FMT"]) or "need %d", ft.short or 0), "warning"))
             local tabLbl = RowFS(row, Font("WINDOW_BODY"))
             tabLbl:SetPoint("LEFT", grid.profitX, 0); tabLbl:SetWidth(grid.profitW); tabLbl:SetJustifyH("RIGHT")
             local lootTab = ValidGatheringTab(ft.category) and ft.category or nil
@@ -1318,14 +1443,17 @@ local function RenderQueue()
     if snapSvc and snapSvc.GetChipText then
         local chip = snapSvc:GetChipText()
         if chip and chip ~= "" then
-            local chipRow = NewRow(y)
+            local chipRow = NewRow(y, grid)
             y = y + grid.rowH
             headerTop = y
             local fs = RowFS(chipRow, Font("WINDOW_META"))
             fs:SetPoint("LEFT", 10, 0)
             fs:SetPoint("RIGHT", -120, 0)
             fs:SetJustifyH("LEFT")
+            --- Opt back into wrapping within the fixed row: cap at 2 lines so
+            --- the chip can never spill past the 34px row box.
             fs:SetWordWrap(true)
+            fs:SetMaxLines(2)
             fs:SetText(HexDim(chip))
         end
     end
@@ -1338,7 +1466,7 @@ local function RenderQueue()
     end
 
     if #q == 0 then
-        local row = NewRow(y); y = y + grid.rowH
+        local row = NewRow(y, grid); y = y + grid.rowH
         local fs = RowFS(row, "GameFontNormal")
         fs:SetPoint("LEFT", 12, 0)
         fs:SetText(HexDim((L and L["HUB_QUEUE_EMPTY_HINT"])
@@ -1346,7 +1474,7 @@ local function RenderQueue()
     else
         for qi = 1, #q do
             local e = q[qi]
-            local row = NewRow(y); y = y + grid.rowH
+            local row = NewRow(y, grid); y = y + grid.rowH
             row:EnableMouse(true)
             local icon = RowTex(row)
             icon:SetSize(grid.iconSz, grid.iconSz); icon:SetPoint("LEFT", 6, 0)
@@ -1360,9 +1488,13 @@ local function RenderQueue()
             name:SetText((rs and rs:GetRecipeName(e.spellID)) or ("Recipe " .. e.spellID))
 
             local progress = RowFS(row, Font("WINDOW_BODY"))
-            progress:SetPoint("LEFT", grid.valueX, 0); progress:SetWidth(grid.valueW)
-            local pColor = (e.progress >= e.target) and "|cff66ff66" or "|cffd4af37"
-            progress:SetText(string.format("%s%d/%d|r", pColor, e.progress, e.target))
+            --- Mirror HubQueueColumnHeaderDefs exactly: same x, width, and
+            --- RIGHT justification (was LEFT at valueW, ~150px off the header).
+            progress:SetPoint("LEFT", grid.valueX, 0)
+            progress:SetWidth(math.max(60, grid.valueW + grid.profitW - HUB_QUEUE_BTN_RESERVE))
+            progress:SetJustifyH("RIGHT")
+            progress:SetText(HexRole(string.format("%d/%d", e.progress, e.target),
+                (e.progress >= e.target) and "success" or "warning"))
 
             -- Up / Down / Remove buttons (pooled on the row)
             local function SmallBtn(label, dx, fn, dangerous)
@@ -1454,6 +1586,11 @@ end
 function ArtisanHubUI:ResetForUiMode()
     if FRAME then
         FRAME:Hide()
+        --- Rows/headers/buttons all went through ApplyVisuals; the discarded
+        --- tree must leave BORDER_REGISTRY (infra MUST — see SharedWidgets).
+        if ns.UI_UnregisterVisuals then
+            ns.UI_UnregisterVisuals(FRAME)
+        end
         FRAME = nil
     end
 end
@@ -1468,6 +1605,7 @@ function ArtisanHubUI:RefreshTheme()
     if ns.UI_RefreshWindowHeader then
         ns.UI_RefreshWindowHeader(FRAME.headerBar)
     end
+    self:RefreshClassicShellChrome()
     if FRAME:IsShown() then
         if FRAME.body and ns.UI_StylePanelInset then
             ns.UI_StylePanelInset(FRAME.body, Colors().bgCard, Colors().border)
@@ -1511,6 +1649,7 @@ function ArtisanHubUI:Toggle()
             end
             FRAME:Show()
         end
+        self:RefreshClassicShellChrome()
         self:Refresh()
     end
 end
@@ -1541,6 +1680,7 @@ function ArtisanHubUI:Show(tabKeyOrOpts)
         end
         FRAME:Show()
     end
+    self:RefreshClassicShellChrome()
     self:Refresh()
 end
 

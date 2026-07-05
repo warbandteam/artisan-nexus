@@ -41,13 +41,18 @@ local SECTION_H = LAYOUT.MATCHER_SECTION_HEIGHT or 28
 local SECTION_GAP = 6
 local TOOLBAR_H = LAYOUT.MATCHER_TOOLBAR_HEIGHT or 32
 local TITLEBAR_H = LAYOUT.MATCHER_TITLEBAR_HEIGHT or 52
---- Below header + status + two toolbar rows (anchored dynamically; legacy fallback).
-local CONTENT_TOP_OFFSET = -140
 local LEFT_PANE_FRAC = 0.46
 
-local function HexAccent(a)
-    local c = COLORS and COLORS.accent or { 0.6, 0.5, 0.8 }
-    return string.format("|cff%02x%02x%02x", math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255)) .. (a or "") .. "|r"
+--- Semantic role markup resolved from the LIVE palette (light/dark safe).
+local function HexRole(text, kind)
+    if type(text) ~= "string" or text == "" then
+        return text or ""
+    end
+    local hex = ns.UI_GetSemanticHex and ns.UI_GetSemanticHex(kind)
+    if not hex then
+        return text
+    end
+    return "|cff" .. hex .. text .. "|r"
 end
 
 local function HexDim(a)
@@ -476,7 +481,18 @@ function RecipeMatcherUI:Init()
     f:EnableMouse(true)
     f:SetClampedToScreen(true)
     f:Hide()
-    tinsert(UISpecialFrames, "ArtisanNexusRecipeMatcher")
+    --- Init re-runs after every ResetForUiMode; a duplicate UISpecialFrames
+    --- entry would make one Esc press run the hide handler twice.
+    local alreadySpecial = false
+    for i = 1, #UISpecialFrames do
+        if UISpecialFrames[i] == "ArtisanNexusRecipeMatcher" then
+            alreadySpecial = true
+            break
+        end
+    end
+    if not alreadySpecial then
+        tinsert(UISpecialFrames, "ArtisanNexusRecipeMatcher")
+    end
 
     if ns.UI_ApplyMainWindowChrome then
         ns.UI_ApplyMainWindowChrome(f)
@@ -630,10 +646,11 @@ function RecipeMatcherUI:Init()
         end
     end
 
-    --- Left: recipe list
+    --- Left: recipe list. Bottom x matches the toolbar chain's left edge
+    --- (PAD + 4) — a mismatched second left anchor skews the pane rect.
     local left = CreateScrollList(f)
     left:SetPoint("TOPLEFT", toolRow2, "BOTTOMLEFT", 0, -PAD)
-    left:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PAD, PAD)
+    left:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PAD + 4, PAD)
     left:SetWidth(math.floor(WINDOW_W * LEFT_PANE_FRAC))
 
     local divider
@@ -655,7 +672,9 @@ function RecipeMatcherUI:Init()
     --- Right: sticky title + scroll
     local rightOuter = CreateFrame("Frame", nil, f, "BackdropTemplate")
     rightOuter:SetPoint("TOPLEFT", divider, "TOPRIGHT", PANE_GAP, 0)
-    rightOuter:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PAD, PAD)
+    --- Mirror the toolbar right edge (PAD + 4) so both panes sit symmetric
+    --- under the rows above.
+    rightOuter:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -(PAD + 4), PAD)
     rightOuter:SetClipsChildren(true)
     if ns.UI_StylePanelInset then
         ns.UI_StylePanelInset(rightOuter, COLORS.bgCard, COLORS.border)
@@ -703,6 +722,13 @@ function RecipeMatcherUI:Init()
 
     local btnShopSelected = makeShopBtn()
     local btnShopFiltered = makeShopBtn()
+
+    --- Modern skin has no template disabled art: without this, a dead
+    --- "Add selected" looks fully clickable (Classic grays out natively).
+    for _, sb in ipairs({ btnShopSelected, btnShopFiltered }) do
+        sb:SetScript("OnDisable", function(self) self:SetAlpha(0.45) end)
+        sb:SetScript("OnEnable", function(self) self:SetAlpha(1) end)
+    end
 
     local function layoutShopBar()
         if ns.UI_LayoutStretchRow then
@@ -860,23 +886,49 @@ function RecipeMatcherUI:Init()
             RequestFullRefresh()
         end)
     end
+
+    self:LayoutClassicShellChrome()
+end
+
+function RecipeMatcherUI:LayoutClassicShellChrome()
+    local f = self.main
+    if not f then
+        return
+    end
+    if ns.UI_RefreshClassicMainWindowShell then
+        ns.UI_RefreshClassicMainWindowShell(f)
+    elseif f.headerBar and ns.UI_RefreshWindowHeader then
+        ns.UI_RefreshWindowHeader(f.headerBar)
+    end
+    if f.status and ns.UI_AnchorClassicShellBodyRow then
+        ns.UI_AnchorClassicShellBodyRow(f.status, f, f.headerBar, PAD + 4, 4)
+    end
 end
 
 function RecipeMatcherUI:ResetForUiMode()
     if self.main then
         self.main:Hide()
+        --- Discarded chrome must leave BORDER_REGISTRY (infra MUST).
+        if ns.UI_UnregisterVisuals then
+            ns.UI_UnregisterVisuals(self.main)
+        end
         self.main = nil
     end
 end
 
 function RecipeMatcherUI:RefreshTheme()
     if not self.main then return end
+    --- Painted strings carry palette-resolved hex — force both panes to
+    --- repaint with the new theme's colors.
+    rightPaintCache.spellID = nil
+    rightPaintCache.bagGen = -1
     if ns.UI_ApplyMainWindowChrome then
         ns.UI_ApplyMainWindowChrome(self.main)
     end
     if ns.UI_RefreshWindowHeader then
         ns.UI_RefreshWindowHeader(self.main.headerBar)
     end
+    self:LayoutClassicShellChrome()
     if self.main.title then
         if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
             self.main.title:SetTextColor(1, 0.82, 0)
@@ -1110,9 +1162,13 @@ local function BuildLeftPaintQueue(order, groups, mode)
         end
         local rightText
         if mode == "bag" then
-            rightText = string.format("%d ready / %d total", craftableCount, #g)
+            rightText = string.format(
+                (L and L["RECIPE_MATCHER_READY_TOTAL_FMT"]) or "%d ready / %d total",
+                craftableCount, #g)
         else
-            rightText = string.format("%d / %d cached", cachedCount, #g)
+            rightText = string.format(
+                (L and L["RECIPE_MATCHER_CACHED_FMT"]) or "%d / %d cached",
+                cachedCount, #g)
         end
         queue[#queue + 1] = { kind = "header", prof = prof, label = prof, right = rightText }
         if not IsCollapsed(prof) then
@@ -1161,6 +1217,12 @@ local function PaintLeftQueue(self, queue, gen, qi, y, rowIndex, sectionIndex)
         return
     end
     list.content:SetHeight(-y + 8)
+    --- Chunked paint finishes async: bar visibility/thumb were computed against
+    --- the PREVIOUS content height in RefreshLeft_*; re-run on the final chunk
+    --- (modern scroll has no OnScrollRangeChanged hook — classic does).
+    if ns.UI_FinishScrollLayout and list.scroll then
+        ns.UI_FinishScrollLayout(list.scroll)
+    end
 end
 
 local function StartLeftPaint(self, queue)
@@ -1243,6 +1305,25 @@ RefreshLeft_Recipe = function(self)
     if filter == "All" then filter = nil end
     local entries = GetRecipeEntriesCached(svc, filter)
 
+    if #entries == 0 then
+        --- Mirror the bag-mode empty state: a fully blank pane with no message
+        --- reads as broken when the catalog is empty/unavailable.
+        BumpLeftDraw()
+        local list = self.left
+        ReleaseRows(list)
+        ReleaseSectionHeaders(list)
+        local row = AcquireRow(list, 1, -4)
+        row.icon:SetTexture("Interface\\Icons\\INV_Misc_Note_01")
+        row.label:SetText(HexDim((L and L["RECIPE_MATCHER_EMPTY_RECIPE"])
+            or "No recipes for this filter yet - open a Midnight profession, then Scan."))
+        row.right:SetText("")
+        list.content:SetHeight(ROW_H + 8)
+        if ns.UI_FinishScrollLayout and list.scroll then
+            ns.UI_FinishScrollLayout(list.scroll)
+        end
+        return
+    end
+
     local order, groups = GroupByProfession(entries)
     for _, g in pairs(groups) do
         table.sort(g, function(a, b) return (a.name or "") < (b.name or "") end)
@@ -1280,7 +1361,16 @@ RefreshRight = function(self)
         if self.rightTitleBar then
             self.rightTitleBar:SetHeight(36)
         end
-        list.content:SetHeight(8)
+        --- In-viewport empty state: title-bar text alone leaves a large blank
+        --- pane that reads as broken (and tints as a void under /an debug).
+        local hintRow = AcquireRow(list, 1)
+        hintRow.icon:SetTexture("Interface\\Icons\\INV_Misc_Note_01")
+        hintRow.label:SetText(HexDim((L and L["RECIPE_MATCHER_EMPTY_DETAIL_HINT"])
+            or "Select a recipe on the left to see reagents, cost and value."))
+        hintRow.right:SetText("")
+        hintRow.tooltipItemID = nil
+        hintRow:SetScript("OnClick", nil)
+        list.content:SetHeight(ROW_H + 8)
         return
     end
 
@@ -1298,7 +1388,7 @@ RefreshRight = function(self)
     if detailTitle then
         local line = name
         if craftable then
-            line = line .. "  |cff7adf8c+ " .. ((L and L["RECIPE_MATCHER_READY"]) or "Ready") .. "|r"
+            line = line .. "  " .. HexRole("+ " .. ((L and L["RECIPE_MATCHER_READY"]) or "Ready"), "success")
         end
         detailTitle:SetText(line)
     end
@@ -1331,14 +1421,17 @@ RefreshRight = function(self)
     if outputID then
         SetItemVisual(outRow.icon, outputID)
         local outPrice = svc:EstimateOutputValue(sid)
-        local lbl = "|cffffd86bProduces:|r " .. ItemName(outputID, refreshCb)
-        outRow.label:SetText(lbl)
-        outRow.right:SetText(FormatCopper(outPrice) or "|cff666666no AH price|r")
+        outRow.label:SetText(
+            HexRole((L and L["RECIPE_MATCHER_PRODUCES_LABEL"]) or "Produces:", "warning")
+            .. " " .. ItemName(outputID, refreshCb))
+        outRow.right:SetText(FormatCopper(outPrice)
+            or HexDim((L and L["RECIPE_MATCHER_NO_AH_PRICE"]) or "no AH price"))
         outRow.tooltipItemID = outputID
     else
         local schOut = svc.GetSchematic and svc:GetSchematic(sid)
         SetRecipeRowIcon(outRow.icon, sid, nil, schOut and schOut.recipeIcon, refreshCb)
-        outRow.label:SetText(HexDim("Produces: (unknown - open profession to harvest)"))
+        outRow.label:SetText(HexDim((L and L["RECIPE_MATCHER_PRODUCES_UNKNOWN"])
+            or "Produces: (unknown - open profession to harvest)"))
         outRow.right:SetText("")
         outRow.tooltipItemID = nil
     end
@@ -1351,26 +1444,28 @@ RefreshRight = function(self)
     costRow:SetPoint("RIGHT", list.content, "RIGHT", -LIST_EDGE_PAD, 0)
     costRow.icon:SetTexture(133784) -- coin
     local cost, missing = svc:EstimateReagentCost(sid)
+    local costLabel = (L and L["RECIPE_MATCHER_REAGENT_COST_LABEL"]) or "Reagent AH cost:"
     if cost then
-        local txt = "|cffa0c8ffReagent AH cost:|r " .. (FormatCopper(cost) or "-")
+        local txt = HexRole(costLabel, "muted") .. " " .. (FormatCopper(cost) or "-")
         if missing > 0 then
-            txt = txt .. HexDim(string.format(" (%d unpriced)", missing))
+            txt = txt .. HexDim(string.format(
+                " " .. ((L and L["RECIPE_MATCHER_UNPRICED_FMT"]) or "(%d unpriced)"), missing))
         end
         costRow.label:SetText(txt)
         local out = svc:EstimateOutputValue(sid)
         if out and cost > 0 then
             local margin = out - cost
             local pct = math.floor((margin / cost) * 100 + 0.5)
-            if margin >= 0 then
-                costRow.right:SetText(string.format("|cff66ff66+%s (%+d%%)|r", FormatCopper(margin) or "", pct))
-            else
-                costRow.right:SetText(string.format("|cffff6666%s (%+d%%)|r", FormatCopper(margin) or "", pct))
-            end
+            costRow.right:SetText(HexRole(string.format(
+                (margin >= 0) and "+%s (%+d%%)" or "%s (%+d%%)",
+                FormatCopper(margin) or "", pct),
+                (margin >= 0) and "success" or "danger"))
         else
             costRow.right:SetText("")
         end
     else
-        costRow.label:SetText(HexDim("Reagent AH cost: run /an ah to scan prices"))
+        costRow.label:SetText(HexDim((L and L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"])
+            or "Reagent AH cost: run /an ah to scan prices"))
         costRow.right:SetText("")
     end
     costRow.tooltipItemID = nil
@@ -1525,6 +1620,7 @@ function RecipeMatcherUI:Show(arg)
     self:Init()
     self:EnsureFrameSize()
     if self.layoutToolbar then self.layoutToolbar() end
+    self:LayoutClassicShellChrome()
     local opts = type(arg) == "table" and arg or nil
     if ns.UI_PresentCraftWindow then
         ns.UI_PresentCraftWindow(self.main, "recipes", opts)

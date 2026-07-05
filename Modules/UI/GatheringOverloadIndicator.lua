@@ -83,23 +83,57 @@ end
 local function GetTrackerChromeMetrics()
     local layout = ns.UI_LAYOUT or {}
     local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
-    local inset = classic and (ns.UI_GetClassicDialogInset and ns.UI_GetClassicDialogInset() or 8) or 0
-    local headerH = classic and (layout.CLASSIC_SHELL_TITLE_STRIP_HEIGHT or layout.SHELL_HEADER_HEIGHT_CLASSIC or 36)
-        or (layout.OVERLOAD_DRAG_BAR_HEIGHT or 24)
-    local contentTop = classic and (ns.UI_GetClassicShellContentTop and ns.UI_GetClassicShellContentTop())
-        or (headerH + (layout.OVERLOAD_BODY_GAP or 6))
+    local shellPad = layout.SHELL_PAD or layout.BASE_INDENT or 12
+    local inset = shellPad
+    if classic and ns.UI_GetClassicShellHorizontalInset then
+        inset = ns.UI_GetClassicShellHorizontalInset()
+    end
+    local contentTop
+    if classic and ns.UI_GetClassicShellContentTop then
+        contentTop = ns.UI_GetClassicShellContentTop()
+    else
+        contentTop = (layout.SHELL_HEADER_HEIGHT or 44) + (layout.OVERLOAD_BODY_GAP or 6)
+    end
     return {
         classic = classic,
         inset = inset,
-        headerH = headerH,
+        sidePad = inset,
         contentTop = contentTop,
+        bottomPad = classic and inset or shellPad,
         rowH = layout.OVERLOAD_ROW_HEIGHT or 32,
         rowGap = layout.OVERLOAD_ROW_GAP or 4,
         bodyPad = layout.OVERLOAD_BODY_PAD or 6,
-        bodyGap = layout.OVERLOAD_BODY_GAP or 6,
         modifierH = layout.OVERLOAD_MODIFIER_HEIGHT or 16,
-        trackerW = layout.OVERLOAD_TRACKER_WIDTH or 220,
+        trackerW = layout.OVERLOAD_TRACKER_WIDTH or 248,
     }
+end
+
+local function AnchorTrackerBody(tracker, body, headerBar)
+    if not tracker or not body then
+        return
+    end
+    local m = GetTrackerChromeMetrics()
+    body:ClearAllPoints()
+    if m.classic and ns.UI_GetClassicShellContentTop then
+        body:SetPoint("TOPLEFT", tracker, "TOPLEFT", m.inset, -m.contentTop)
+        body:SetPoint("TOPRIGHT", tracker, "TOPRIGHT", -m.inset, -m.contentTop)
+    elseif headerBar then
+        local gap = (ns.UI_LAYOUT or {}).OVERLOAD_BODY_GAP or 6
+        body:SetPoint("TOPLEFT", headerBar, "BOTTOMLEFT", m.sidePad, -gap)
+        body:SetPoint("TOPRIGHT", headerBar, "BOTTOMRIGHT", -m.sidePad, -gap)
+    end
+end
+
+local function HideTrackerHud(tracker)
+    if ns.db and ns.db.profile then
+        ns.db.profile.overloadTrackerHudEnabled = false
+    end
+    if tracker and tracker.Hide then
+        tracker:Hide()
+    end
+    if ns.LootHistoryUI and ns.LootHistoryUI.UpdateOverloadTrackerToggle then
+        ns.LootHistoryUI:UpdateOverloadTrackerToggle()
+    end
 end
 
 --- Reposition rows / height when only one of herb/mine is known.
@@ -137,7 +171,7 @@ local function ApplyOverloadTrackerLayout(indicator)
         return
     end
 
-    local rowW = m.trackerW - (m.inset * 2) - (m.bodyPad * 2)
+    local rowW = m.trackerW - (m.sidePad * 2) - (m.bodyPad * 2)
     herb:SetWidth(rowW)
     mine:SetWidth(rowW)
 
@@ -159,7 +193,10 @@ local function ApplyOverloadTrackerLayout(indicator)
     local rowsH = n * m.rowH + math.max(0, n - 1) * m.rowGap
     local bodyH = m.bodyPad + rowsH + modifierH + m.bodyPad
     body:SetHeight(bodyH)
-    tr:SetHeight(m.contentTop + bodyH + m.inset)
+    tr:SetHeight(m.contentTop + bodyH + m.bottomPad)
+    if tr._anHeader and ns.UI_RefreshClassicWindowHeader then
+        ns.UI_RefreshClassicWindowHeader(tr._anHeader)
+    end
 end
 
 --- Tracker: always **Saat Dakika** (ceil to next minute; no seconds, no em dash for long CDs).
@@ -214,7 +251,7 @@ local function CreateTrackerRow(parent, cat)
     local rowH = layout.OVERLOAD_ROW_HEIGHT or 32
     local iconSz = layout.OVERLOAD_ICON_SIZE or 22
     local chrome = GetTrackerChromeMetrics()
-    local rowW = chrome.trackerW - (chrome.inset * 2) - (chrome.bodyPad * 2)
+    local rowW = chrome.trackerW - (chrome.sidePad * 2) - (chrome.bodyPad * 2)
     local bodyFont = fonts.WINDOW_BODY or "GameFontNormal"
     local metaFont = fonts.WINDOW_META or "GameFontHighlightSmall"
     local row = CreateFrame("Frame", nil, parent, "BackdropTemplate")
@@ -252,90 +289,82 @@ local function CreateTrackerRow(parent, cat)
     return row
 end
 
+function GatheringOverloadIndicator:RefreshTrackerChrome()
+    local tr = self.tracker
+    if not tr then
+        return
+    end
+    if ns.UI_ApplyMainWindowChrome then
+        ns.UI_ApplyMainWindowChrome(tr)
+    end
+    if tr.headerBar and ns.UI_RefreshWindowHeader then
+        ns.UI_RefreshWindowHeader(tr.headerBar)
+    end
+    if tr._anBody then
+        AnchorTrackerBody(tr, tr._anBody, tr._anHeader)
+    end
+    --- FontStrings are not in BORDER_REGISTRY: re-tint here or the modifier
+    --- keeps the previous theme's color until a full UI-mode rebuild.
+    if self.modifierLabel then
+        local C = ns.UI_COLORS
+        if C and C.textNormal then
+            self.modifierLabel:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3], 1)
+        end
+    end
+end
+
 function GatheringOverloadIndicator:EnsureFrames()
     if self.tracker then
         return
     end
 
-    local tracker = CreateFrame("Frame", "ArtisanNexusOverloadTrackerFrame", UIParent, "BackdropTemplate")
     local fonts = ns.UI_FONTS or {}
     local m = GetTrackerChromeMetrics()
-    tracker:SetSize(m.trackerW, 96)
+    local C = ns.UI_COLORS
+
+    local tracker = CreateFrame("Frame", "ArtisanNexusOverloadTrackerFrame", UIParent, "BackdropTemplate")
+    tracker:SetSize(m.trackerW, 120)
     do
         local point, relativePoint, x, y = GetTrackerAnchor()
         tracker:SetPoint(point, UIParent, relativePoint, x, y)
     end
     tracker:SetFrameStrata("MEDIUM")
     tracker:SetMovable(true)
+    --- Position persists across sessions — never let it be saved off-screen.
+    tracker:SetClampedToScreen(true)
     tracker:EnableMouse(true)
     if tracker.SetClipsChildren then
         tracker:SetClipsChildren(false)
     end
-    local C = ns.UI_COLORS
-    if m.classic and ns.UI_ApplyClassicDialogBackdrop then
+
+    if ns.UI_ApplyMainWindowChrome then
+        ns.UI_ApplyMainWindowChrome(tracker)
+    elseif m.classic and ns.UI_ApplyClassicDialogBackdrop then
         ns.UI_ApplyClassicDialogBackdrop(tracker)
     elseif ns.UI_StylePanelInset and C then
         ns.UI_StylePanelInset(tracker, C.bgCard, C.border)
-    elseif ns.UI_ApplyVisuals and C then
-        ns.UI_ApplyVisuals(tracker, C.bgCard, { C.accent[1], C.accent[2], C.accent[3], 0.64 })
-    else
-        tracker:SetBackdrop({
-            bgFile = "Interface\\Buttons\\WHITE8x8",
-            edgeFile = "Interface\\Buttons\\WHITE8x8",
-            edgeSize = 1,
-        })
-        tracker:SetBackdropColor(0.12, 0.11, 0.14, 0.82)
-        tracker:SetBackdropBorderColor(0.52, 0.40, 0.66, 0.62)
     end
 
-    -- Shell header flush on window top (classic DialogBox-Header strip).
-    local headerBar = CreateFrame("Frame", nil, tracker, "BackdropTemplate")
-    headerBar._anShellParent = tracker
-    headerBar:SetPoint("TOPLEFT", tracker, "TOPLEFT", 0, 0)
-    headerBar:SetPoint("TOPRIGHT", tracker, "TOPRIGHT", 0, 0)
-    headerBar:SetHeight(m.classic and m.contentTop or m.headerH)
-    headerBar:EnableMouse(true)
-    headerBar:RegisterForDrag("LeftButton")
-    headerBar:SetScript("OnDragStart", function()
-        tracker:StartMoving()
-    end)
-    headerBar:SetScript("OnDragStop", function()
-        tracker:StopMovingOrSizing()
-        SaveTrackerAnchor(tracker)
-    end)
-    tracker._anHeader = headerBar
-    tracker._anDragBar = headerBar
+    local shell = ns.UI_CreateWindowHeader(tracker, {
+        title = (L and L["OVERLOAD_TRACKER_TITLE"]) or "Overload Tracker",
+        dragFrame = tracker,
+        showSettings = false,
+        showLogo = true,
+        onDragStop = function()
+            tracker:StopMovingOrSizing()
+            SaveTrackerAnchor(tracker)
+        end,
+        onClose = function()
+            HideTrackerHud(tracker)
+        end,
+    })
+    tracker._anShell = shell
+    tracker._anHeader = shell.bar
+    tracker.headerBar = shell.bar
+    tracker._anDragBar = shell.bar
 
-    local title = headerBar:CreateFontString(nil, "OVERLAY", fonts.WINDOW_SECTION or "GameFontHighlightMedium")
-    title:SetJustifyH("CENTER")
-    title:SetWordWrap(false)
-    title:SetMaxLines(1)
-    title:SetText((L and L["OVERLOAD_TRACKER_TITLE"]) or "Overload Tracker")
-    headerBar._anShellTitle = title
-    if m.classic and ns.UI_ApplyClassicDialogTitleBar then
-        ns.UI_ApplyClassicDialogTitleBar(tracker, title)
-    elseif ns.UI_RefreshWindowHeader then
-        ns.UI_RefreshWindowHeader(headerBar)
-        title:SetPoint("CENTER", headerBar, "CENTER", 0, 0)
-    elseif C and C.textBright then
-        title:SetPoint("CENTER", headerBar, "CENTER", 0, 0)
-        title:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3], 1)
-    else
-        title:SetPoint("CENTER", headerBar, "CENTER", 0, 0)
-        title:SetTextColor(0.95, 0.95, 0.96, 1)
-    end
-
-    local body = CreateFrame("Frame", nil, tracker, "BackdropTemplate")
-    if m.classic then
-        body:SetPoint("TOPLEFT", tracker, "TOPLEFT", m.inset, -m.contentTop)
-        body:SetPoint("TOPRIGHT", tracker, "TOPRIGHT", -m.inset, -m.contentTop)
-    else
-        body:SetPoint("TOPLEFT", headerBar, "BOTTOMLEFT", 0, -m.bodyGap)
-        body:SetPoint("TOPRIGHT", headerBar, "BOTTOMRIGHT", 0, -m.bodyGap)
-    end
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(body)
-    end
+    local body = CreateFrame("Frame", nil, tracker)
+    AnchorTrackerBody(tracker, body, shell.bar)
     tracker._anBody = body
 
     local modifier = body:CreateFontString(nil, "OVERLAY", fonts.WINDOW_META or "GameFontHighlightSmall")
@@ -353,6 +382,20 @@ function GatheringOverloadIndicator:EnsureFrames()
     self.trackerRows.herb = CreateTrackerRow(body, "herb")
     self.trackerRows.mine = CreateTrackerRow(body, "mine")
     ApplyOverloadTrackerLayout(self)
+
+    --- Ticker lives on THIS tracker: a UI-mode rebuild discards the old frame
+    --- (and its OnUpdate), so wiring here — not in Init — keeps the countdown
+    --- alive after ResetForUiMode. Throttle FIRST: the visibility check walks
+    --- profession scans and must not run per frame.
+    tracker:SetScript("OnUpdate", function(_, elapsed)
+        local ind = GatheringOverloadIndicator
+        ind._trackerElapsed = (ind._trackerElapsed or 0) + (elapsed or 0)
+        if ind._trackerElapsed < 0.35 then
+            return
+        end
+        ind._trackerElapsed = 0
+        ind:RefreshTracker()
+    end)
 end
 
 --- UI-mode switch: drop cached HUD frames, then Init rebuilds with the active
@@ -363,13 +406,19 @@ function GatheringOverloadIndicator:ResetForUiMode()
         return
     end
     self.tracker:Hide()
+    if ns.UI_UnregisterVisuals then
+        ns.UI_UnregisterVisuals(self.tracker)
+    end
     self.tracker = nil
     self.modifierLabel = nil
     if self.trackerRows then
         self.trackerRows.herb = nil
         self.trackerRows.mine = nil
     end
-    self:Init()
+    self._chromeDirty = true
+    --- Init is _inited-guarded (messages stay wired); the rebuild itself runs
+    --- through RefreshTracker -> EnsureFrames, which re-installs the ticker.
+    self:RefreshTracker()
 end
 
 --- Tracker icon: path, fileId, or C_Spell.GetSpellInfo iconID (Retail).
@@ -488,8 +537,15 @@ function GatheringOverloadIndicator:RefreshTracker()
         end
         return
     end
+    local built = self.tracker ~= nil
     self:EnsureFrames()
-    ApplyOverloadTrackerLayout(self)
+    --- Chrome (SetBackdrop + table allocs) and layout only when something
+    --- actually changed — not on every 0.35s countdown tick.
+    if not built or self._chromeDirty then
+        self._chromeDirty = nil
+        self:RefreshTrackerChrome()
+        ApplyOverloadTrackerLayout(self)
+    end
     if self.tracker then
         self.tracker:Show()
     end
@@ -502,8 +558,9 @@ function GatheringOverloadIndicator:RefreshTracker()
 end
 
 function GatheringOverloadIndicator:OnHint(_, payload)
-    self:EnsureFrames()
     if not IsWorldOverloadFeatureEnabled() or not payload or not payload.active then
+        --- Disable/clear path must not BUILD frames for users with the feature
+        --- off (Disable() emits a nil hint that used to construct the HUD).
         self._lastPayload = nil
         self:RefreshTracker()
         if self.modifierLabel then
@@ -511,6 +568,9 @@ function GatheringOverloadIndicator:OnHint(_, payload)
         end
         return
     end
+    self:EnsureFrames()
+    --- Hints are sparse: refresh row layout (profession ownership) with them.
+    self._chromeDirty = true
 
     self._lastPayload = payload
 
@@ -531,27 +591,21 @@ function GatheringOverloadIndicator:Init()
         return
     end
     self._inited = true
-    self:EnsureFrames()
+    --- Frames + OnUpdate ticker are owned by EnsureFrames (via RefreshTracker)
+    --- so a UI-mode rebuild rewires them; Init wires messages only.
     self:RefreshTracker()
-    if self.tracker then
-        self.tracker:SetScript("OnUpdate", function(_, elapsed)
-            if not ShouldShowOverloadTrackerHud() then
-                return
-            end
-            GatheringOverloadIndicator._trackerElapsed = (GatheringOverloadIndicator._trackerElapsed or 0) + (elapsed or 0)
-            if GatheringOverloadIndicator._trackerElapsed < 0.35 then
-                return
-            end
-            GatheringOverloadIndicator._trackerElapsed = 0
-            GatheringOverloadIndicator:RefreshTracker()
-        end)
-    end
 
     local owner = self._eventOwner or ns.NewEventOwner("GatheringOverloadIndicator")
     self._eventOwner = owner
     if E and E.GATHERING_OVERLOAD_HINT_UPDATED then
         owner:RegisterMessage(E.GATHERING_OVERLOAD_HINT_UPDATED, function(_, payload)
             GatheringOverloadIndicator:OnHint(nil, payload)
+        end)
+    end
+    if E and E.THEME_CHANGED then
+        owner:RegisterMessage(E.THEME_CHANGED, function()
+            GatheringOverloadIndicator._chromeDirty = true
+            GatheringOverloadIndicator:RefreshTrackerChrome()
         end)
     end
     if E and E.GATHERING_LOOT_RECORDED then

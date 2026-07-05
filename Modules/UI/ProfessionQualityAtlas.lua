@@ -186,7 +186,9 @@ function ns.GetProfessionDisplayTierForItem(itemID)
     end
     local q
     if C_Item and C_Item.GetItemQualityByID then
-        local ok, qv = pcall(C_Item.GetItemQualityByID, C_Item, itemID)
+        --- Namespace function, not a method: passing C_Item as arg1 made this
+        --- error inside pcall every call and mask the modern API path entirely.
+        local ok, qv = pcall(C_Item.GetItemQualityByID, itemID)
         if ok then
             q = qv
         end

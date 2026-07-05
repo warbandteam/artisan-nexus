@@ -21,22 +21,50 @@ local LOOT_MIN_W = LAYOUT.LOOT_FRAME_MIN_WIDTH or 340
 local LOOT_MIN_H = LAYOUT.LOOT_FRAME_MIN_HEIGHT or 420
 local LOOT_MAX_W = LAYOUT.LOOT_FRAME_MAX_WIDTH or 900
 local LOOT_MAX_H = LAYOUT.LOOT_FRAME_MAX_HEIGHT or 900
-local LOOT_SCROLL_PAD = 6
+--- Resize grip footprint: 18px art + 5px inset + 1px gap. The session list
+--- bottom must clear it so the grip never covers the scrollbar's down button.
+local LOOT_GRIP_SIZE = 18
+local LOOT_GRIP_INSET_X = 4
+local LOOT_GRIP_INSET_Y = 5
+local LOOT_BOTTOM_CLEARANCE = LOOT_GRIP_SIZE + LOOT_GRIP_INSET_Y + 1
+--- Space above sessionHost reserved for the "Last N pickups" heading (FontString anchors are unreliable for layout).
+local LOOT_SESSION_LABEL_BAND = 26
+--- Native UIPanelScrollFrameTemplate right gutter (Blizzard default; bar stays inside panel).
+local LOOT_CLASSIC_SCROLL_PAD_R = 24
+
+local function LootUsesExternalScrollBar()
+    return not (ns.UI_IsClassicUi and ns.UI_IsClassicUi())
+end
 
 local function LootScrollReserve()
+    if not LootUsesExternalScrollBar() then
+        return 0
+    end
     return (LAYOUT.SCROLLBAR_COLUMN_WIDTH or 26) + (LAYOUT.SCROLL_GAP or 2)
 end
 
-local function LootScrollAttachOpts(host)
+local function LootScrollAttachOpts(host, panel)
     local pad = 4
-    return ns.UI_BuildExternalScrollOpts(host, {
+    if LootUsesExternalScrollBar() then
+        return ns.UI_BuildExternalScrollOpts(host, {
+            padL = pad,
+            padT = -pad,
+            padR = pad,
+            padB = pad,
+            topInset = 0,
+            bottomInset = 0,
+        })
+    end
+    --- Classic: keep Blizzard scrollbar inside the inset panel (no host-level bar column).
+    return {
         padL = pad,
         padT = -pad,
-        padR = pad,
+        padR = LOOT_CLASSIC_SCROLL_PAD_R,
         padB = pad,
         topInset = 0,
         bottomInset = 0,
-    })
+        barParent = panel,
+    }
 end
 
 local function ApplyLootInsetToHost(panel, host)
@@ -99,10 +127,18 @@ local function ComputeSessionEfficiencyText(events)
     local newestT = tonumber(events[1] and events[1].t) or time()
     local oldestT = newestT
     local qty = 0
+    local valueCopper = 0
     for i = 1, #events do
         local e = events[i]
         if e then
-            qty = qty + math.max(0, tonumber(e.qty) or 0)
+            local q = math.max(0, tonumber(e.qty) or 0)
+            qty = qty + q
+            --- Mark-to-market like ComputeTotalsCopper: current AH/vendor unit price.
+            local nid = tonumber(e.itemID)
+            local unit = (q > 0 and nid) and LootUnitCopper(nid) or nil
+            if unit and unit > 0 then
+                valueCopper = valueCopper + (q * unit)
+            end
             local et = tonumber(e.t)
             if et and et < oldestT then
                 oldestT = et
@@ -118,8 +154,13 @@ local function ComputeSessionEfficiencyText(events)
     if spanSec < 60 then
         return nil
     end
-    local iph = qty / (spanSec / 3600)
-    return string.format("Rate: %.1f items/hr", iph)
+    local hours = spanSec / 3600
+    local iph = qty / hours
+    local goldText = FormatCopper and FormatCopper(math.floor(valueCopper / hours), 12) or nil
+    if goldText and L and L["LOOT_EFFICIENCY_FMT"] then
+        return string.format(L["LOOT_EFFICIENCY_FMT"], iph, goldText)
+    end
+    return string.format((L and L["LOOT_EFFICIENCY_ITEMS_FMT"]) or "Rate: %.1f items/hr", iph)
 end
 
 --- Top-level tab template; rendered set is filtered by owned professions (same `GetProfessions` scan as Utilities).
@@ -243,6 +284,11 @@ local function FinishLootFrameSizing()
     LootHistoryUI._isLootFrameSizing = false
     LootHistoryUI._pauseLootFx = false
     LootHistoryUI._nextLootTabLayoutTime = nil
+    --- Poll path fires when grip OnMouseUp never did — native sizing must end
+    --- here too, or the frame stays glued to the cursor.
+    if LootHistoryUI.main and LootHistoryUI.main.StopMovingOrSizing then
+        LootHistoryUI.main:StopMovingOrSizing()
+    end
     LootHistoryUI:LayoutTabs()
     LootHistoryUI:LayoutModeBtns()
     LootHistoryUI:SaveFrameSize()
@@ -380,25 +426,195 @@ local SESSION_FRAC = 0.34
 --- Köşeden sürüklerken sekme yerleşimini en fazla bu sıklıkta yap (her pikselde ClearAllPoints olmaz).
 local LOOT_LAYOUT_THROTTLE_SEC = 1 / 20
 
-function LootHistoryUI:LayoutClassicShellBodyChrome()
+function LootHistoryUI:LayoutLootBodyChrome()
     if not self.main or not self.tabBar then
         return
     end
+    local f = self.main
+    local layout = ns.UI_LAYOUT or {}
     local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
+    local contentTop = (classic and ns.UI_GetClassicShellContentTop and ns.UI_GetClassicShellContentTop())
+        or ((layout.SHELL_HEADER_HEIGHT or 44) + 8)
+
     self.tabBar:ClearAllPoints()
-    if classic and ns.UI_GetClassicShellContentTop then
-        local top = ns.UI_GetClassicShellContentTop()
-        self.tabBar:SetPoint("TOPLEFT", self.main, "TOPLEFT", PAD, -top)
-        self.tabBar:SetPoint("TOPRIGHT", self.main, "TOPRIGHT", -PAD, -top)
-    elseif self.headerBar then
-        self.tabBar:SetPoint("TOPLEFT", self.headerBar, "BOTTOMLEFT", PAD, -6)
-        self.tabBar:SetPoint("TOPRIGHT", self.headerBar, "BOTTOMRIGHT", -PAD, -6)
+    self.tabBar:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -contentTop)
+    self.tabBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -PAD, -contentTop)
+
+    if self.modeBar then
+        self.modeBar:ClearAllPoints()
+        self.modeBar:SetPoint("TOPLEFT", self.tabBar, "BOTTOMLEFT", 0, -8)
+        self.modeBar:SetPoint("TOPRIGHT", self.tabBar, "BOTTOMRIGHT", 0, -8)
+    end
+
+    local hdrLvl = (self.headerBar and self.headerBar:GetFrameLevel()) or (f:GetFrameLevel() or 0)
+    local bodyLvl = hdrLvl + 10
+    if self.headerBar and self.headerBar.SetFrameLevel then
+        self.headerBar:SetFrameLevel(hdrLvl)
+    end
+    local band = {
+        self.tabBar,
+        self.modeBar,
+        self.resetRow,
+        self.catalogHost,
+        self.sessionHost,
+        self.sessionSectionLabel,
+        self.sessionEfficiencyLabel,
+        self.catalogSectionLabel,
+        self.catalogTotalLabel,
+        self.resizeGrip,
+    }
+    for i = 1, #band do
+        local w = band[i]
+        if w and w.SetFrameLevel then
+            w:SetFrameLevel(bodyLvl)
+        end
+    end
+
+    self:LayoutTabs()
+    self:LayoutModeBtns()
+    self:LayoutLootCatalogHost()
+end
+
+--- Catalog body fills the band between the "Catalog" header row and the session heading.
+function LootHistoryUI:LayoutLootCatalogHost()
+    if not self.catalogHost or not self.refRow or not self.sessionHost then
+        return
+    end
+    self.catalogHost:ClearAllPoints()
+    self.catalogHost:SetPoint("TOPLEFT", self.refRow, "BOTTOMLEFT", 0, -4)
+    self.catalogHost:SetPoint("TOPRIGHT", self.refRow, "BOTTOMRIGHT", 0, -4)
+    self.catalogHost:SetPoint("BOTTOM", self.sessionHost, "TOP", 0, LOOT_SESSION_LABEL_BAND)
+end
+
+function LootHistoryUI:LayoutClassicShellBodyChrome()
+    self:LayoutLootBodyChrome()
+end
+
+--- Match scroll-child width to the live viewport (RecipeMatcher parity).
+function LootHistoryUI:SyncLootScrollContentWidths()
+    if self.catalogScroll and self.catalogContent then
+        if ns.UI_FinishScrollLayout then
+            ns.UI_FinishScrollLayout(self.catalogScroll)
+        end
+        if ns.UI_SyncScrollChildWidth then
+            ns.UI_SyncScrollChildWidth(self.catalogScroll, self.catalogContent, 0)
+        else
+            local w = self.catalogScroll:GetWidth()
+            if w and w > 8 then
+                self.catalogContent:SetWidth(w)
+            end
+        end
+    end
+    if self.sessionScroll and self.sessionContent then
+        if ns.UI_FinishScrollLayout then
+            ns.UI_FinishScrollLayout(self.sessionScroll)
+        end
+        if ns.UI_SyncScrollChildWidth then
+            ns.UI_SyncScrollChildWidth(self.sessionScroll, self.sessionContent, 0)
+        else
+            local w = self.sessionScroll:GetWidth()
+            if w and w > 8 then
+                self.sessionContent:SetWidth(w)
+            end
+        end
+    end
+end
+
+function LootHistoryUI:GetCatalogInnerWidth()
+    if not self.catalogContent then
+        return nil
+    end
+    if self.catalogScroll and ns.UI_FinishScrollLayout then
+        ns.UI_FinishScrollLayout(self.catalogScroll)
+    end
+    if self.catalogScroll and ns.UI_SyncScrollChildWidth then
+        ns.UI_SyncScrollChildWidth(self.catalogScroll, self.catalogContent, 0)
+    end
+    local w = self.catalogContent:GetWidth()
+    if w and w >= 80 then
+        return w
+    end
+    if self.catalogScroll then
+        w = self.catalogScroll:GetWidth()
+        if w and w >= 80 then
+            return w
+        end
+    end
+    if self.catalogPanel then
+        w = self.catalogPanel:GetWidth()
+        if w and w >= 80 then
+            return math.max(80, w - 8)
+        end
+    end
+    return nil
+end
+
+function LootHistoryUI:ScheduleDeferredRefresh()
+    if self._deferLootRefresh then
+        return
+    end
+    if not C_Timer or not C_Timer.After then
+        return
+    end
+    self._deferLootRefresh = true
+    C_Timer.After(0, function()
+        self._deferLootRefresh = nil
+        if not self.main or not self.main:IsShown() then
+            return
+        end
+        self:LayoutLootCatalogHost()
+        self:LayoutLootScrollChrome()
+        self:Refresh()
+    end)
+end
+
+function LootHistoryUI:HookLootScrollWidthSync()
+    if self._lootScrollWidthHooked then
+        return
+    end
+    self._lootScrollWidthHooked = true
+    local function onCatalogHostSized()
+        if self._isLootFrameSizing or not self.main or not self.main:IsShown() then
+            return
+        end
+        if self._catalogWidthRefreshPending then
+            return
+        end
+        self._catalogWidthRefreshPending = true
+        C_Timer.After(0, function()
+            self._catalogWidthRefreshPending = nil
+            if not self.main or not self.main:IsShown() then
+                return
+            end
+            self:LayoutLootScrollChrome()
+            self:Refresh()
+        end)
+    end
+    if self.catalogScroll and self.catalogScroll.SetScript then
+        self.catalogScroll:SetScript("OnSizeChanged", onCatalogHostSized)
+    end
+    if self.catalogHost and self.catalogHost.SetScript then
+        self.catalogHost:SetScript("OnSizeChanged", onCatalogHostSized)
     end
 end
 
 function LootHistoryUI:LayoutLootScrollChrome()
     ApplyLootInsetToHost(self.catalogPanel, self.catalogHost)
     ApplyLootInsetToHost(self.sessionPanel, self.sessionHost)
+    if self.catalogScroll and self.catalogPanel and self.catalogScroll.SetFrameLevel then
+        local pl = self.catalogPanel:GetFrameLevel() or 0
+        self.catalogScroll:SetFrameLevel(pl + 2)
+        if self.catalogContent then
+            self.catalogContent:SetFrameLevel(pl + 3)
+        end
+    end
+    if self.sessionScroll and self.sessionPanel and self.sessionScroll.SetFrameLevel then
+        local pl = self.sessionPanel:GetFrameLevel() or 0
+        self.sessionScroll:SetFrameLevel(pl + 2)
+        if self.sessionContent then
+            self.sessionContent:SetFrameLevel(pl + 3)
+        end
+    end
     if self.catalogScroll and ns.UI_FinishScrollLayout then
         ns.UI_FinishScrollLayout(self.catalogScroll)
     end
@@ -440,6 +656,9 @@ function LootHistoryUI:LayoutTabs()
         end
     end
     local w = self.tabBar:GetWidth()
+    if (not w or w < 80) and self.main then
+        w = (self.main:GetWidth() or 0) - (PAD * 2)
+    end
     if not w or w < 80 then
         return
     end
@@ -461,6 +680,9 @@ function LootHistoryUI:LayoutModeBtns()
         return
     end
     local w = self.modeBar:GetWidth()
+    if (not w or w < 80) and self.main then
+        w = (self.main:GetWidth() or 0) - (PAD * 2)
+    end
     if not w or w < 80 then
         return
     end
@@ -524,24 +746,34 @@ function LootHistoryUI:RefreshModeButtonVisuals()
 end
 
 function LootHistoryUI:OnLootFrameSizeChanged()
+    --- SetSize fires this once per axis; skip the duplicate full relayout+Refresh
+    --- when the resolved size did not actually change since the last pass.
+    local fw = (self.main and self.main:GetWidth()) or 0
+    local fh0 = (self.main and self.main:GetHeight()) or 0
+    if not self._isLootFrameSizing
+        and self._lastLayoutW and self._lastLayoutH
+        and math.abs(fw - self._lastLayoutW) < 0.5
+        and math.abs(fh0 - self._lastLayoutH) < 0.5 then
+        return
+    end
+    self._lastLayoutW, self._lastLayoutH = fw, fh0
     if self.main and self.sessionHost then
         local fh = self.main:GetHeight() or 668
         self.sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))
     end
+    self:LayoutLootCatalogHost()
     --- Grip ile resize: sekme yerleşimini throttle et; tam düzen FinishLootFrameSizing’de.
     if self._isLootFrameSizing then
         local now = GetTime()
         if not self._nextLootTabLayoutTime or now >= self._nextLootTabLayoutTime then
             self._nextLootTabLayoutTime = now + LOOT_LAYOUT_THROTTLE_SEC
-            self:LayoutTabs()
-            self:LayoutModeBtns()
+            self:LayoutLootBodyChrome()
             self:ApplyHeaderTitleClip()
         end
         return
     end
     self._nextLootTabLayoutTime = nil
-    self:LayoutTabs()
-    self:LayoutModeBtns()
+    self:LayoutLootBodyChrome()
     self:ApplyHeaderTitleClip()
     self:Refresh()
     if self._sizeSaveTimer and self._sizeSaveTimer.Cancel then
@@ -568,10 +800,12 @@ local function SortFishingCatalogEntries(entries, totals)
     return entries
 end
 
-local function PopulateCatalog(content, entries, totals, tabKey)
-    if Draw and Draw.PopulateCatalog then
-        Draw.PopulateCatalog(content, entries, totals, tabKey)
+local function PopulateCatalog(content, entries, totals, tabKey, innerW)
+    local draw = ns.LootHistoryUIDraw
+    if not (draw and draw.PopulateCatalog) then
+        return
     end
+    draw.PopulateCatalog(content, entries, totals, tabKey, innerW)
 end
 
 local function PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)
@@ -648,6 +882,18 @@ function LootHistoryUI:Refresh()
     ClearScrollContent(self.catalogScroll, self.catalogContent)
     ClearScrollContent(self.sessionScroll, self.sessionContent)
 
+    self:LayoutLootCatalogHost()
+
+    if self.catalogHost and self.catalogHost.Show then
+        self.catalogHost:Show()
+    end
+    if self.catalogPanel and self.catalogPanel.Show then
+        self.catalogPanel:Show()
+    end
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and self.catalogPanel and ns.UI_ApplyClassicInsetPanel then
+        ns.UI_ApplyClassicInsetPanel(self.catalogPanel)
+    end
+
     if ns.UI_FinishScrollLayout then
         ns.UI_FinishScrollLayout(self.catalogScroll)
         ns.UI_FinishScrollLayout(self.sessionScroll)
@@ -655,7 +901,18 @@ function LootHistoryUI:Refresh()
 
     local cw = math.max((self.catalogScroll and self.catalogScroll:GetWidth()) or 360, 280)
     self.catalogContent:SetWidth(cw)
-    PopulateCatalog(self.catalogContent, entries, totals, self.activeTab)
+    if self.catalogScroll and self.catalogScroll.Show then
+        self.catalogScroll:Show()
+    end
+    if self.catalogContent and self.catalogContent.Show then
+        self.catalogContent:Show()
+    end
+    PopulateCatalog(self.catalogContent, entries, totals, self.activeTab, cw)
+    if self.catalogScroll and self.catalogScroll.UpdateScrollChildRect then
+        pcall(function()
+            self.catalogScroll:UpdateScrollChildRect()
+        end)
+    end
 
     local sw = math.max((self.sessionScroll and self.sessionScroll:GetWidth()) or 360, 280)
     self.sessionContent:SetWidth(sw)
@@ -682,6 +939,9 @@ function LootHistoryUI:Refresh()
         ns.UI_FinishScrollLayout(self.catalogScroll)
         ns.UI_FinishScrollLayout(self.sessionScroll)
     end
+    if self.catalogScroll and (self.catalogScroll:GetWidth() or 0) < 80 then
+        self:ScheduleDeferredRefresh()
+    end
     if self.sessionEfficiencyLabel then
         local eff = ComputeSessionEfficiencyText(eventsLastPickups)
         self.sessionEfficiencyLabel:SetText(eff or "")
@@ -694,6 +954,15 @@ end
 
 --- Title string clipped to never run under the window control cluster (overload optional).
 function LootHistoryUI:ApplyHeaderTitleClip()
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        if self.headerBar and self.overloadTrackerBtn then
+            self.headerBar._anShellExtraRight = { self.overloadTrackerBtn }
+        end
+        if self.headerBar and ns.UI_RefreshClassicWindowHeader then
+            ns.UI_RefreshClassicWindowHeader(self.headerBar)
+        end
+        return
+    end
     local ht = self.headerTitle
     local logo = self.headerLogo
     local clip = self.shellRightClip
@@ -791,6 +1060,11 @@ end
 function LootHistoryUI:ResetForUiMode()
     if self.main then
         self.main:Hide()
+        --- Discarded subtree must leave BORDER_REGISTRY or every theme/scale
+        --- refresh keeps iterating dead frames after each Classic<->Modern switch.
+        if ns.UI_UnregisterVisuals then
+            ns.UI_UnregisterVisuals(self.main)
+        end
         self.main = nil
     end
     self.shell = nil
@@ -833,13 +1107,16 @@ function LootHistoryUI:RefreshClassicChrome()
     if self.sessionSectionLabel then
         self.sessionSectionLabel:SetTextColor(1, 0.82, 0)
     end
+    if self.catalogSectionLabel then
+        self.catalogSectionLabel:SetTextColor(1, 0.82, 0)
+    end
     if self.catalogTotalLabel then
         self.catalogTotalLabel:SetTextColor(1, 0.82, 0)
     end
     if self.headerBar and ns.UI_RefreshClassicWindowHeader then
         ns.UI_RefreshClassicWindowHeader(self.headerBar)
     end
-    self:LayoutClassicShellBodyChrome()
+    self:LayoutLootBodyChrome()
     if self.settingsBtn and ns.UI_StyleClassicToolButton then
         ns.UI_StyleClassicToolButton(self.settingsBtn)
     end
@@ -867,7 +1144,10 @@ function LootHistoryUI:RefreshTheme()
     if ns.UI_RefreshWindowHeader then
         ns.UI_RefreshWindowHeader(self.headerBar)
     end
-    self:LayoutClassicShellBodyChrome()
+    if ns.UI_RefreshClassicMainWindowShell then
+        ns.UI_RefreshClassicMainWindowShell(self.main)
+    end
+    self:LayoutLootBodyChrome()
     self:RefreshClassicChrome()
     self:LayoutLootScrollChrome()
     if self.main:IsShown() then
@@ -950,10 +1230,12 @@ function LootHistoryUI:Show(which)
         end
     end
     if self.main then
-        local minW = LAYOUT.WINDOW_WIDTH or 600
-        local minH = LAYOUT.WINDOW_HEIGHT or 720
-        if (self.main:GetWidth() or 0) < minW - 16 then
-            self.main:SetSize(minW, minH)
+        --- Guard against a collapsed frame only; never stomp a legal user resize
+        --- (resize floor is LOOT_FRAME_MIN_*, well under the default WINDOW_*).
+        local minW = LOOT_MIN_W or LAYOUT.LOOT_FRAME_MIN_WIDTH or 360
+        local minH = LOOT_MIN_H or LAYOUT.LOOT_FRAME_MIN_HEIGHT or 440
+        if (self.main:GetWidth() or 0) < minW - 16 or (self.main:GetHeight() or 0) < minH - 16 then
+            self.main:SetSize(LAYOUT.WINDOW_WIDTH or 600, LAYOUT.WINDOW_HEIGHT or 720)
         end
         if ns.UI_PresentCraftWindow then
             ns.UI_PresentCraftWindow(self.main, "loot")
@@ -968,7 +1250,12 @@ function LootHistoryUI:Show(which)
             self.sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))
         end
         self:LayoutTabs()
+        self:LayoutModeBtns()
+        self:LayoutLootBodyChrome()
+        self:LayoutLootScrollChrome()
+        self:LayoutLootCatalogHost()
         self:Refresh()
+        self:ScheduleDeferredRefresh()
         return
     end
 
@@ -1087,13 +1374,11 @@ function LootHistoryUI:Show(which)
     end)
     self.overloadTrackerBtn = overloadTrackerBtn
     self.shellRightClip = overloadTrackerBtn
+    if shell.bar then
+        shell.bar._anShellExtraRight = { overloadTrackerBtn }
+    end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_StyleClassicToolButton then
         ns.UI_StyleClassicToolButton(overloadTrackerBtn)
-    end
-    if shell.title and shell.logo then
-        shell.title:ClearAllPoints()
-        shell.title:SetPoint("LEFT", shell.logo, "RIGHT", 8, 0)
-        shell.title:SetPoint("RIGHT", overloadTrackerBtn, "LEFT", -8, 0)
     end
     LootHistoryUI:ApplyHeaderTitleClip()
 
@@ -1152,7 +1437,12 @@ function LootHistoryUI:Show(which)
             end
         else
             local t = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            t:SetAllPoints()
+            --- Stretch-row tabs get narrow (7 tabs at min width); never wrap/overflow.
+            t:SetPoint("LEFT", btn, "LEFT", 2, 0)
+            t:SetPoint("RIGHT", btn, "RIGHT", -2, 0)
+            t:SetJustifyH("CENTER")
+            t:SetWordWrap(false)
+            t:SetMaxLines(1)
             t:SetText(text)
             btn:SetFontString(t)
         end
@@ -1160,7 +1450,6 @@ function LootHistoryUI:Show(which)
 
     local tabBar = CreateFrame("Frame", nil, f)
     self.tabBar = tabBar
-    LootHistoryUI:LayoutClassicShellBodyChrome()
     tabBar:SetHeight(LOOT_TAB_BAR_H)
 
     self.tabButtons = {}
@@ -1170,6 +1459,10 @@ function LootHistoryUI:Show(which)
         b:SetParent(tabBar)
         b:SetHeight(LOOT_TAB_H)
         AssignLootButtonLabel(b, labels[key] or key)
+        if classicLoot and ns.UI_StyleClassicTabButton then
+            ns.UI_StyleClassicTabButton(b, key == self.activeTab)
+        end
+        b:Show()
         b:SetScript("OnClick", function()
             LootHistoryUI:SetTab(key)
         end)
@@ -1195,6 +1488,10 @@ function LootHistoryUI:Show(which)
         mb:SetScript("OnClick", function()
             LootHistoryUI:SetMode(key)
         end)
+        if classicLoot and ns.UI_StyleClassicTabButton then
+            ns.UI_StyleClassicTabButton(mb, key == self.activeMode)
+        end
+        mb:Show()
         self.modeButtons[key] = mb
     end
 
@@ -1231,14 +1528,16 @@ function LootHistoryUI:Show(which)
         end
         LootHistoryUI:Refresh()
     end)
-    if not classicLoot and ns.UI_StylePanelButton then
+    if classicLoot and ns.UI_StyleClassicPanelButton then
+        ns.UI_StyleClassicPanelButton(resetSessionBtn)
+    elseif not classicLoot and ns.UI_StylePanelButton then
         ns.UI_StylePanelButton(resetSessionBtn)
     end
 
     --- Bottom panel: larger share of height (SESSION_FRAC); explicit height so scroll works.
     local sessionHost = CreateFrame("Frame", nil, f)
-    sessionHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PAD, 18)
-    sessionHost:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PAD, 18)
+    sessionHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PAD, LOOT_BOTTOM_CLEARANCE)
+    sessionHost:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PAD, LOOT_BOTTOM_CLEARANCE)
     do
         local fh = f:GetHeight() or LAYOUT.WINDOW_HEIGHT or 640
         sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))
@@ -1279,12 +1578,14 @@ function LootHistoryUI:Show(which)
     refRow:SetPoint("TOPLEFT", resetRow, "BOTTOMLEFT", 0, -4)
     refRow:SetPoint("TOPRIGHT", resetRow, "BOTTOMRIGHT", 0, -4)
     refRow:SetHeight(22)
+    self.refRow = refRow
 
     local labRef = refRow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     labRef:SetPoint("LEFT", refRow, "LEFT", 0, 0)
     labRef:SetJustifyH("LEFT")
     labRef:SetText((L and L["LOOT_SECTION_REFERENCE"]) or "Catalog")
     labRef:SetTextColor(COLORS.textBright[1], COLORS.textBright[2], COLORS.textBright[3])
+    self.catalogSectionLabel = labRef
 
     local labTotal = refRow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     labTotal:SetPoint("RIGHT", refRow, "RIGHT", 0, 0)
@@ -1298,7 +1599,7 @@ function LootHistoryUI:Show(which)
     local catalogHost = CreateFrame("Frame", nil, f)
     catalogHost:SetPoint("TOPLEFT", refRow, "BOTTOMLEFT", 0, -4)
     catalogHost:SetPoint("TOPRIGHT", refRow, "BOTTOMRIGHT", 0, -4)
-    catalogHost:SetPoint("BOTTOM", labSes, "TOP", 0, 6)
+    catalogHost:SetPoint("BOTTOM", sessionHost, "TOP", 0, LOOT_SESSION_LABEL_BAND)
     self.catalogHost = catalogHost
 
     local catalogPanel = CreateFrame("Frame", nil, catalogHost, "BackdropTemplate")
@@ -1308,19 +1609,20 @@ function LootHistoryUI:Show(which)
         ns.UI_StylePanelInset(catalogPanel)
     end
 
-    local catScroll, catContent = ns.UI_AttachThemedScroll(catalogPanel, LootScrollAttachOpts(catalogHost))
+    local catScroll, catContent = ns.UI_AttachThemedScroll(catalogPanel, LootScrollAttachOpts(catalogHost, catalogPanel))
     self.catalogScroll = catScroll
     self.catalogContent = catContent
+    self:HookLootScrollWidthSync()
 
-    local sesScroll, sesContent = ns.UI_AttachThemedScroll(sessionPanel, LootScrollAttachOpts(sessionHost))
+    local sesScroll, sesContent = ns.UI_AttachThemedScroll(sessionPanel, LootScrollAttachOpts(sessionHost, sessionPanel))
     self.sessionScroll = sesScroll
     self.sessionContent = sesContent
     self.sessionPanel = sessionPanel
 
     local grip = CreateFrame("Button", nil, f)
     grip:SetFrameLevel(f:GetFrameLevel() + 20)
-    grip:SetSize(18, 18)
-    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -4, 5)
+    grip:SetSize(LOOT_GRIP_SIZE, LOOT_GRIP_SIZE)
+    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -LOOT_GRIP_INSET_X, LOOT_GRIP_INSET_Y)
     grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
     grip:SetScript("OnMouseDown", function()
@@ -1347,22 +1649,30 @@ function LootHistoryUI:Show(which)
         end
         LootHistoryUI:LayoutTabs()
         LootHistoryUI:LayoutModeBtns()
+        LootHistoryUI:LayoutLootBodyChrome()
         LootHistoryUI:RefreshTabButtonVisuals()
         LootHistoryUI:RefreshModeButtonVisuals()
         if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
             LootHistoryUI:RefreshClassicChrome()
         end
+        LootHistoryUI:LayoutLootCatalogHost()
+        LootHistoryUI:LayoutLootScrollChrome()
+        LootHistoryUI:Refresh()
+        LootHistoryUI:ScheduleDeferredRefresh()
     end)
+    LootHistoryUI:LayoutLootBodyChrome()
     LootHistoryUI:LayoutTabs()
     LootHistoryUI:LayoutModeBtns()
     self:RefreshClassicChrome()
+    self:LayoutLootCatalogHost()
     self:LayoutLootScrollChrome()
-    self:Refresh()
     if ns.UI_PresentCraftWindow then
         ns.UI_PresentCraftWindow(f, "loot")
     else
         f:Show()
     end
+    self:Refresh()
+    self:ScheduleDeferredRefresh()
 end
 
 function LootHistoryUI:Hide()

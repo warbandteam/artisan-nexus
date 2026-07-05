@@ -9,6 +9,9 @@ local E = ns.Constants and ns.Constants.EVENTS
 local ProfessionEquipmentService = { _enabled = false, _lastHints = nil }
 
 local function L(key, fallback)
+    if ns.SafeLocaleString then
+        return ns.SafeLocaleString(key, fallback) or fallback
+    end
     local loc = ns.L
     if loc and loc[key] then
         return loc[key]

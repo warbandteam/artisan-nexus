@@ -127,6 +127,9 @@ end
 
 local function RefreshScrollChromeHost(host)
     if not host then return end
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        return
+    end
     if host._anTrackBg then
         ApplyScrollChromeBackdrop(host._anTrackBg)
     end

@@ -102,6 +102,8 @@ local LAYOUT = {
     CLASSIC_SHELL_TITLE_STRIP_HEIGHT = 40,
     CLASSIC_SHELL_TITLE_BODY_GAP = 4,
     CLASSIC_SHELL_CONTENT_TOP = 56,
+    CLASSIC_SHELL_TITLE_WING = 28,
+    CLASSIC_SHELL_TITLE_MIN_CENTER = 96,
     SHELL_LOGO_SIZE = 28,
     SHELL_TAB_HEIGHT = 30,
     LOOT_FRAME_MIN_WIDTH = 360,
@@ -127,7 +129,7 @@ local LAYOUT = {
     MATCHER_PANE_GAP = 6,
     OVERLOAD_ROW_HEIGHT = 32,
     OVERLOAD_ICON_SIZE = 22,
-    OVERLOAD_TRACKER_WIDTH = 220,
+    OVERLOAD_TRACKER_WIDTH = 248,
     OVERLOAD_BODY_PAD = 6,
     OVERLOAD_BODY_GAP = 6,
     OVERLOAD_ROW_GAP = 4,
@@ -280,6 +282,33 @@ function ns.UI_GetSemanticButtonChrome(kind)
         return bg, { ac[1], ac[2], ac[3], 0.70 }
     end
     return { 0.15, 0.15, 0.18, 0.9 }, { ac[1], ac[2], ac[3], 1 }
+end
+
+--- `|cffRRGGBB` hex for a semantic role, resolved from the LIVE palette at call
+--- time — paint code must not bake literal green/red escapes that ignore the
+--- light theme (AN-UX GRAY BAN / banned-patterns table).
+---@param kind "success"|"danger"|"warning"|"dim"|"muted"|"bright"
+---@return string hex six lowercase hex digits (no |cff prefix)
+function ns.UI_GetSemanticHex(kind)
+    local c
+    if kind == "success" then
+        c = COLORS.success
+    elseif kind == "danger" then
+        c = COLORS.danger
+    elseif kind == "warning" then
+        c = COLORS.warning
+    elseif kind == "dim" then
+        c = COLORS.textDim
+    elseif kind == "muted" then
+        c = COLORS.textMuted
+    elseif kind == "bright" then
+        c = COLORS.textBright
+    end
+    c = c or COLORS.textNormal or { 0.82, 0.80, 0.86, 1 }
+    return string.format("%02x%02x%02x",
+        math.floor((c[1] or 0) * 255 + 0.5),
+        math.floor((c[2] or 0) * 255 + 0.5),
+        math.floor((c[3] or 0) * 255 + 0.5))
 end
 
 function ns.UI_RefreshColors()

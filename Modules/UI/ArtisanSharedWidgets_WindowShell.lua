@@ -70,6 +70,44 @@ function ns.UI_RefreshWindowHeader(headerBar)
     end
 end
 
+--- Dialog root: disable child clip + refresh AceGUI-style title strip (classic only).
+---@param frame Frame
+function ns.UI_RefreshClassicMainWindowShell(frame)
+    if not frame or not (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) then
+        return
+    end
+    if frame.SetClipsChildren then
+        frame:SetClipsChildren(false)
+    end
+    if frame.headerBar and ns.UI_RefreshClassicWindowHeader then
+        ns.UI_RefreshClassicWindowHeader(frame.headerBar)
+    end
+end
+
+--- Full-width row (tabs, status) below classic title strip or modern header bar.
+---@param row Region
+---@param parent Frame
+---@param headerBar Frame|nil
+---@param leftPad number|nil
+---@param gapBelowTop number|nil
+function ns.UI_AnchorClassicShellBodyRow(row, parent, headerBar, leftPad, gapBelowTop)
+    if not row or not parent then
+        return
+    end
+    local layout = ns.UI_LAYOUT or {}
+    leftPad = leftPad or layout.SHELL_PAD or layout.BASE_INDENT or 12
+    gapBelowTop = gapBelowTop or 0
+    row:ClearAllPoints()
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellContentTop then
+        local top = ns.UI_GetClassicShellContentTop() + gapBelowTop
+        row:SetPoint("TOPLEFT", parent, "TOPLEFT", leftPad, -top)
+        row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -leftPad, -top)
+    elseif headerBar then
+        row:SetPoint("TOPLEFT", headerBar, "BOTTOMLEFT", leftPad, -8)
+        row:SetPoint("TOPRIGHT", headerBar, "BOTTOMRIGHT", -leftPad, -8)
+    end
+end
+
 --- Inset content panel (list hosts, window body). Branches on the active skin:
 --- classic uses the tooltip-border inset, modern uses themed pixel visuals.
 ---@param frame Frame
@@ -419,11 +457,15 @@ function ns.UI_CreateWindowHeader(parent, config)
         end
     end
 
+    headerBar._anShellSettings = settingsBtn
+    headerBar._anShellUtilities = utilityButtons
+    headerBar._anShellRightClip = rightClip
+    parent._anShellHeaderBar = headerBar
+
     title:SetPoint("RIGHT", rightClip, "LEFT", -8, 0)
 
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_LayoutClassicShellHeader then
         ns.UI_LayoutClassicShellHeader(headerBar)
-        title:SetPoint("RIGHT", rightClip, "LEFT", -8, 0)
     end
 
     return {

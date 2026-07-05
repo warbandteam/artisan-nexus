@@ -37,12 +37,27 @@ local function Font(role)
     return (f and f.WINDOW_BODY) or "GameFontNormal"
 end
 
+--- Skin-branching surface styler: classic tooltip-border inset vs modern pixel
+--- chrome. Bare UI_ApplyVisuals is a NO-OP in Classic — this popup used to
+--- render as floating bars over nothing there.
 local function Apply(frame, bg, border)
-    if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(frame, bg, border)
+    if ns.UI_StylePanelInset then
+        ns.UI_StylePanelInset(frame, bg, border)
+    elseif ns.UI_ApplyVisuals then
+        ns.UI_ApplyVisuals(frame, bg, border)
     elseif frame.SetBackdrop then
         frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
         frame:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
     end
+end
+
+--- Semantic hex from the live palette (trend arrows / % tint).
+local function HexRole(text, kind)
+    local hex = ns.UI_GetSemanticHex and ns.UI_GetSemanticHex(kind)
+    if not hex then
+        return text
+    end
+    return "|cff" .. hex .. text .. "|r"
 end
 
 --- Shared helpers (Modules/Utilities.lua; loads before this file per TOC).
@@ -81,6 +96,14 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
     f._hi = hi
 
     f.Update = function(self, itemID, windowSec)
+        --- Re-resolve surface/label chrome per render: embedded instances can
+        --- outlive a theme toggle when their host window doesn't rebuild.
+        local rowBg2 = C().rowBg or { 0.05, 0.05, 0.07, 0.85 }
+        local grid2 = C().sparkGrid or { 0.30, 0.26, 0.36, 1 }
+        Apply(self, { rowBg2[1], rowBg2[2], rowBg2[3], 0.95 }, { grid2[1], grid2[2], grid2[3], 0.85 })
+        local muted2 = C().textMuted or { 0.72, 0.69, 0.78, 1 }
+        self._lo:SetTextColor(muted2[1], muted2[2], muted2[3])
+        self._hi:SetTextColor(muted2[1], muted2[2], muted2[3])
         local lines = self._lines
         for i = 1, #lines do lines[i]:Hide() end
         local bars = self._bars
@@ -163,13 +186,18 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
         end
 
         local trend, pct = svc:GetTrend(itemID, windowSec)
-        local arrow = (trend > 0 and "|cff66ff66▲|r") or (trend < 0 and "|cffff6666▼|r") or "|cffaaaaaa•|r"
+        local arrow = (trend > 0 and HexRole("▲", "success"))
+            or (trend < 0 and HexRole("▼", "danger"))
+            or HexRole("•", "dim")
+        local pctHex = ns.UI_GetSemanticHex
+            and ("|cff" .. ns.UI_GetSemanticHex((pct >= 0) and "success" or "danger"))
+            or ((pct >= 0) and "|cff66ff66" or "|cffff6666")
         self._title:SetText(string.format(
             (L and L["PRICE_HISTORY_TITLE_FMT"]) or "%s avg %s - last %s - %s%+.1f%%",
             arrow,
             FormatCopper(stats.avg),
             FormatCopper(stats.latest),
-            (pct >= 0) and "|cff66ff66" or "|cffff6666",
+            pctHex,
             pct or 0))
         self._lo:SetText(string.format((L and L["PRICE_HISTORY_MIN_FMT"]) or "min %s", FormatCopper(stats.min)))
         self._hi:SetText(string.format((L and L["PRICE_HISTORY_MAX_FMT"]) or "max %s", FormatCopper(stats.max)))
@@ -191,7 +219,9 @@ end
 local function BuildPopup()
     local f = CreateFrame("Frame", "ArtisanNexusPriceHistoryPopup", UIParent, "BackdropTemplate")
     f:SetSize(336, 132)
-    f:SetFrameStrata("TOOLTIP")
+    --- Hover-detail popup over DIALOG-strata craft windows; TOOLTIP is
+    --- reserved (rule ceiling: FULLSCREEN_DIALOG for addon popups).
+    f:SetFrameStrata("FULLSCREEN_DIALOG")
     f:SetClampedToScreen(true)
     f:Hide()
     local bg = C().bg or { 0.065, 0.062, 0.076, 0.97 }
@@ -205,6 +235,12 @@ local function BuildPopup()
 
     local name = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_SECTION"))
     name:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+    --- Bound to the popup edge: long localized item names must truncate, not
+    --- overflow the 336px frame.
+    name:SetPoint("RIGHT", f, "RIGHT", -8, 0)
+    name:SetJustifyH("LEFT")
+    name:SetWordWrap(false)
+    name:SetMaxLines(1)
     local tb = C().textBright or { 0.96, 0.95, 0.97, 1 }
     name:SetTextColor(tb[1], tb[2], tb[3])
     f._name = name
@@ -239,6 +275,11 @@ end
 function PriceHistoryUI:ResetForUiMode()
     if POPUP_FRAME then
         POPUP_FRAME:Hide()
+        --- Popup + embedded sparkline carry ApplyVisuals chrome — leave
+        --- BORDER_REGISTRY before discarding (theme rebuild path included).
+        if ns.UI_UnregisterVisuals then
+            ns.UI_UnregisterVisuals(POPUP_FRAME)
+        end
         POPUP_FRAME = nil
     end
 end

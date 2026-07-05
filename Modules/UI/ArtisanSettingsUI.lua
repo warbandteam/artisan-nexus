@@ -18,6 +18,33 @@ local ApplyVisuals = ns.UI_ApplyVisuals
 
 local AH_FRESH_DEFAULT_SEC = 60 * 60 * 6
 
+--- Single source for the footer strip reserve (tip text + reset buttons zone)
+--- and the modern scroll top inset — previously six scattered `38`s.
+local SETTINGS_FOOTER_RESERVE = 38
+local SETTINGS_SCROLL_TOP_MODERN = 54
+
+--- OptionsSliderTemplate ships Text/Low/High only; the current-value readout
+--- FontString must be created here or every `slider.Value:SetText` no-ops.
+local SETTINGS_SLIDER_NAMES = {
+    "ArtisanNexusSettings_BagSlider",
+    "ArtisanNexusSettings_AhFreshSlider",
+    "ArtisanNexusSettings_SessionRecentSlider",
+    "ArtisanNexusSettings_SessionOverallSlider",
+    "ArtisanNexusSettings_CraftBriefingTopSlider",
+    "ArtisanNexusSettings_CraftBriefingAlertMinSlider",
+}
+
+local function EnsureSliderValueText(sl)
+    if not sl or sl.Value then
+        return
+    end
+    local fs = sl:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    --- Blizzard options idiom: current value bottom-center, between Low/High.
+    fs:SetPoint("TOP", sl, "BOTTOM", 0, 0)
+    fs:SetJustifyH("CENTER")
+    sl.Value = fs
+end
+
 --- XML `UICheckButton` global names — themed like Warband `CreateThemedCheckbox`.
 local SETTINGS_CHECKBOX_NAMES = {
     "ArtisanNexusSettings_Minimap",
@@ -433,6 +460,12 @@ end
 
 function ArtisanSettingsUI:ApplySettingsHeaderClip()
     local header = _G.ArtisanNexusSettings_Header
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        if header and ns.UI_RefreshClassicWindowHeader then
+            ns.UI_RefreshClassicWindowHeader(header)
+        end
+        return
+    end
     local logo = _G.ArtisanNexusSettings_HeaderLogo
     local title = _G.ArtisanNexusSettings_HeaderTitle
     local close = _G.ArtisanNexusSettings_Close
@@ -454,7 +487,13 @@ end
 function ArtisanSettingsUI:ApplyLocalizedStaticText()
     local function T(fs, key, fallback)
         if not fs then return end
-        fs:SetText((L and L[key]) or fallback or "")
+        local text = fallback or ""
+        if ns.SafeLocaleString then
+            text = ns.SafeLocaleString(key, fallback) or fallback or ""
+        elseif L and type(key) == "string" then
+            text = L[key] or fallback or ""
+        end
+        fs:SetText(text)
     end
 
     T(_G.ArtisanNexusSettings_TitleGeneralText, "SETTINGS_SECTION_GENERAL", "General")
@@ -530,11 +569,12 @@ function ArtisanSettingsUI:ApplyLocalizedStaticText()
     end
 end
 
---- Warband-style themed toggles + section strips on FrameXML controls (once per session).
+--- Warband-style themed toggles + section strips on FrameXML controls.
+--- Runs in BOTH skins: the style helpers carry their own classic-reversal
+--- branches, so skipping them in Classic would leave Modern chrome behind
+--- after a live mode switch (the "Classic UI" toggle lives in this panel).
 function ArtisanSettingsUI:ApplyXmlThemedChrome()
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-        return
-    end
+    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
     local StyleCb = ns.UI_StyleSettingsCheckButton
     local StyleSec = ns.UI_StyleSettingsSectionTitle
     if not StyleCb or not StyleSec then
@@ -568,6 +608,15 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
 
     local function tintSliderFonts(sl)
         if not sl then return end
+        if classic then
+            --- Native template colors (gold label, white min/max/value) so
+            --- Modern tints never linger on classic slider art.
+            if sl.Text then sl.Text:SetTextColor(1, 0.82, 0, 1) end
+            if sl.Low then sl.Low:SetTextColor(1, 1, 1, 1) end
+            if sl.High then sl.High:SetTextColor(1, 1, 1, 1) end
+            if sl.Value then sl.Value:SetTextColor(1, 1, 1, 1) end
+            return
+        end
         local tb = COLORS.textBright or { 0.98, 0.97, 0.99, 1 }
         local dim = COLORS.textDim or { 0.58, 0.54, 0.64, 1 }
         if sl.Text then sl.Text:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1) end
@@ -575,12 +624,9 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
         if sl.High then sl.High:SetTextColor(dim[1], dim[2], dim[3], dim[4] or 1) end
         if sl.Value then sl.Value:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1) end
     end
-    tintSliderFonts(_G.ArtisanNexusSettings_BagSlider)
-    tintSliderFonts(_G.ArtisanNexusSettings_AhFreshSlider)
-    tintSliderFonts(_G.ArtisanNexusSettings_SessionRecentSlider)
-    tintSliderFonts(_G.ArtisanNexusSettings_SessionOverallSlider)
-    tintSliderFonts(_G.ArtisanNexusSettings_CraftBriefingTopSlider)
-    tintSliderFonts(_G.ArtisanNexusSettings_CraftBriefingAlertMinSlider)
+    for i = 1, #SETTINGS_SLIDER_NAMES do
+        tintSliderFonts(_G[SETTINGS_SLIDER_NAMES[i]])
+    end
 end
 
 function ArtisanSettingsUI:SyncThemedToggleDots()
@@ -627,7 +673,7 @@ function ArtisanSettingsUI:ApplyChrome()
         end
         f._anClassicDialogRoot = true
         if f.SetClipsChildren then
-            f:SetClipsChildren(true)
+            f:SetClipsChildren(false)
         end
     else
         ApplyFrame(f, COLORS.bg or { 0.11, 0.105, 0.125, 0.98 }, {
@@ -721,17 +767,20 @@ function ArtisanSettingsUI:ApplyChrome()
 end
 
 --- Warband-style scroll column for FrameXML settings scroll host.
+--- Guarded by its own flag: a Classic-first session must still be able to run
+--- this on the first switch to Modern (the classic path used to share the flag
+--- and permanently blocked the Factory install).
 function ArtisanSettingsUI:InstallSettingsScroll()
     local scroll = _G.ArtisanNexusSettings_Scroll
     local f = self:GetRoot()
     local header = _G.ArtisanNexusSettings_Header
-    if not scroll or not f or not header or scroll._anScrollInstalled then
+    if not scroll or not f or not header or scroll._anModernScrollInstalled then
         return
     end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         return
     end
-    scroll._anScrollInstalled = true
+    scroll._anModernScrollInstalled = true
 
     local Factory = ns.UI and ns.UI.Factory
     if not Factory or not Factory.InstallScrollBarStyle then
@@ -741,7 +790,7 @@ function ArtisanSettingsUI:InstallSettingsScroll()
     Factory:InstallScrollBarStyle(scroll)
     local barCol = scroll._anScrollBarColumn
     if not barCol then
-        barCol = Factory:CreateScrollBarColumn(f, nil, 54, 38)
+        barCol = Factory:CreateScrollBarColumn(f, nil, SETTINGS_SCROLL_TOP_MODERN, SETTINGS_FOOTER_RESERVE)
         scroll._anScrollBarColumn = barCol
     elseif Factory.EnsureScrollBarColumnChrome then
         Factory:EnsureScrollBarColumnChrome(barCol)
@@ -752,7 +801,7 @@ function ArtisanSettingsUI:InstallSettingsScroll()
     scroll._anScrollBarColumn = barCol
     scroll._anExternalBarColumn = true
     scroll._anScrollAnchorTL = { a1 = "TOPLEFT", frame = header, a2 = "BOTTOMLEFT", x = 4, y = -8 }
-    scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = f, a2 = "BOTTOMRIGHT", x = -4, y = 38 }
+    scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = f, a2 = "BOTTOMRIGHT", x = -4, y = SETTINGS_FOOTER_RESERVE }
     scroll._anScrollAnchorBRShown = { a1 = "BOTTOMRIGHT", frame = barCol, a2 = "BOTTOMLEFT", x = -2, y = 0 }
     Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0)
     if ns.UI_FinishScrollLayout then
@@ -773,21 +822,29 @@ function ArtisanSettingsUI:ApplyClassicSettingsScroll(scroll, f, header)
     local Factory = ns.UI and ns.UI.Factory
     local layout = ns.UI_LAYOUT or {}
     local gap = layout.SCROLL_GAP or 2
-    local footerReserve = 38
-    local headerBottomY = -54
+    local footerReserve = SETTINGS_FOOTER_RESERVE
+    local contentTop = (ns.UI_GetClassicShellContentTop and ns.UI_GetClassicShellContentTop()) or 56
+    local scrollTopInset = contentTop + 4
+    local classicInset = (ns.UI_GetClassicDialogInset and ns.UI_GetClassicDialogInset()) or 8
 
     local col = scroll._anScrollBarColumn
     if not col and Factory and Factory.CreateScrollBarColumn then
-        col = Factory:CreateScrollBarColumn(f, nil, math.abs(headerBottomY), footerReserve)
+        col = Factory:CreateScrollBarColumn(f, nil, scrollTopInset, footerReserve, classicInset)
         scroll._anScrollBarColumn = col
-    elseif col and Factory and Factory.EnsureScrollBarColumnChrome then
-        Factory:EnsureScrollBarColumnChrome(col)
+    elseif col then
+        if Factory and Factory.EnsureScrollBarColumnChrome then
+            Factory:EnsureScrollBarColumnChrome(col)
+        end
+        --- Column insets resolve at creation; a Modern-created column pokes
+        --- into the classic title strip / dialog border unless re-anchored.
+        col:ClearAllPoints()
+        col:SetPoint("TOPRIGHT", f, "TOPRIGHT", -classicInset, -scrollTopInset)
+        col:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -classicInset, footerReserve)
     end
     if col and col.Show then
         col:Show()
     end
     scroll._anExternalBarColumn = col ~= nil
-    scroll._anScrollInstalled = true
 
     if not scroll._anSavedUpdateVis and scroll.UpdateScrollBarVisibility then
         scroll._anSavedUpdateVis = scroll.UpdateScrollBarVisibility
@@ -795,7 +852,7 @@ function ArtisanSettingsUI:ApplyClassicSettingsScroll(scroll, f, header)
     scroll.UpdateScrollBarVisibility = nil
 
     scroll:ClearAllPoints()
-    scroll:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 4, -8)
+    scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -scrollTopInset)
     scroll:SetClipsChildren(true)
     if col then
         scroll:SetPoint("BOTTOMRIGHT", col, "BOTTOMLEFT", -gap, 0)
@@ -803,9 +860,9 @@ function ArtisanSettingsUI:ApplyClassicSettingsScroll(scroll, f, header)
         scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -4, footerReserve)
     end
     scroll._anClassicScroll = true
-    scroll._anScrollAnchorTL = { a1 = "TOPLEFT", frame = header, a2 = "BOTTOMLEFT", x = 4, y = -8 }
+    scroll._anScrollAnchorTL = { a1 = "TOPLEFT", frame = f, a2 = "TOPLEFT", x = 4, y = -scrollTopInset }
     scroll._anScrollAnchorBRShown = col and { a1 = "BOTTOMRIGHT", frame = col, a2 = "BOTTOMLEFT", x = -gap, y = 0 } or nil
-    scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = f, a2 = "BOTTOMRIGHT", x = -4, y = 38 }
+    scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = f, a2 = "BOTTOMRIGHT", x = -4, y = footerReserve }
 
     if Factory and col and scroll.ScrollBar then
         Factory:PositionNativeScrollBarInContainer(scroll.ScrollBar, col, scroll)
@@ -840,12 +897,13 @@ function ArtisanSettingsUI:SyncScrollSkin()
         self:ApplyClassicSettingsScroll(scroll, f, header)
         return
     end
-    -- Modern: first entry installs; returning from classic re-applies.
-    if not scroll._anScrollInstalled then
+    -- Modern: install once (works for Classic-first sessions too), then
+    -- reverse any classic leftovers and re-anchor to the modern layout.
+    local firstInstall = not scroll._anModernScrollInstalled
+    if firstInstall then
         self:InstallSettingsScroll()
-        return
     end
-    if not scroll._anClassicScroll then
+    if not scroll._anClassicScroll and not firstInstall then
         return
     end
     scroll._anClassicScroll = nil
@@ -856,6 +914,10 @@ function ArtisanSettingsUI:SyncScrollSkin()
     local bar = scroll.ScrollBar
     local col = scroll._anScrollBarColumn
     if col then
+        --- Column insets were re-resolved for the classic dialog; snap back.
+        col:ClearAllPoints()
+        col:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, -SETTINGS_SCROLL_TOP_MODERN)
+        col:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, SETTINGS_FOOTER_RESERVE)
         col:Show()
     end
     if bar then
@@ -867,6 +929,14 @@ function ArtisanSettingsUI:SyncScrollSkin()
             bar.ScrollDownButton:Hide()
             bar.ScrollDownButton:SetSize(0.1, 0.1)
         end
+        --- Classic rail art (UI-Character-ScrollBar slices) lives on the same
+        --- template bar; it must not stay visible behind the modern thumb.
+        for _, key in ipairs({ "Top", "Middle", "Bottom", "Background" }) do
+            local tex = bar[key]
+            if tex and tex.Hide then
+                tex:Hide()
+            end
+        end
         if bar.CustomTrack then
             bar.CustomTrack:Show()
         end
@@ -875,8 +945,9 @@ function ArtisanSettingsUI:SyncScrollSkin()
         end
         if bar.ThumbTexture then
             local ac = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
+            local layout = ns.UI_LAYOUT or {}
             bar.ThumbTexture:SetColorTexture(ac[1], ac[2], ac[3], 0.9)
-            bar.ThumbTexture:SetSize(14, 60)
+            bar.ThumbTexture:SetSize(layout.SCROLL_BAR_WIDTH or 16, 60)
         end
         bar:SetScript("OnEnter", function(s)
             if s.ThumbTexture then
@@ -906,7 +977,7 @@ function ArtisanSettingsUI:SyncScrollSkin()
     if brShown then
         scroll:SetPoint(brShown.a1, brShown.frame, brShown.a2, brShown.x, brShown.y)
     else
-        scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -4, 38)
+        scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -4, SETTINGS_FOOTER_RESERVE)
     end
     if ns.UI_FinishScrollLayout then
         ns.UI_FinishScrollLayout(scroll)
@@ -1051,6 +1122,12 @@ function ArtisanSettingsUI:WireControls()
     self:ApplyChrome()
     self:ApplyLocalizedStaticText()
 
+    --- Current-value readouts: template has none; every handler and
+    --- RefreshControls writes into `slider.Value` guarded, so create them once.
+    for i = 1, #SETTINGS_SLIDER_NAMES do
+        EnsureSliderValueText(_G[SETTINGS_SLIDER_NAMES[i]])
+    end
+
     local bag = _G.ArtisanNexusSettings_BagSlider
     if bag then
         bag:SetMinMaxValues(1, 40)
@@ -1181,6 +1258,10 @@ function ArtisanSettingsUI:WireControls()
 
     _G.ArtisanNexusSettings_Debug:SetScript("OnClick", function(self)
         ArtisanNexus.db.profile.debugMode = self:GetChecked()
+        --- QA viewport tints must follow the toggle live, same as `/an debug`.
+        if ns.UI_RefreshAllViewportDebugChrome then
+            ns.UI_RefreshAllViewportDebugChrome()
+        end
     end)
 
     local function bindPosting(btn, strat)
@@ -1563,6 +1644,12 @@ function ArtisanSettingsUI:ShowPanel()
     self:RefreshThemeChrome()
     self:RefreshControls()
     self:LayoutContentGrid()
+    --- Bar visibility/thumb must be computed AFTER the grid set the final
+    --- content height, not against the previous panel's height.
+    local scroll = _G.ArtisanNexusSettings_Scroll
+    if scroll and ns.UI_FinishScrollLayout then
+        ns.UI_FinishScrollLayout(scroll)
+    end
     self:ApplySettingsHeaderClip()
     fr:Show()
     fr:Raise()
