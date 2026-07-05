@@ -6,8 +6,10 @@
     Shopping List: the queue tracks "what to craft", the shopping list
     tracks "what reagents to acquire". A recipe can live in both.
 
-    Each entry's `progress` is bumped manually via :MarkOneCrafted (the
-    UI calls this after a TRADE_SKILL_ITEM_UPDATE / craft completion).
+    Progress auto-advances on craft completion via Blizzard events:
+      TRADE_SKILL_CRAFT_BEGIN (recipeSpellID) pairs with
+      TRADE_SKILL_ITEM_CRAFTED_RESULT (CraftingItemResultData).
+    Manual :MarkOneCrafted remains for UI "+1 crafted" overrides.
     No automatic craft execution — Blizzard's protected craft API rules
     that out for non-secure addons.
 
@@ -27,6 +29,8 @@
 ]]
 
 local ADDON_NAME, ns = ...
+
+local E = ns.Constants and ns.Constants.EVENTS
 
 local CraftingQueueService = {}
 
@@ -49,8 +53,8 @@ local function FindIndex(entries, spellID)
 end
 
 local function Notify()
-    if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage then
-        ns.ArtisanNexus:SendMessage("AN_CRAFT_QUEUE_UPDATED")
+    if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage and E and E.CRAFT_QUEUE_UPDATED then
+        ns.ArtisanNexus:SendMessage(E.CRAFT_QUEUE_UPDATED)
     end
 end
 
@@ -151,19 +155,99 @@ function CraftingQueueService:GetSummary()
     return { total = total, remaining = remaining, completed = completed, recipes = #q }
 end
 
---- Hook trade-skill craft completion to auto-bump progress for queued recipes.
-local hookFrame = CreateFrame("Frame")
-hookFrame:RegisterEvent("TRADE_SKILL_ITEM_UPDATE")
-hookFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-hookFrame:SetScript("OnEvent", function(_, event, unit, _, spellID)
-    if event == "UNIT_SPELLCAST_SUCCEEDED" and unit == "player" and spellID then
-        -- Best-effort: only react if this spell is in the queue.
-        local store = Store()
-        if not store then return end
-        if FindIndex(store.entries, spellID) then
-            CraftingQueueService:MarkOneCrafted(spellID)
+--- Craft completion pairing via shared CraftEventService (wiki: TRADE_SKILL_CRAFT_BEGIN / TRADE_SKILL_ITEM_CRAFTED_RESULT).
+local pendingCraftSpellID = nil
+local pendingCraftHandled = false
+local CraftEventService = ns.CraftEventService
+
+local function ClearPendingCraft()
+    pendingCraftSpellID = nil
+    pendingCraftHandled = false
+end
+
+local function CraftResultMatchesRecipe(spellID, data)
+    if CraftEventService and CraftEventService.ResultMatchesRecipe then
+        return CraftEventService:ResultMatchesRecipe(spellID, data)
+    end
+    return type(data) == "table" and not data.bonusCraft
+end
+
+---@param data table|nil
+local function ResolveQueuedSpellFromResult(data)
+    if type(data) ~= "table" then
+        return nil
+    end
+    if data.bonusCraft then
+        --- Bonus/multicraft procs are extra yield from an already-counted cast.
+        return nil
+    end
+    local resultID = tonumber(data.itemID)
+    if not resultID or resultID <= 0 then
+        return nil
+    end
+    local store = Store()
+    local rs = ns.RecipeService
+    if not store or not rs or not rs.GetOutputItem then
+        return nil
+    end
+    for i = 1, #store.entries do
+        local sid = store.entries[i].spellID
+        if rs:GetOutputItem(sid) == resultID then
+            return sid
         end
     end
-end)
+    return nil
+end
+
+local function OnTradeSkillCraftBegin(recipeSpellID)
+    recipeSpellID = tonumber(recipeSpellID)
+    if not recipeSpellID then
+        ClearPendingCraft()
+        return
+    end
+    local store = Store()
+    if not store then
+        return
+    end
+    if FindIndex(store.entries, recipeSpellID) then
+        pendingCraftSpellID = recipeSpellID
+        pendingCraftHandled = false
+    else
+        ClearPendingCraft()
+    end
+end
+
+local function OnTradeSkillItemCraftedResult(data)
+    local spellID = pendingCraftSpellID
+    local store = Store()
+    if not store then
+        return
+    end
+
+    if spellID and not pendingCraftHandled and FindIndex(store.entries, spellID) then
+        if CraftResultMatchesRecipe(spellID, data) then
+            CraftingQueueService:MarkOneCrafted(spellID)
+            pendingCraftHandled = true
+        end
+        return
+    end
+
+    if spellID and pendingCraftHandled then
+        --- Secondary RESULT event of an already-credited cast (multicraft /
+        --- bonus proc): never re-credit via the itemID fallback below.
+        return
+    end
+
+    local resolved = ResolveQueuedSpellFromResult(data)
+    if resolved and FindIndex(store.entries, resolved) then
+        CraftingQueueService:MarkOneCrafted(resolved)
+    end
+    ClearPendingCraft()
+end
+
+if CraftEventService then
+    CraftEventService:RegisterCraftBegin(OnTradeSkillCraftBegin)
+    CraftEventService:RegisterCraftResult(OnTradeSkillItemCraftedResult)
+end
 
 ns.CraftingQueueService = CraftingQueueService

@@ -1,0 +1,29 @@
+# CurseForge / Wago packager (BigWigs Packager).
+# Shipped zip: addon runtime tree only — see Pack-ArtisanNexus.ps1.
+# https://github.com/BigWigsMods/packager/wiki/pkgmeta
+
+package-as: ArtisanNexus
+
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  # CurseForge rejects zips with multiple addon TOCs; root embeds.xml loads libs.
+  - libs/Ace3.toc
+  - libs/LibDBIcon-1.0.toc
+  - libs/changelog.txt
+  - libs/CHANGES.txt
+  - libs/Changelog-libdatabroker-1-1-v1.1.4.txt
+  - libs/README.md
+  - libs/README.textile
+  - libs/LICENSE.txt
+  - libs/embeds.xml
+  - libs/Bindings.xml
+  - libs/Ace3.lua
+  - libs/LibDeflate/.xml
+  - Locales/.tmp/
+  - .github
+  - _ignored
+  - Pack-ArtisanNexus.ps1
+  - PUBLISHING.md

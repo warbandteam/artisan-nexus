@@ -1,8 +1,8 @@
 --[[
-    Gathering loot: primary = LootWindowBridge (LOOT_READY/OPENED/CLOSED delta on GetLootSlotItemCounts).
-    CHAT_MSG_LOOT = fallback when the window is gone (auto-loot) — gated by a short post-open grace window.
-    Only `LOOT_ITEM_SELF*` lines are processed so party members' loot chat is ignored.
-    Fishing wins when both claim.
+    Gathering loot: CHAT_MSG_LOOT is the source of truth (self-loot lines only).
+    Spellcast hooks set pending profession tab; GUID+item dedup prevents Finesse double counts.
+    Fishing wins attribution when both could apply.
+    LOOT_OPENED hooks remain for dedup snapshots only; window scan recording is disabled.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -13,7 +13,7 @@ local GatheringSpellData = ns.GatheringSpellData
 
 ---@class GatheringLootService
 local GatheringLootService = {
-    --- When true, `RecordItem` defers session tab UI + history broadcasts; window batch ends with one emit.
+    --- Deferred session tab UI signals during batched chat processing.
     _deferGatheringSessionTabSignals = false,
     _gatheringWindowUntil = nil,
     _lootOpenedGatheringHint = false,
@@ -23,7 +23,7 @@ local GatheringLootService = {
     _chatGatheringGraceUntil = 0,
     --- Auto-loot: no loot window — self loot lines still need a window for InferCategory (LOOT_ITEM_SELF).
     _selfLootChatGraceUntil = 0,
-    --- True between LOOT_OPENED and LOOT_CLOSED; window path owns recording, chat path must not push.
+    --- LOOT_OPENED/LOOT_CLOSED tracking for dedup only (chat path records loot).
     _lootWindowOpen = false,
 }
 
@@ -125,7 +125,7 @@ function GatheringLootService:ShouldAttributeLootToGathering()
 end
 
 function GatheringLootService:ShouldAttributeLootWindowScan()
-    return false
+    return false -- window path disabled; chat-only recording
 end
 
 function GatheringLootService:ExtendGatheringWindow(seconds)
@@ -154,6 +154,16 @@ end
 --- target GUID (the herb/ore/corpse being gathered) and clear per-epoch dedup so a fresh
 --- gather on a different node can record items that match the previous gather.
 local function OnNewGatherAction(targetGUID)
+    --- Midnight secret values: a secret GUID would error on the `guid.."|"..itemID`
+    --- dedup-key concat downstream; drop it and let the epoch fallback dedup.
+    if targetGUID and issecretvalue and issecretvalue(targetGUID) then
+        targetGUID = nil
+    end
+    --- Only creature GUIDs identify a gatherable (skinning corpse); anything
+    --- else is the player's unrelated target and must not key node dedup.
+    if targetGUID and not (targetGUID:find("^Creature%-") or targetGUID:find("^Vehicle%-")) then
+        targetGUID = nil
+    end
     currentNodeGUID = targetGUID
     wipe(recordedThisEpoch)
     recordedThisEpochAt = 0
@@ -257,7 +267,14 @@ local function RecordItem(itemID, qty, itemName)
     --- twice within a single gather; if this (GUID, itemID) was already committed within
     --- NODE_COOLDOWN, any repeat scan is a duplicate (Finesse re-open, LOOT_READY retry,
     --- chat echo, server re-send). A new gather targets a new GUID → fresh records.
-    if currentNodeGUID then
+    ---
+    --- "others" catalog (shared motes) can legitimately appear twice from one gather **chain**:
+    --- node loot window + overload ground spawns still share the same `UnitGUID("target")`
+    --- until the next cast — GUID dedup would silence the ground pickup. Use epoch dedup only.
+    local primaryTab = ns.GetGatheringCategoryForItemId and ns.GetGatheringCategoryForItemId(itemID)
+    local useGuidDedup = primaryTab ~= "others"
+
+    if currentNodeGUID and useGuidDedup then
         local key = currentNodeGUID .. "|" .. itemID
         local t = committedNodeItem[key]
         if t and (GetTime() - t) < NODE_COOLDOWN then
@@ -265,9 +282,9 @@ local function RecordItem(itemID, qty, itemName)
         end
         committedNodeItem[key] = GetTime()
     else
-        --- Fallback: no node GUID captured (spell not detected, or autoloot without
-        --- spell cast event). Use itemID+epoch guard so a Finesse-triggered double
-        --- LOOT_OPENED still blocks until a new spell cast starts a fresh epoch.
+        --- Fallback: no node GUID, non–GUID-routed items, or "others" (overload follow-ups).
+        --- itemID+epoch guard: Finesse double LOOT_OPENED still blocks until a new spell cast
+        --- starts a fresh epoch (see `OnNewGatherAction`).
         local prevRec = recordedThisEpoch[itemID]
         local prevT = prevRec and (prevRec.t or recordedThisEpochAt) or 0
         local sameQty = prevRec and prevRec.qty == qty
@@ -279,11 +296,14 @@ local function RecordItem(itemID, qty, itemName)
         recordedThisEpochAt = GetTime()
     end
 
-    IncrementGatheringLootHistoryDb(itemID, qty, itemName)
-
     --- Session push first: tab switch (SESSION_LOOT_UPDATED) must happen before history signals
     --- so RefreshIfVisible renders on the correct tab and not the previously-active one.
+    --- History DB increments only when the session layer ACCEPTED the event — its
+    --- 1.5s dedup is wider than the 0.22s epoch guard above, and bumping the
+    --- Overall grid for an event the session/earnings rows dropped made the two
+    --- views diverge permanently.
     local cat = ResolveGatheringSessionCategory(itemID)
+    local sessionAccepted = nil
     if cat and ns.SessionLootService and ns.SessionLootService.PushGatheringSession then
         GatheringLootService._suppressChatLootUntil = GatheringLootService._suppressChatLootUntil or {}
         GatheringLootService._suppressChatLootUntil[itemID] = GetTime() + CHAT_SUPPRESS_SEC
@@ -294,8 +314,13 @@ local function RecordItem(itemID, qty, itemName)
             cat = cat,
         }
         local quiet = GatheringLootService._deferGatheringSessionTabSignals
-        ns.SessionLootService:PushGatheringSession(itemID, qty, cat, { quiet = quiet })
+        sessionAccepted = ns.SessionLootService:PushGatheringSession(itemID, qty, cat, { quiet = quiet })
     end
+    if sessionAccepted == false then
+        return false
+    end
+
+    IncrementGatheringLootHistoryDb(itemID, qty, itemName)
 
     ArtisanNexus:SendMessage(E.GATHERING_LOOT_RECORDED, itemID, qty)
     if not GatheringLootService._deferGatheringSessionTabSignals then
@@ -366,16 +391,31 @@ local function ProcessChatSessionOnly(msg)
             end
         end
     end
-    --- Gathering side: simple model uses loot chat as source of truth.
-    --- Keep fishing precedence to avoid cross-attribution.
-    if ns.FishingLootService and ns.FishingLootService.ShouldAttributeLootToFishing
-        and ns.FishingLootService:ShouldAttributeLootToFishing() then
-        return
-    end
     --- Do NOT gate on `_lootWindowOpen` — FastLoot closes the window before chat arrives,
     --- and even when the window is open GUID+itemID dedup inside RecordItem prevents double-
     --- recording across window and chat paths. Gating here caused FastLoot to lose all loot.
     local counts = (ns.ParseChatLootItemQuantities and ns.ParseChatLootItemQuantities(msg)) or {}
+    --- Fishing precedence, but only when the line actually carries a fishing
+    --- catalog item: the fishing loot context can stay stale for minutes after
+    --- a cancelled cast, and an unconditional yield here silently dropped the
+    --- next herb/ore pickup (fishing side records nothing for non-fish lines).
+    if ns.FishingLootService and ns.FishingLootService.ShouldAttributeLootToFishing
+        and ns.FishingLootService:ShouldAttributeLootToFishing() then
+        local hasFishingItem = false
+        if ns.IsFishingCatalogItem then
+            for itemID in pairs(counts) do
+                if ns.IsFishingCatalogItem(itemID) then
+                    hasFishingItem = true
+                    break
+                end
+            end
+        else
+            hasFishingItem = true
+        end
+        if hasFishingItem then
+            return
+        end
+    end
     local payloadSig = BuildCountsSig(counts)
     if payloadSig ~= "" then
         lastChatPayloadSig = payloadSig
@@ -403,12 +443,6 @@ local function ProcessChatSessionOnly(msg)
     end
 end
 
---- Apply only the delta of items that left the loot window (matches chat quantities; avoids 1+2 vs 3 splits).
----@param counts table<number, number>
-function GatheringLootService.RecordWindowLootCounts(counts)
-    return
-end
-
 local function OnPlayerGatheringSpellCast(spellID, phase)
     if not spellID or not GatheringSpellData.IsGatheringSpell(spellID) then
         return
@@ -426,7 +460,16 @@ local function OnPlayerGatheringSpellCast(spellID, phase)
     --- can record items (including items with the same ID+qty as the previous gather).
     --- Only on SUCCEEDED (cast completed), not on START (channel starts, may be canceled).
     if phase == "succeeded" then
-        OnNewGatherAction(UnitGUID("target"))
+        --- Herb/ore nodes are GameObjects and can never be UnitGUID("target"):
+        --- a live mob target would key the 30s node dedup identically across
+        --- DIFFERENT nodes and silently drop legit records. Only a dead
+        --- creature target (skinning corpse) is a valid gather identity;
+        --- everything else falls back to the per-cast epoch dedup.
+        local guid = nil
+        if UnitExists and UnitExists("target") and UnitIsDead and UnitIsDead("target") then
+            guid = UnitGUID("target")
+        end
+        OnNewGatherAction(guid)
     end
 end
 

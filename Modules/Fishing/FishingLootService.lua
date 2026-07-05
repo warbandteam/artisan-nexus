@@ -1,6 +1,11 @@
 --[[
-    Fishing loot: Blizzard Loot frame only (LootWindowBridge + GetLootSlotItemCounts).
-    Last Loot / session and DB use the same window snapshot — no CHAT_MSG_LOOT.
+    Fishing loot: **CHAT_MSG_LOOT** (self-only) is the single source of truth for Last pickups + Overall DB.
+    Blizzard / clients sometimes dispatch the **same** line twice in <0.25s — we drop repeats by raw message text
+    (same pattern as `GatheringLootService` `CHAT_MSG_DUP_SEC`).
+    Window slot scans are **not** used for recording (avoids chat+window double commits and GUID/preOpen races).
+
+    API note: `IsFishingLoot()` / loot events are only used by `ShouldAttributeLootToFishing` to decide
+    “does this chat line count as fishing?” — not for incrementing totals.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -10,16 +15,31 @@ local E = ns.Constants.EVENTS
 
 ---@class FishingLootService
 local FishingLootService = {
-    --- Batches session tab signals for one loot-window delta.
+    --- Batches `EmitFishingLootTabSignal` when one chat line contains multiple fish.
     _deferFishingSessionTabSignals = false,
 }
 
---- Last loot-window snapshot for delta (itemID -> qty).
+--- Loot bridge still resets this on LOOT_OPENED (delta math unused for fishing; kept for API compat).
 local lastWindowCounts = {}
 
-local CHAT_SUPPRESS_SEC = 2.85
+--- Same chat line re-fired within this window → ignore (FastLoot, ElvUI, server echo).
+local lastFishLootChatAt = {}
+local CHAT_MSG_DUP_SEC = 0.25
 
---- counts optional: when present, all fish-catalog item IDs count as fishing if Blizzard flags are late.
+--- Short UI tick when optional fish-record sound is on. `SOUNDKIT.LOOT_WINDOW_COIN_SOUND` = 120 (BlizzardInterfaceResources).
+local function PlayFishingLootRecordedTick()
+    local kit = (type(SOUNDKIT) == "table" and SOUNDKIT.LOOT_WINDOW_COIN_SOUND) or 120
+    pcall(PlaySound, kit)
+end
+
+local function NormFishItemID(id)
+    local n = tonumber(id)
+    if n and n >= 1 then
+        return n
+    end
+    return nil
+end
+
 local function ShouldAttributeLootToFishing(counts)
     if ns.IsOpenWorld and not ns.IsOpenWorld() then
         return false
@@ -46,6 +66,10 @@ local function ShouldAttributeLootToFishing(counts)
         return true
     end
     return false
+end
+
+function FishingLootService:MergeLootSourceSnapshotFromWindow()
+    --- Legacy no-op: recording uses chat only.
 end
 
 function FishingLootService:ResetWindowCountSnapshot()
@@ -81,151 +105,87 @@ local function IncrementFishingLootHistoryDb(itemID, qty, itemName)
     end
 end
 
-local function RecordItem(itemID, qty, itemName)
-    if not itemID or itemID < 1 then
-        return
-    end
-    qty = math.max(1, qty or 1)
-    if not (ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)) then
-        return
-    end
-
-    IncrementFishingLootHistoryDb(itemID, qty, itemName)
-
-    --- Session push first: tab switch (SESSION_LOOT_UPDATED) must happen before history signals.
-    if ns.SessionLootService and ns.SessionLootService.PushFishingSession then
-        FishingLootService._suppressChatLootUntil = FishingLootService._suppressChatLootUntil or {}
-        FishingLootService._suppressChatLootUntil[itemID] = GetTime() + CHAT_SUPPRESS_SEC
-        ns.SessionLootService:PushFishingSession(itemID, qty, {
-            quiet = FishingLootService._deferFishingSessionTabSignals,
-        })
-    end
-
-    ArtisanNexus:SendMessage(E.FISHING_LOOT_RECORDED, itemID, qty)
-    if not FishingLootService._deferFishingSessionTabSignals then
-        ArtisanNexus:SendMessage(E.FISHING_HISTORY_UPDATED)
-        ArtisanNexus:SendMessage(E.LOOT_HISTORY_UPDATED)
-    end
-end
-
---- Fallback when auto-loot skips a window snapshot: Last Loot + Overall DB from chat when the window path did not run.
+--- One self-loot chat line → one batch of DB + session lines (per item in that line).
 local function ProcessChatSessionOnly(msg)
     if not msg or (issecretvalue and issecretvalue(msg)) then
         return
     end
+    local dbg = ArtisanNexus.db and ArtisanNexus.db.profile and ArtisanNexus.db.profile.debugMode
     if not (ns.IsSelfLootChatMessage and ns.IsSelfLootChatMessage(msg)) then
         return
     end
+
+    local now = GetTime()
+    local prevAt = lastFishLootChatAt[msg]
+    if prevAt and (now - prevAt) < CHAT_MSG_DUP_SEC then
+        return
+    end
+    lastFishLootChatAt[msg] = now
+    if (now % 30) < 0.05 then
+        for k, t in pairs(lastFishLootChatAt) do
+            if (now - t) > CHAT_MSG_DUP_SEC * 4 then
+                lastFishLootChatAt[k] = nil
+            end
+        end
+    end
+
     local counts = (ns.ParseChatLootItemQuantities and ns.ParseChatLootItemQuantities(msg)) or {}
     if not ShouldAttributeLootToFishing(counts) then
         return
     end
-    local now = GetTime()
-    local sup = FishingLootService._suppressChatLootUntil
+
+    FishingLootService._deferFishingSessionTabSignals = true
     local hadSessionTouch = false
-    for itemID, qty in pairs(counts) do
-        if not (ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)) then
-            -- Ignore non-catalog fish for session lines.
-        else
-            if sup and sup[itemID] and now >= sup[itemID] then
-                sup[itemID] = nil
-            end
-            if sup and sup[itemID] and now < sup[itemID] then
-                if ns.SessionLootService and ns.SessionLootService.ReconcileFishingFromChat then
-                    ns.SessionLootService:ReconcileFishingFromChat(itemID, qty, { quietTab = true })
-                    hadSessionTouch = true
-                end
-            elseif ns.SessionLootService and ns.SessionLootService.PushFishingSession then
-                local suppressActive = sup and sup[itemID] and now < sup[itemID]
-                if not suppressActive then
-                    IncrementFishingLootHistoryDb(itemID, qty, nil)
-                end
-                ns.SessionLootService:PushFishingSession(itemID, qty, { quiet = true })
-                hadSessionTouch = true
+    local primaryItemId = nil
+    local totalQuantity = 0
+    local distinctItems = 0
+    for rawId, qty in pairs(counts) do
+        local itemID = NormFishItemID(rawId)
+        if not itemID or not (ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)) then
+            --- Non-catalog drops in a mixed line: skip session rows for those IDs.
+        elseif ns.SessionLootService and ns.SessionLootService.PushFishingSession then
+            local q = math.max(1, qty or 1)
+            IncrementFishingLootHistoryDb(itemID, qty, nil)
+            ns.SessionLootService:PushFishingSession(itemID, qty, { quiet = true })
+            hadSessionTouch = true
+            distinctItems = distinctItems + 1
+            totalQuantity = totalQuantity + q
+            if not primaryItemId or itemID < primaryItemId then
+                primaryItemId = itemID
             end
         end
     end
+    FishingLootService._deferFishingSessionTabSignals = false
+
     if hadSessionTouch then
+        --- One internal message per processed self-loot chat line (not per item row).
+        ArtisanNexus:SendMessage(E.FISHING_LOOT_RECORDED, {
+            primaryItemId = primaryItemId,
+            totalQuantity = totalQuantity,
+            distinctItems = distinctItems,
+        })
+        local profile = ArtisanNexus.db and ArtisanNexus.db.profile
+        if profile and profile.fishingLootSoundEnabled then
+            PlayFishingLootRecordedTick()
+        end
+        if dbg then
+            ArtisanNexus:Print("[FishingLoot] Recorded fishing loot from chat (session + history).")
+        end
         ArtisanNexus:SendMessage(E.FISHING_HISTORY_UPDATED)
+        ArtisanNexus:SendMessage(E.LOOT_HISTORY_UPDATED)
         if ns.SessionLootService and ns.SessionLootService.EmitFishingLootTabSignal then
             ns.SessionLootService:EmitFishingLootTabSignal()
         end
+    elseif dbg and next(counts) then
+        ArtisanNexus:Print("[FishingLoot] Fishing-attributed chat line had no catalog items to record.")
     end
     if next(counts) and ns.FishingService and ns.FishingService.ClearPostLootState then
         ns.FishingService:ClearPostLootState()
     end
 end
 
---- Used by GatheringLootService so fishing wins attribution vs gathering.
 function FishingLootService:ShouldAttributeLootToFishing()
     return ShouldAttributeLootToFishing(nil)
-end
-
----@param counts table<number, number>
-function FishingLootService.RecordWindowLootCounts(counts)
-    counts = counts or {}
-    local attr = ShouldAttributeLootToFishing(counts)
-    if not attr and not next(counts) then
-        attr = ShouldAttributeLootToFishing(nil)
-    end
-    if not attr then
-        return
-    end
-
-    local prev = lastWindowCounts
-    local looted = {}
-
-    local ids = {}
-    for id in pairs(prev) do
-        ids[id] = true
-    end
-    for id in pairs(counts) do
-        ids[id] = true
-    end
-    for id in pairs(ids) do
-        local pq = prev[id] or 0
-        local cq = counts[id] or 0
-        if pq > cq then
-            local taken = pq - cq
-            looted[id] = (looted[id] or 0) + taken
-        end
-    end
-
-    wipe(prev)
-    for id, q in pairs(counts) do
-        if q and q > 0 then
-            prev[id] = q
-        end
-    end
-
-    if not next(looted) then
-        return
-    end
-
-    FishingLootService._deferFishingSessionTabSignals = true
-    for itemID, qty in pairs(looted) do
-        if qty and qty > 0 then
-            RecordItem(itemID, qty, nil)
-        end
-    end
-    FishingLootService._deferFishingSessionTabSignals = false
-
-    local anyFish = false
-    for itemID, qty in pairs(looted) do
-        if qty and qty > 0 and ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID) then
-            anyFish = true
-            break
-        end
-    end
-    if anyFish then
-        ArtisanNexus:SendMessage(E.FISHING_HISTORY_UPDATED)
-        if ns.SessionLootService and ns.SessionLootService.EmitFishingLootTabSignal then
-            ns.SessionLootService:EmitFishingLootTabSignal()
-        end
-    end
-    if ns.FishingService and ns.FishingService.ClearPostLootState then
-        ns.FishingService:ClearPostLootState()
-    end
 end
 
 local eventFrame = CreateFrame("Frame")

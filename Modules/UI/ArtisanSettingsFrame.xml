@@ -1,0 +1,401 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        Artisan Nexus settings: layout in FrameXML; ArtisanSettingsUI.lua binds handlers,
+        AceDB profile writes, theme backdrops (ArtisanTheme / SharedWidgets), and localization.
+        Shared pattern: section title frames + UICheckButtonTemplate checkboxes — reuse for future UI ports.
+    -->
+    <Frame
+        name="ArtisanNexusSettingsFrame"
+        parent="UIParent"
+        inherits="BackdropTemplate"
+        frameStrata="HIGH"
+        frameLevel="200"
+        enableMouse="true"
+        movable="true"
+        clampedToScreen="true"
+        hidden="true"
+    >
+        <Size x="600" y="680"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="ArtisanNexusSettings_FooterHint" inherits="GameFontHighlight" justifyH="CENTER">
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT" x="12" y="12"/>
+                        <Anchor point="BOTTOMRIGHT" x="-12" y="12"/>
+                    </Anchors>
+                    <Color r="0.72" g="0.69" b="0.78"/>
+                </FontString>
+            </Layer>
+        </Layers>
+
+        <Frames>
+            <Frame name="ArtisanNexusSettings_Header" enableMouse="true" inherits="BackdropTemplate">
+                <Size x="0" y="44"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="2" y="-2"/>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="ArtisanNexusSettings_HeaderLogo">
+                            <Size x="28" y="28"/>
+                            <Anchors>
+                                <Anchor point="LEFT" x="12" y="0"/>
+                            </Anchors>
+                        </Texture>
+                        <FontString name="ArtisanNexusSettings_HeaderTitle" inherits="GameFontNormalLarge" justifyH="LEFT">
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="ArtisanNexusSettings_HeaderLogo" relativePoint="RIGHT" x="8" y="0"/>
+                            </Anchors>
+                            <Color r="0.98" g="0.97" b="0.99"/>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="ArtisanNexusSettings_Close" inherits="UIPanelCloseButton">
+                        <Anchors>
+                            <Anchor point="RIGHT" x="-6" y="0"/>
+                        </Anchors>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <ScrollFrame name="ArtisanNexusSettings_Scroll" inherits="UIPanelScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Header" relativePoint="BOTTOMLEFT" x="4" y="-8"/>
+                    <Anchor point="BOTTOMRIGHT" x="-4" y="38"/>
+                </Anchors>
+
+                <ScrollChild>
+                    <Frame name="ArtisanNexusSettings_ScrollContent">
+                        <Size x="556" y="1540"/>
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                        </Anchors>
+
+                        <Frames>
+                            <Frame name="ArtisanNexusSettings_TitleGeneral" enableMouse="false">
+                                <Size x="524" y="26"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="16" y="-12"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_TitleGeneralText" inherits="GameFontHighlightMedium" justifyH="LEFT" text="General">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="10" y="0"/>
+                                            </Anchors>
+                                            <Color r="0.98" g="0.97" b="0.99"/>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_Minimap" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_TitleGeneral" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_LoginChat" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Minimap" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_LightTheme" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LoginChat" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_ClassicUi" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LightTheme" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Frame name="ArtisanNexusSettings_TitleGathering" enableMouse="false">
+                                <Size x="524" y="26"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_ClassicUi" relativePoint="BOTTOMLEFT" x="0" y="-22"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_TitleGatheringText" inherits="GameFontHighlightMedium" justifyH="LEFT" text="Gathering">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="10" y="0"/>
+                                            </Anchors>
+                                            <Color r="0.98" g="0.97" b="0.99"/>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_Gathering" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_TitleGathering" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_Fishing" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Gathering" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_OverloadInd" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Fishing" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_OverloadHud" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_OverloadInd" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_OverloadCastBtn" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_OverloadHud" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_BagGuard" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_OverloadCastBtn" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Slider name="ArtisanNexusSettings_BagSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_BagGuard" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <Frame name="ArtisanNexusSettings_TitleLoot" enableMouse="false">
+                                <Size x="524" y="26"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_BagSlider" relativePoint="BOTTOMLEFT" x="0" y="-24"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_TitleLootText" inherits="GameFontHighlightMedium" justifyH="LEFT" text="Loot">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="10" y="0"/>
+                                            </Anchors>
+                                            <Color r="0.98" g="0.97" b="0.99"/>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_LootHistory" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_TitleLoot" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_LootAuto" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootHistory" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Slider name="ArtisanNexusSettings_SessionRecentSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootAuto" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <Slider name="ArtisanNexusSettings_SessionOverallSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_SessionRecentSlider" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <Frame name="ArtisanNexusSettings_TitleCraftBriefing" enableMouse="false">
+                                <Size x="524" y="26"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_SessionOverallSlider" relativePoint="BOTTOMLEFT" x="0" y="-22"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_TitleCraftBriefingText" inherits="GameFontHighlightMedium" justifyH="LEFT" text="Craft briefing">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="10" y="0"/>
+                                            </Anchors>
+                                            <Color r="0.98" g="0.97" b="0.99"/>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefing" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_TitleCraftBriefing" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingChat" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefing" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingOwned" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingChat" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingAlert" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingOwned" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Slider name="ArtisanNexusSettings_CraftBriefingAlertMinSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingAlert" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingConc" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingAlertMinSlider" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingEquip" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingConc" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Slider name="ArtisanNexusSettings_CraftBriefingTopSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingEquip" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <Frame name="ArtisanNexusSettings_CraftBriefingPriceFrame" enableMouse="true">
+                                <Size x="524" y="22"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingTopSlider" relativePoint="BOTTOMLEFT" x="0" y="-16"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_CraftBriefingPriceLabel" inherits="GameFontHighlight" justifyH="LEFT" text="Briefing price source">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="8" y="0"/>
+                                            </Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingPriceSpot" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingPriceFrame" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <CheckButton name="ArtisanNexusSettings_CraftBriefingPriceAvg" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingPriceSpot" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Frame name="ArtisanNexusSettings_TitleAdvanced" enableMouse="false">
+                                <Size x="524" y="26"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_CraftBriefingPriceAvg" relativePoint="BOTTOMLEFT" x="0" y="-22"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_TitleAdvancedText" inherits="GameFontHighlightMedium" justifyH="LEFT" text="Advanced">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="10" y="0"/>
+                                            </Anchors>
+                                            <Color r="0.98" g="0.97" b="0.99"/>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_Debug" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_TitleAdvanced" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Frame name="ArtisanNexusSettings_PostingLabelFrame" enableMouse="true">
+                                <Size x="524" y="22"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Debug" relativePoint="BOTTOMLEFT" x="0" y="-16"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_PostingLabel" inherits="GameFontHighlight" justifyH="LEFT" text="AH posting suggestion">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="8" y="0"/>
+                                            </Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+
+                            <CheckButton name="ArtisanNexusSettings_PostingUndercut" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingLabelFrame" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </CheckButton>
+                            <CheckButton name="ArtisanNexusSettings_PostingAverage" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingUndercut" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+                            <CheckButton name="ArtisanNexusSettings_PostingMax" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingAverage" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Slider name="ArtisanNexusSettings_AhFreshSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingMax" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <Button name="ArtisanNexusSettings_ResetSession" inherits="UIPanelButtonTemplate" text="Reset session loot">
+                                <Size x="524" y="28"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_AhFreshSlider" relativePoint="BOTTOMLEFT" x="0" y="-18"/>
+                                </Anchors>
+                            </Button>
+
+                            <Button name="ArtisanNexusSettings_ResetOverall" inherits="UIPanelButtonTemplate" text="Reset overall loot history">
+                                <Size x="524" y="28"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_ResetSession" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                                </Anchors>
+                            </Button>
+                        </Frames>
+                    </Frame>
+                </ScrollChild>
+            </ScrollFrame>
+        </Frames>
+    </Frame>
+</Ui>

@@ -118,8 +118,7 @@ end
 --- Hook the live sell frame OnShow so the suggestion appears in chat
 --- (auto-fill of the live edit box requires SecureActionButtonTemplate;
 ---  we keep it advisory to stay non-protected).
-local function HookSellFrame(name)
-    local f = _G[name]
+local function HookSellFrame(f)
     if not f or f.ArtisanNexusPostHook then return end
     f.ArtisanNexusPostHook = true
     f:HookScript("OnShow", function(self)
@@ -142,8 +141,13 @@ local hookFrame = CreateFrame("Frame")
 hookFrame:RegisterEvent("ADDON_LOADED")
 hookFrame:SetScript("OnEvent", function(_, _, addonName)
     if addonName == "Blizzard_AuctionHouseUI" then
-        HookSellFrame("AuctionHouseFrameCommoditiesSellFrame")
-        HookSellFrame("AuctionHouseFrameItemSellFrame")
+        --- Sell frames are parentKey children of AuctionHouseFrame, not globals.
+        local ah = _G.AuctionHouseFrame
+        if ah then
+            HookSellFrame(ah.CommoditiesSellFrame)
+            HookSellFrame(ah.ItemSellFrame)
+        end
+        hookFrame:UnregisterEvent("ADDON_LOADED")
     end
 end)
 

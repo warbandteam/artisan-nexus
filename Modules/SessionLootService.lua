@@ -6,8 +6,7 @@
     itemID/`cat` mismatch) so profession slices never mix in the event list.
 
     Duplicate suppression: only `SessionLootService:AddFishingEvent` / `AddGatheringEvent` append to
-    these lists (plus `Reconcile*FromChat` which updates an existing row).  Dedupe scans several
-    newest rows so interleaved pickups do not let a second window/chat copy slip past [1]-only checks.
+    these lists. Dedupe scans several newest rows so interleaved pickups do not slip past [1]-only checks.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -15,11 +14,13 @@ local ADDON_NAME, ns = ...
 local ArtisanNexus = ns.ArtisanNexus
 local E = ns.Constants.EVENTS
 
---- Shown rows in Loot History “Last N pickups” (FIFO: oldest dropped when newer arrives).
-local MAX_RECENT_LOOT = 15
-local BUFFER = 40
---- Overall event list cap (persisted across sessions in db.global).
-local OVERALL_EVENTS_CAP = 200
+--- Defaults match Core.lua profile; clamped when read (see GetMaxRecentLoot / GetOverallEventsCap).
+local DEFAULT_SESSION_LOOT_MAX_RECENT = 15
+local DEFAULT_SESSION_LOOT_OVERALL_CAP = 200
+local SESSION_LOOT_RECENT_MIN = 5
+local SESSION_LOOT_RECENT_MAX = 100
+local SESSION_LOOT_OVERALL_MIN = 50
+local SESSION_LOOT_OVERALL_MAX = 2000
 
 local GATHER_KEYS = { "herb", "mine", "leather", "disenchant", "others" }
 
@@ -34,7 +35,10 @@ local TAB_ATTENTION_SEC = 5.2
 --- Same pickup fired twice in one loot resolution (window + chat or double bridge scan).
 --- Must compare several recent rows: if another item was pushed in between, [1] is no longer the duplicate.
 local DUPLICATE_GATHERING_EVENT_SEC = 1.5
-local DUPLICATE_FISHING_EVENT_SEC = 0.85
+--- Fishing: collapse window + CHAT_MSG_LOOT for the same catch (often 0.5–2s apart; 0.55 was too narrow — double `sess_pushed`).
+--- Two distinct 1× catches of the same species faster than this may merge one line (rare).
+--- Fishing uses `CHAT_MSG_LOOT` + short raw-message dedup; no itemID+qty time suppression (that hid back-to-back catches).
+local DUPLICATE_FISHING_EVENT_SEC = 0
 local DUPLICATE_SCAN_DEPTH = 18
 
 ---@class SessionLootService
@@ -47,14 +51,16 @@ local SessionLootService = {
     fishingTotals = {},
     ---@type table<string, table<number, number>>
     gatheringTotals = {},
+    ---@type table[] { itemID = number, qty = number, t = number, spellID = number|nil, profession = string|nil }
+    craftedEvents = {},
+    ---@type table<number, number> crafted output itemID -> qty this session
+    craftedTotals = {},
     --- Reference grid glows: [tabKey][itemID] = expireAt (GetTime). Multiple reagents can glow at once.
     referenceGlow = {},
     _referenceGlowTicker = nil,
     --- [tabKey] = GetTime() expiry for “other tab got loot” highlight (LootHistoryUI).
     tabAttentionUntil = {},
     _tabAttentionRefreshTimer = nil,
-    --- Exposed for Loot History UI (must match GetRecentEvents cap).
-    MAX_RECENT_LOOT = MAX_RECENT_LOOT,
 }
 
 local loginFrame = CreateFrame("Frame")
@@ -64,6 +70,89 @@ loginFrame:SetScript("OnEvent", function(_, event)
         SessionLootService:ResetSession()
     end
 end)
+
+--- Stamp persisted overall rows with character GUID (`ck`) and unit copper at
+--- record time (`v`) — earnings stay attributable and computable after prices
+--- move or the character is renamed/transferred (GUID is the stable key).
+local function StampOverallRow(row, itemID)
+    local u = ns.Utilities
+    local guid = u and u.GetCharacterGUID and u:GetCharacterGUID()
+    if guid then
+        row.ck = guid
+    end
+    if ns.GetLootUnitPriceCopper then
+        local v = tonumber((ns.GetLootUnitPriceCopper(itemID)))
+        if v and v > 0 then
+            row.v = v
+        end
+    end
+    return row
+end
+
+--- Trim newest-first overall lists per character: each `ck` bucket keeps up to
+--- `cap` rows, so one active character can no longer evict offline characters'
+--- records. Legacy unkeyed rows share the "unknown" bucket.
+local function TrimOverallPerChar(odb, cap)
+    if #odb <= cap then
+        return
+    end
+    local counts = {}
+    local i = 1
+    while i <= #odb do
+        local row = odb[i]
+        local key = (row and row.ck) or "unknown"
+        local c = (counts[key] or 0) + 1
+        counts[key] = c
+        if c > cap then
+            table.remove(odb, i)
+        else
+            i = i + 1
+        end
+    end
+end
+
+--- In-memory event lists keep extra tail rows for duplicate scans (newest-first).
+function SessionLootService:GetSessionListBufferCap()
+    return math.max(40, self:GetMaxRecentLoot() + DUPLICATE_SCAN_DEPTH + 10)
+end
+
+--- Shown rows in Loot History “Last N pickups” (FIFO cap for UI + persisted overall tail trim).
+function SessionLootService:GetMaxRecentLoot()
+    local profile = ArtisanNexus and ArtisanNexus.db and ArtisanNexus.db.profile
+    if not profile then
+        return DEFAULT_SESSION_LOOT_MAX_RECENT
+    end
+    local n = tonumber(profile.sessionLootMaxRecent)
+    if not n or n ~= n then
+        return DEFAULT_SESSION_LOOT_MAX_RECENT
+    end
+    n = math.floor(n + 0.5)
+    return math.max(SESSION_LOOT_RECENT_MIN, math.min(SESSION_LOOT_RECENT_MAX, n))
+end
+
+--- Cap for `db.global.overallFishingEvents` / `overallGatheringEvents` tail.
+function SessionLootService:GetOverallEventsCap()
+    local profile = ArtisanNexus and ArtisanNexus.db and ArtisanNexus.db.profile
+    if not profile then
+        return DEFAULT_SESSION_LOOT_OVERALL_CAP
+    end
+    local n = tonumber(profile.sessionLootOverallCap)
+    if not n or n ~= n then
+        return DEFAULT_SESSION_LOOT_OVERALL_CAP
+    end
+    n = math.floor(n + 0.5)
+    return math.max(SESSION_LOOT_OVERALL_MIN, math.min(SESSION_LOOT_OVERALL_MAX, n))
+end
+
+--- UI / settings: hard clamps for `sessionLootMaxRecent` (keep in sync with `GetMaxRecentLoot`).
+function SessionLootService:GetSessionRecentHardLimits()
+    return SESSION_LOOT_RECENT_MIN, SESSION_LOOT_RECENT_MAX
+end
+
+--- UI / settings: hard clamps for `sessionLootOverallCap` (keep in sync with `GetOverallEventsCap`).
+function SessionLootService:GetSessionOverallHardLimits()
+    return SESSION_LOOT_OVERALL_MIN, SESSION_LOOT_OVERALL_MAX
+end
 
 function SessionLootService:ClearReferenceGlowTicker()
     if self._referenceGlowTicker then
@@ -95,13 +184,15 @@ function SessionLootService:_EnsureReferenceGlowTicker()
     if self._referenceGlowTicker or not (C_Timer and C_Timer.NewTicker) then
         return
     end
-    self._referenceGlowTicker = C_Timer.NewTicker(0.12, function()
+    --- ~3 Hz max while glows fade — enough for smooth reference alpha without rebuilding the whole grid every frame.
+    self._referenceGlowTicker = C_Timer.NewTicker(0.32, function()
         local pruned = self:PruneReferenceGlows()
         local hasGlow = self:_HasAnyActiveReferenceGlow()
-        --- While any catalog highlight is fading, repaint Loot History so border alpha tracks time.
+        --- Fade catalog highlights without rebuilding the whole Loot History grid (~3 Hz).
         if pruned or hasGlow then
-            if ArtisanNexus and ArtisanNexus.SendMessage then
-                ArtisanNexus:SendMessage(E.LOOT_HISTORY_UPDATED)
+            local lh = ns.LootHistoryUI
+            if lh and lh.RefreshCatalogGlowsOnly then
+                lh:RefreshCatalogGlowsOnly()
             end
         end
         if not hasGlow then
@@ -254,7 +345,7 @@ function SessionLootService:EmitGatheringLootTabSignal(policy)
                 self:BumpTabAttention(tabKey)
             end
         end
-    elseif policy.singleTab and (policy.singleTab == "fishing" or VALID_GATHER_CAT[policy.singleTab]) then
+    elseif policy.singleTab and (policy.singleTab == "fishing" or policy.singleTab == "crafted" or VALID_GATHER_CAT[policy.singleTab]) then
         self:ClearTabAttention()
     end
     ArtisanNexus:SendMessage(E.SESSION_LOOT_UPDATED, policy)
@@ -262,6 +353,15 @@ function SessionLootService:EmitGatheringLootTabSignal(policy)
 end
 
 --- Fishing window batch: always one profession tab.
+function SessionLootService:EmitCraftedLootTabSignal()
+    if not ArtisanNexus or not ArtisanNexus.SendMessage then
+        return
+    end
+    self:ClearTabAttention()
+    ArtisanNexus:SendMessage(E.SESSION_LOOT_UPDATED, { singleTab = "crafted" })
+    ArtisanNexus:SendMessage(E.LOOT_HISTORY_UPDATED)
+end
+
 function SessionLootService:EmitFishingLootTabSignal()
     if not ArtisanNexus or not ArtisanNexus.SendMessage then
         return
@@ -272,7 +372,7 @@ function SessionLootService:EmitFishingLootTabSignal()
 end
 
 function SessionLootService:BumpTabAttention(tabKey)
-    if tabKey ~= "fishing" and (not tabKey or not VALID_GATHER_CAT[tabKey]) then
+    if tabKey ~= "fishing" and tabKey ~= "crafted" and (not tabKey or not VALID_GATHER_CAT[tabKey]) then
         return
     end
     self.tabAttentionUntil = self.tabAttentionUntil or {}
@@ -295,6 +395,8 @@ function SessionLootService:ResetSession()
     wipe(self.gatheringEvents)
     wipe(self.fishingTotals)
     wipe(self.gatheringTotals)
+    wipe(self.craftedEvents)
+    wipe(self.craftedTotals)
     for i = 1, #GATHER_KEYS do
         self.gatheringTotals[GATHER_KEYS[i]] = {}
     end
@@ -305,13 +407,19 @@ function SessionLootService:ResetSession()
 end
 
 --- Clear in-memory session data for one tab only (fishing or one gathering profession).
----@param tabKey "fishing"|"herb"|"mine"|"leather"|"disenchant"|"others"
+---@param tabKey "fishing"|"herb"|"mine"|"leather"|"disenchant"|"others"|"crafted"
 function SessionLootService:ResetSessionForTab(tabKey)
     if tabKey == "fishing" then
         wipe(self.fishingEvents)
         wipe(self.fishingTotals)
         if self.referenceGlow then
             self.referenceGlow["fishing"] = nil
+        end
+    elseif tabKey == "crafted" then
+        wipe(self.craftedEvents)
+        wipe(self.craftedTotals)
+        if self.referenceGlow then
+            self.referenceGlow["crafted"] = nil
         end
     elseif tabKey and VALID_GATHER_CAT[tabKey] then
         local kept = {}
@@ -340,9 +448,9 @@ function SessionLootService:ResetSessionForTab(tabKey)
     end
 end
 
-local function PushFront(list, entry)
+local function PushFront(list, maxLen, entry)
     table.insert(list, 1, entry)
-    while #list > BUFFER do
+    while #list > maxLen do
         table.remove(list)
     end
 end
@@ -360,10 +468,17 @@ local function IsDuplicateGatheringLine(events, itemID, qty, cat, now, windowSec
 end
 
 local function IsDuplicateFishingLine(events, itemID, qty, now, windowSec)
+    if not windowSec or windowSec <= 0 then
+        return false
+    end
+    itemID = tonumber(itemID) or itemID
+    qty = tonumber(qty) or qty
     local limit = math.min(DUPLICATE_SCAN_DEPTH, #events)
     for i = 1, limit do
         local e = events[i]
-        if e and e.itemID == itemID and e.qty == qty and e.rt and (now - e.rt) < windowSec then
+        local eid = e and tonumber(e.itemID)
+        local eq = e and tonumber(e.qty)
+        if e and eid and eid == itemID and eq == qty and e.rt and (now - e.rt) < windowSec then
             return true
         end
     end
@@ -377,6 +492,8 @@ end
 ---@param qty number
 ---@param opts table|nil `{ quiet = true }` defers tab signals (caller emits one batch via `EmitFishingLootTabSignal`).
 function SessionLootService:PushFishingSession(itemID, qty, opts)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty)
     if not itemID or not qty or qty < 1 then
         return
     end
@@ -387,17 +504,32 @@ function SessionLootService:PushFishingSession(itemID, qty, opts)
     self:AddFishingEvent(itemID, qty, opts.quiet)
 end
 
+--- True when `RecordItem` would duplicate the newest pickup line (DB must not increment before this check).
+---@param itemID number
+---@param qty number
+---@return boolean
+function SessionLootService:IsDuplicateFishingPickup(itemID, qty)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty)
+    if not itemID or not qty or qty < 1 then
+        return true
+    end
+    return IsDuplicateFishingLine(self.fishingEvents, itemID, qty, GetTime(), DUPLICATE_FISHING_EVENT_SEC)
+end
+
 function SessionLootService:AddFishingEvent(itemID, qty, quiet)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty)
     if not itemID or not qty or qty < 1 then
         return
     end
     local now = GetTime()
-    if IsDuplicateFishingLine(self.fishingEvents, itemID, qty, now, DUPLICATE_FISHING_EVENT_SEC) then
+    if self:IsDuplicateFishingPickup(itemID, qty) then
         return
     end
     self.fishingTotals[itemID] = (self.fishingTotals[itemID] or 0) + qty
     local wallT = time()
-    PushFront(self.fishingEvents, {
+    PushFront(self.fishingEvents, self:GetSessionListBufferCap(), {
         itemID = itemID,
         qty = qty,
         t = wallT,
@@ -406,10 +538,8 @@ function SessionLootService:AddFishingEvent(itemID, qty, quiet)
     if ArtisanNexus and ArtisanNexus.db then
         local odb = ArtisanNexus.db.global.overallFishingEvents
         if type(odb) == "table" then
-            table.insert(odb, 1, { itemID = itemID, qty = qty, t = wallT })
-            while #odb > OVERALL_EVENTS_CAP do
-                table.remove(odb)
-            end
+            table.insert(odb, 1, StampOverallRow({ itemID = itemID, qty = qty, t = wallT }, itemID))
+            TrimOverallPerChar(odb, self:GetOverallEventsCap())
         end
     end
     self:AddReferenceGlow(itemID, "fishing")
@@ -427,152 +557,42 @@ end
 ---@param qty number
 ---@param cat string|nil
 ---@param opts table|nil `{ quiet = true }` during window/chat batch (caller calls `EmitGatheringLootTabSignal`).
+---@return boolean accepted false when validated out or dedup-dropped — callers
+--- (GatheringLootService.RecordItem) must NOT bump history DB counts on false,
+--- or the Overall grid and the event/earnings rows diverge.
 function SessionLootService:PushGatheringSession(itemID, qty, cat, opts)
     if not itemID or not qty or qty < 1 then
-        return
+        return false
     end
     if not cat or not VALID_GATHER_CAT[cat] then
-        return
+        return false
     end
     if not (ns.IsGatheringCatalogItem and ns.IsGatheringCatalogItem(itemID)) then
-        return
+        return false
     end
     if ns.ItemListedInGatheringTab then
         if not ns.ItemListedInGatheringTab(itemID, cat) then
-            return
+            return false
         end
     elseif ns.GetGatheringCategoryForItemId and ns.GetGatheringCategoryForItemId(itemID) ~= cat then
-        return
+        return false
     end
     opts = opts or {}
-    self:AddGatheringEvent(itemID, qty, cat, opts.quiet)
-end
-
---- If CHAT_MSG_LOOT reports a larger stack than the last window-derived line (same item, same tab), fix totals + history.
----@param itemID number
----@param chatQty number
----@param cat string
----@param opts table|nil `{ quietTab = true }` — skip tab emit + `GATHERING_HISTORY_UPDATED` (caller batches one chat line).
-function SessionLootService:ReconcileGatheringFromChat(itemID, chatQty, cat, opts)
-    opts = opts or {}
-    if not itemID or not chatQty or chatQty < 1 or not cat or not VALID_GATHER_CAT[cat] then
-        return
-    end
-    if not (ns.IsGatheringCatalogItem and ns.IsGatheringCatalogItem(itemID)) then
-        return
-    end
-    if ns.ItemListedInGatheringTab then
-        if not ns.ItemListedInGatheringTab(itemID, cat) then
-            return
-        end
-    elseif ns.GetGatheringCategoryForItemId and ns.GetGatheringCategoryForItemId(itemID) ~= cat then
-        return
-    end
-    local nowWall = time()
-    local ev = nil
-    for i = 1, math.min(12, #(self.gatheringEvents or {})) do
-        local e = self.gatheringEvents[i]
-        if e and e.itemID == itemID and e.cat == cat and (nowWall - (e.t or 0)) <= 8 then
-            ev = e
-            break
-        end
-    end
-    if not ev then
-        return
-    end
-    local prev = math.max(1, ev.qty or 1)
-    if chatQty <= prev then
-        return
-    end
-    local delta = chatQty - prev
-    ev.qty = chatQty
-    ev.rt = GetTime()
-    if not self.gatheringTotals[cat] then
-        self.gatheringTotals[cat] = {}
-    end
-    local gt = self.gatheringTotals[cat]
-    gt[itemID] = (gt[itemID] or 0) + delta
-
-    local db = ArtisanNexus.db.global.gatheringLootHistory
-    if type(db) == "table" then
-        if not db[itemID] then
-            db[itemID] = { count = 0, lastAt = 0, name = nil }
-        end
-        local row = db[itemID]
-        row.count = (row.count or 0) + delta
-        row.lastAt = time()
-    end
-
-    self:AddReferenceGlow(itemID, cat)
-    if opts.quietTab then
-        return
-    end
-    ArtisanNexus:SendMessage(E.GATHERING_HISTORY_UPDATED)
-    self:EmitGatheringTabSwitchOrAttention(cat)
-end
-
---- Same as ReconcileGatheringFromChat for fishing session + fishingLootHistory.
----@param itemID number
----@param chatQty number
----@param opts table|nil `{ quietTab = true }` — skip tab emit + `FISHING_HISTORY_UPDATED` (caller batches).
-function SessionLootService:ReconcileFishingFromChat(itemID, chatQty, opts)
-    opts = opts or {}
-    if not itemID or not chatQty or chatQty < 1 then
-        return
-    end
-    if not (ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)) then
-        return
-    end
-    local nowWall = time()
-    local ev = nil
-    for i = 1, math.min(12, #(self.fishingEvents or {})) do
-        local e = self.fishingEvents[i]
-        if e and e.itemID == itemID and (nowWall - (e.t or 0)) <= 8 then
-            ev = e
-            break
-        end
-    end
-    if not ev then
-        return
-    end
-    local prev = math.max(1, ev.qty or 1)
-    if chatQty <= prev then
-        return
-    end
-    local delta = chatQty - prev
-    ev.qty = chatQty
-    ev.rt = GetTime()
-    self.fishingTotals[itemID] = (self.fishingTotals[itemID] or 0) + delta
-
-    local db = ArtisanNexus.db.global.fishingLootHistory
-    if type(db) == "table" then
-        if not db[itemID] then
-            db[itemID] = { count = 0, lastAt = 0, name = nil }
-        end
-        local row = db[itemID]
-        row.count = (row.count or 0) + delta
-        row.lastAt = time()
-    end
-
-    self:AddReferenceGlow(itemID, "fishing")
-    if opts.quietTab then
-        return
-    end
-    ArtisanNexus:SendMessage(E.FISHING_HISTORY_UPDATED)
-    self:EmitFishingLootTabSignal()
+    return self:AddGatheringEvent(itemID, qty, cat, opts.quiet)
 end
 
 ---@param quiet boolean|nil when true, no tab bump / `SESSION_LOOT_UPDATED` (batched emit by caller).
+---@return boolean accepted
 function SessionLootService:AddGatheringEvent(itemID, qty, cat, quiet)
     if not itemID or not qty or qty < 1 then
-        return
+        return false
     end
     if not cat or not VALID_GATHER_CAT[cat] then
-        return
+        return false
     end
     local now = GetTime()
     if IsDuplicateGatheringLine(self.gatheringEvents, itemID, qty, cat, now, DUPLICATE_GATHERING_EVENT_SEC) then
-        return
+        return false
     end
     if not self.gatheringTotals[cat] then
         self.gatheringTotals[cat] = {}
@@ -580,7 +600,7 @@ function SessionLootService:AddGatheringEvent(itemID, qty, cat, quiet)
     local gt = self.gatheringTotals[cat]
     gt[itemID] = (gt[itemID] or 0) + qty
     local wallT = time()
-    PushFront(self.gatheringEvents, {
+    PushFront(self.gatheringEvents, self:GetSessionListBufferCap(), {
         itemID = itemID,
         qty = qty,
         t = wallT,
@@ -590,17 +610,161 @@ function SessionLootService:AddGatheringEvent(itemID, qty, cat, quiet)
     if ArtisanNexus and ArtisanNexus.db then
         local odb = ArtisanNexus.db.global.overallGatheringEvents
         if type(odb) == "table" then
-            table.insert(odb, 1, { itemID = itemID, qty = qty, t = wallT, cat = cat })
-            while #odb > OVERALL_EVENTS_CAP do
-                table.remove(odb)
-            end
+            table.insert(odb, 1, StampOverallRow({ itemID = itemID, qty = qty, t = wallT, cat = cat }, itemID))
+            TrimOverallPerChar(odb, self:GetOverallEventsCap())
         end
     end
     self:AddReferenceGlow(itemID, cat)
     if quiet then
-        return
+        return true
     end
     self:EmitGatheringTabSwitchOrAttention(cat)
+    return true
+end
+
+local function IsDuplicateCraftedLine(events, itemID, qty, now, windowSec)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty)
+    if not itemID or not qty then
+        return true
+    end
+    local limit = math.min(DUPLICATE_SCAN_DEPTH, #events)
+    for i = 1, limit do
+        local e = events[i]
+        if e and tonumber(e.itemID) == itemID and tonumber(e.qty) == qty and e.rt and (now - e.rt) < windowSec then
+            return true
+        end
+    end
+    return false
+end
+
+---@param itemID number
+---@param qty number
+---@param meta table|nil `{ spellID, profession, quality, isCrit }`
+---@param opts table|nil `{ quiet = true }`
+function SessionLootService:PushCraftedSession(itemID, qty, meta, opts)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty)
+    if not itemID or not qty or qty < 1 then
+        return
+    end
+    opts = opts or {}
+    self:AddCraftedEvent(itemID, qty, meta, opts.quiet)
+end
+
+---@param meta table|nil
+---@param quiet boolean|nil
+function SessionLootService:AddCraftedEvent(itemID, qty, meta, quiet)
+    itemID = tonumber(itemID)
+    qty = tonumber(qty)
+    if not itemID or not qty or qty < 1 then
+        return
+    end
+    local now = GetTime()
+    if IsDuplicateCraftedLine(self.craftedEvents, itemID, qty, now, DUPLICATE_GATHERING_EVENT_SEC) then
+        return
+    end
+    self.craftedTotals[itemID] = (self.craftedTotals[itemID] or 0) + qty
+    local wallT = time()
+    local spellID = meta and tonumber(meta.spellID) or nil
+    local profession = meta and meta.profession or nil
+    PushFront(self.craftedEvents, self:GetSessionListBufferCap(), {
+        itemID = itemID,
+        qty = qty,
+        t = wallT,
+        rt = now,
+        spellID = spellID,
+        profession = profession,
+        quality = meta and meta.quality,
+        isCrit = meta and meta.isCrit,
+    })
+    if ArtisanNexus and ArtisanNexus.db then
+        local odb = ArtisanNexus.db.global.overallCraftedEvents
+        if type(odb) == "table" then
+            table.insert(odb, 1, StampOverallRow({
+                itemID = itemID,
+                qty = qty,
+                t = wallT,
+                spellID = spellID,
+                profession = profession,
+            }, itemID))
+            TrimOverallPerChar(odb, self:GetOverallEventsCap())
+        end
+        local hist = ArtisanNexus.db.global.craftedLootHistory
+        if type(hist) == "table" then
+            local row = hist[itemID]
+            if type(row) ~= "table" then
+                row = { count = 0, lastAt = wallT }
+                hist[itemID] = row
+            end
+            row.count = (row.count or 0) + qty
+            row.lastAt = wallT
+        end
+    end
+    self:AddReferenceGlow(itemID, "crafted")
+    if quiet then
+        return
+    end
+    self:EmitCraftedLootTabSignal()
+    if E and E.CRAFT_LOOT_RECORDED and ArtisanNexus and ArtisanNexus.SendMessage then
+        ArtisanNexus:SendMessage(E.CRAFT_LOOT_RECORDED, {
+            itemID = itemID,
+            qty = qty,
+            spellID = spellID,
+            profession = profession,
+        })
+    end
+end
+
+--- Per-character earnings computed from persisted overall event rows.
+--- Legacy rows without `ck` group under the "unknown" bucket; rows without a
+--- recorded `v` fall back to the current unit price estimate.
+---@return table[] rows sorted by copper desc: { guid|nil, label, copper, qty }
+function SessionLootService:GetPerCharacterEarnings()
+    local out, byKey = {}, {}
+    local db = ArtisanNexus and ArtisanNexus.db
+    if not db or not db.global then
+        return out
+    end
+    local g = db.global
+    local lists = { g.overallFishingEvents, g.overallGatheringEvents, g.overallCraftedEvents }
+    for li = 1, #lists do
+        local odb = lists[li]
+        if type(odb) == "table" then
+            for i = 1, #odb do
+                local row = odb[i]
+                local qty = row and tonumber(row.qty)
+                if row and row.itemID and qty and qty > 0 then
+                    local key = row.ck or "unknown"
+                    local rec = byKey[key]
+                    if not rec then
+                        rec = { guid = row.ck, copper = 0, qty = 0 }
+                        byKey[key] = rec
+                        out[#out + 1] = rec
+                    end
+                    local unit = tonumber(row.v)
+                    if not unit and ns.GetLootUnitPriceCopper then
+                        unit = tonumber((ns.GetLootUnitPriceCopper(row.itemID)))
+                    end
+                    rec.qty = rec.qty + qty
+                    rec.copper = rec.copper + ((unit or 0) * qty)
+                end
+            end
+        end
+    end
+    local u = ns.Utilities
+    for i = 1, #out do
+        local rec = out[i]
+        if rec.guid and u and u.GetCharacterDisplayName then
+            rec.label = u:GetCharacterDisplayName(rec.guid)
+        else
+            rec.label = (ns.L and ns.L["CHAR_UNKNOWN"]) or "Unknown"
+        end
+    end
+    table.sort(out, function(a, b)
+        return a.copper > b.copper
+    end)
+    return out
 end
 
 --- Legacy hook (aggregated totals) — no longer used by UI; keep no-op for older callers.
@@ -613,17 +777,26 @@ function SessionLootService:Add(kind, itemID, qty)
     end
 end
 
----@param kind "fishing"|"gathering"
+---@param kind "fishing"|"gathering"|"crafted"
 ---@param gatherCategory string|nil
 ---@param overall boolean|nil true = read from persistent db.global lists
 ---@return table[] events (newest first, capped for UI)
 function SessionLootService:GetRecentEvents(kind, gatherCategory, overall)
+    local cap = self:GetMaxRecentLoot()
     if overall then
         if not ArtisanNexus or not ArtisanNexus.db then return {} end
         if kind == "fishing" then
             local odb = ArtisanNexus.db.global.overallFishingEvents or {}
             local out = {}
-            for i = 1, math.min(MAX_RECENT_LOOT, #odb) do
+            for i = 1, math.min(cap, #odb) do
+                out[i] = odb[i]
+            end
+            return out
+        end
+        if kind == "crafted" then
+            local odb = ArtisanNexus.db.global.overallCraftedEvents or {}
+            local out = {}
+            for i = 1, math.min(cap, #odb) do
                 out[i] = odb[i]
             end
             return out
@@ -634,15 +807,22 @@ function SessionLootService:GetRecentEvents(kind, gatherCategory, overall)
             local e = odb[i]
             if e and e.cat == gatherCategory then
                 out[#out + 1] = e
-                if #out >= MAX_RECENT_LOOT then break end
+                if #out >= cap then break end
             end
         end
         return out
     end
     if kind == "fishing" then
         local out = {}
-        for i = 1, math.min(MAX_RECENT_LOOT, #self.fishingEvents) do
+        for i = 1, math.min(cap, #self.fishingEvents) do
             out[i] = self.fishingEvents[i]
+        end
+        return out
+    end
+    if kind == "crafted" then
+        local out = {}
+        for i = 1, math.min(cap, #(self.craftedEvents or {})) do
+            out[i] = self.craftedEvents[i]
         end
         return out
     end
@@ -651,7 +831,7 @@ function SessionLootService:GetRecentEvents(kind, gatherCategory, overall)
         local e = self.gatheringEvents[i]
         if e and e.cat == gatherCategory then
             out[#out + 1] = e
-            if #out >= MAX_RECENT_LOOT then
+            if #out >= cap then
                 break
             end
         end
@@ -660,7 +840,7 @@ function SessionLootService:GetRecentEvents(kind, gatherCategory, overall)
 end
 
 --- Per–item-ID quantities (for reference totals). Not split by event.
----@param kind "fishing"|"gathering"
+---@param kind "fishing"|"gathering"|"crafted"
 ---@param gatherCategory string|nil herb / mine / … when kind is gathering
 ---@param overall boolean|nil true = read from persistent db.global totals
 ---@return table<number, number>
@@ -669,6 +849,16 @@ function SessionLootService:GetItemTotals(kind, gatherCategory, overall)
         if not ArtisanNexus or not ArtisanNexus.db then return {} end
         if kind == "fishing" then
             local db = ArtisanNexus.db.global.fishingLootHistory or {}
+            local out = {}
+            for itemID, row in pairs(db) do
+                if type(row) == "table" and (row.count or 0) > 0 then
+                    out[itemID] = row.count
+                end
+            end
+            return out
+        end
+        if kind == "crafted" then
+            local db = ArtisanNexus.db.global.craftedLootHistory or {}
             local out = {}
             for itemID, row in pairs(db) do
                 if type(row) == "table" and (row.count or 0) > 0 then
@@ -698,6 +888,9 @@ function SessionLootService:GetItemTotals(kind, gatherCategory, overall)
     if kind == "fishing" then
         return self.fishingTotals or {}
     end
+    if kind == "crafted" then
+        return self.craftedTotals or {}
+    end
     if not gatherCategory or not VALID_GATHER_CAT[gatherCategory] then
         return {}
     end
@@ -707,7 +900,7 @@ function SessionLootService:GetItemTotals(kind, gatherCategory, overall)
     return self.gatheringTotals[gatherCategory]
 end
 
----@param kind "fishing"|"gathering"
+---@param kind "fishing"|"gathering"|"crafted"
 ---@param gatherCategory string|nil required when kind is gathering
 function SessionLootService:ResetOverall(kind, gatherCategory)
     if not ArtisanNexus or not ArtisanNexus.db then return end
@@ -717,6 +910,11 @@ function SessionLootService:ResetOverall(kind, gatherCategory)
         g.overallFishingEvents = {}
         wipe(g.fishingLootHistory or {})
         g.fishingLootHistory = {}
+    elseif kind == "crafted" then
+        wipe(g.overallCraftedEvents or {})
+        g.overallCraftedEvents = {}
+        wipe(g.craftedLootHistory or {})
+        g.craftedLootHistory = {}
     elseif kind == "gathering" then
         if gatherCategory and VALID_GATHER_CAT[gatherCategory] then
             local gh = g.gatheringLootHistory or {}
@@ -752,6 +950,10 @@ function SessionLootService:ResetAllOverallData()
     g.overallGatheringEvents = {}
     wipe(g.gatheringLootHistory or {})
     g.gatheringLootHistory = {}
+    wipe(g.overallCraftedEvents or {})
+    g.overallCraftedEvents = {}
+    wipe(g.craftedLootHistory or {})
+    g.craftedLootHistory = {}
     if ArtisanNexus.SendMessage then
         ArtisanNexus:SendMessage(E.LOOT_HISTORY_UPDATED)
     end

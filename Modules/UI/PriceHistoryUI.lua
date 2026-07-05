@@ -17,8 +17,25 @@
 
 local ADDON_NAME, ns = ...
 
+local L = ns.L
+
 local PriceHistoryUI = {}
 local POPUP_FRAME = nil
+--- Last ShowPopup args so a theme-change rebuild can restore the popup in place.
+local LAST_ITEMID, LAST_ANCHOR, LAST_POINT = nil, nil, nil
+
+--- Live palette — resolve at call time (UI_RefreshColors swaps sub-tables).
+local function C()
+    return ns.UI_COLORS or {}
+end
+
+local function Font(role)
+    local f = ns.UI_FONTS
+    if f and role and f[role] then
+        return f[role]
+    end
+    return (f and f.WINDOW_BODY) or "GameFontNormal"
+end
 
 local function Apply(frame, bg, border)
     if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(frame, bg, border)
@@ -28,65 +45,59 @@ local function Apply(frame, bg, border)
     end
 end
 
+--- Shared helpers (Modules/Utilities.lua; loads before this file per TOC).
+--- This UI shows "-" for missing values, so wrap the nil-returning shared formatter.
 local function FormatCopper(c)
-    if not c or c <= 0 then return "-" end
-    local g = math.floor(c / 10000)
-    local s = math.floor((c / 100) % 100)
-    local cu = c % 100
-    if g > 0 then return string.format("%dg %ds", g, s) end
-    if s > 0 then return string.format("%ds %dc", s, cu) end
-    return string.format("%dc", cu)
+    return ns.FormatCopper(c) or "-"
 end
 
-local function ItemName(itemID)
-    if not itemID then return "?" end
-    return (GetItemInfo and GetItemInfo(itemID)) or ("item:" .. itemID)
-end
-
-local function ItemIcon(itemID)
-    if C_Item and C_Item.GetItemIconByID then return C_Item.GetItemIconByID(itemID) end
-    return select(10, GetItemInfo(itemID)) or 134400
-end
+local ItemName = ns.GetItemDisplayName
+local ItemIcon = ns.GetItemIconFileID
 
 --- Build a reusable sparkline frame.
 function PriceHistoryUI:CreateSparkline(parent, width, height)
     local f = CreateFrame("Frame", nil, parent)
     f:SetSize(width or 240, height or 72)
-    Apply(f, {0.05, 0.05, 0.07, 0.95}, {0.30, 0.26, 0.36, 0.85})
+    local rowBg = C().rowBg or { 0.05, 0.05, 0.07, 0.85 }
+    local grid = C().sparkGrid or { 0.30, 0.26, 0.36, 1 }
+    Apply(f, { rowBg[1], rowBg[2], rowBg[3], 0.95 }, { grid[1], grid[2], grid[3], 0.85 })
     f._lines = {}
     f._bars = {}
     f._labels = {}
 
-    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local title = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_BODY"))
     title:SetPoint("TOPLEFT", 6, -4)
     f._title = title
 
-    local lo = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local muted = C().textMuted or { 0.72, 0.69, 0.78, 1 }
+    local lo = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
     lo:SetPoint("BOTTOMLEFT", 6, 4)
-    lo:SetTextColor(0.7, 0.7, 0.75)
+    lo:SetTextColor(muted[1], muted[2], muted[3])
     f._lo = lo
 
-    local hi = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local hi = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
     hi:SetPoint("TOPRIGHT", -6, -4)
-    hi:SetTextColor(0.7, 0.7, 0.75)
+    hi:SetTextColor(muted[1], muted[2], muted[3])
     f._hi = hi
 
     f.Update = function(self, itemID, windowSec)
-        for _, t in ipairs(self._lines) do t:Hide() end
-        for _, t in ipairs(self._bars)  do t:Hide() end
+        local lines = self._lines
+        for i = 1, #lines do lines[i]:Hide() end
+        local bars = self._bars
+        for i = 1, #bars do bars[i]:Hide() end
         local svc = ns.PriceHistoryService
         local samples = svc and svc:GetSamples(itemID) or {}
         local stats = svc and svc:GetStats(itemID, windowSec) or { count = 0 }
         if not samples or #samples < 2 or stats.count < 2 then
-            self._title:SetText("|cff888888no history|r")
+            self._title:SetText((L and L["PRICE_HISTORY_NO_HISTORY"]) or "|cff888888no history|r")
             self._lo:SetText("")
             self._hi:SetText("")
             return
         end
 
         local w = self:GetWidth() - 12
-        local h = self:GetHeight() - 28
-        local x0, y0 = 6, 16
+        local h = self:GetHeight() - 32
+        local x0, y0 = 6, 18
 
         local mn = stats.min or samples[1].p
         local mx = stats.max or samples[#samples].p
@@ -97,11 +108,12 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
         -- Filter to window
         local cutoff = time() - (windowSec or (7 * 24 * 3600))
         local pts = {}
-        for _, s in ipairs(samples) do
+        for si = 1, #samples do
+            local s = samples[si]
             if s.t and s.t >= cutoff and s.p and s.p > 0 then pts[#pts + 1] = s end
         end
         if #pts < 2 then
-            self._title:SetText("|cff888888not enough data|r")
+            self._title:SetText((L and L["PRICE_HISTORY_NOT_ENOUGH"]) or "|cff888888not enough data|r")
             self._lo:SetText(""); self._hi:SetText("")
             return
         end
@@ -113,14 +125,15 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
         local function XAt(i) return x0 + ((pts[i].t - tMin) / tSpan) * w end
         local function YAt(i) return y0 + ((pts[i].p - mn) / span) * h end
 
-        -- Draw bars (subtle backdrop columns)
+        -- Draw bars (subtle backdrop columns); color per render — theme may change
+        local barCol = C().sparkBar or { 0.30, 0.26, 0.36, 1 }
         for i = 1, #pts do
             local bar = self._bars[i]
             if not bar then
                 bar = self:CreateTexture(nil, "BACKGROUND")
-                bar:SetColorTexture(0.30, 0.26, 0.36, 0.25)
                 self._bars[i] = bar
             end
+            bar:SetColorTexture(barCol[1], barCol[2], barCol[3], 0.25)
             local x = XAt(i)
             local y = YAt(i)
             bar:SetPoint("BOTTOMLEFT", x - 1, y0)
@@ -129,11 +142,11 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
         end
 
         -- Draw line as connected segments (thin diagonal textures)
+        local lineCol = C().sparkLine or { 0.85, 0.65, 1.0, 1 }
         for i = 1, #pts - 1 do
             local seg = self._lines[i]
             if not seg then
                 seg = self:CreateTexture(nil, "ARTWORK")
-                seg:SetColorTexture(0.85, 0.65, 1.0, 1)
                 self._lines[i] = seg
             end
             local x1, y1 = XAt(i), YAt(i)
@@ -145,25 +158,28 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
             seg:ClearAllPoints()
             seg:SetPoint("BOTTOMLEFT", math.min(x1, x2), math.min(y1, y2))
             seg:SetSize(math.max(1, math.abs(dx)), math.max(2, math.abs(dy) + 2))
-            seg:SetColorTexture(0.85, 0.65, 1.0, 0.85)
+            seg:SetColorTexture(lineCol[1], lineCol[2], lineCol[3], 0.85)
             seg:Show()
         end
 
         local trend, pct = svc:GetTrend(itemID, windowSec)
         local arrow = (trend > 0 and "|cff66ff66▲|r") or (trend < 0 and "|cffff6666▼|r") or "|cffaaaaaa•|r"
-        self._title:SetText(string.format("%s avg %s · last %s · %s%+.1f%%",
+        self._title:SetText(string.format(
+            (L and L["PRICE_HISTORY_TITLE_FMT"]) or "%s avg %s - last %s - %s%+.1f%%",
             arrow,
             FormatCopper(stats.avg),
             FormatCopper(stats.latest),
             (pct >= 0) and "|cff66ff66" or "|cffff6666",
             pct or 0))
-        self._lo:SetText("min " .. FormatCopper(stats.min))
-        self._hi:SetText("max " .. FormatCopper(stats.max))
+        self._lo:SetText(string.format((L and L["PRICE_HISTORY_MIN_FMT"]) or "min %s", FormatCopper(stats.min)))
+        self._hi:SetText(string.format((L and L["PRICE_HISTORY_MAX_FMT"]) or "max %s", FormatCopper(stats.max)))
     end
 
     f.Clear = function(self)
-        for _, t in ipairs(self._lines) do t:Hide() end
-        for _, t in ipairs(self._bars)  do t:Hide() end
+        local lines = self._lines
+        for i = 1, #lines do lines[i]:Hide() end
+        local bars = self._bars
+        for i = 1, #bars do bars[i]:Hide() end
         self._title:SetText("")
         self._lo:SetText("")
         self._hi:SetText("")
@@ -174,29 +190,33 @@ end
 
 local function BuildPopup()
     local f = CreateFrame("Frame", "ArtisanNexusPriceHistoryPopup", UIParent, "BackdropTemplate")
-    f:SetSize(320, 120)
+    f:SetSize(336, 132)
     f:SetFrameStrata("TOOLTIP")
     f:SetClampedToScreen(true)
     f:Hide()
-    Apply(f, {0.08, 0.08, 0.10, 0.97}, {0.52, 0.40, 0.66, 0.9})
+    local bg = C().bg or { 0.065, 0.062, 0.076, 0.97 }
+    local ac = C().accent or { 0.44, 0.32, 0.58, 1 }
+    Apply(f, { bg[1], bg[2], bg[3], 0.97 }, { ac[1], ac[2], ac[3], 0.9 })
 
     local icon = f:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(20, 20); icon:SetPoint("TOPLEFT", 6, -6)
+    icon:SetSize(22, 22); icon:SetPoint("TOPLEFT", 6, -6)
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     f._icon = icon
 
-    local name = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    local name = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_SECTION"))
     name:SetPoint("LEFT", icon, "RIGHT", 6, 0)
-    name:SetTextColor(1, 1, 1)
+    local tb = C().textBright or { 0.96, 0.95, 0.97, 1 }
+    name:SetTextColor(tb[1], tb[2], tb[3])
     f._name = name
 
-    local spark = PriceHistoryUI:CreateSparkline(f, 304, 80)
+    local spark = PriceHistoryUI:CreateSparkline(f, 320, 88)
     spark:SetPoint("BOTTOM", 0, 6)
     f._spark = spark
     return f
 end
 
 function PriceHistoryUI:ShowPopup(itemID, anchor, anchorPoint)
+    LAST_ITEMID, LAST_ANCHOR, LAST_POINT = itemID, anchor, anchorPoint
     if not POPUP_FRAME then POPUP_FRAME = BuildPopup() end
     POPUP_FRAME:ClearAllPoints()
     if anchor then
@@ -212,6 +232,32 @@ end
 
 function PriceHistoryUI:HidePopup()
     if POPUP_FRAME then POPUP_FRAME:Hide() end
+end
+
+--- UI-mode switch: drop the cached popup so the next ShowPopup rebuilds with
+--- the active skin (called from ns.UI_ResetMainWindowsForUiMode).
+function PriceHistoryUI:ResetForUiMode()
+    if POPUP_FRAME then
+        POPUP_FRAME:Hide()
+        POPUP_FRAME = nil
+    end
+end
+
+--- Theme change: colors are baked at build time, so drop the cached popup.
+--- If it was visible, rebuild immediately with the same item + anchor.
+do
+    local E = ns.Constants and ns.Constants.EVENTS
+    if E and E.THEME_CHANGED and ns.NewEventOwner then
+        local owner = ns.NewEventOwner("PriceHistoryUI")
+        PriceHistoryUI._eventOwner = owner
+        owner:RegisterMessage(E.THEME_CHANGED, function()
+            local wasShown = POPUP_FRAME and POPUP_FRAME:IsShown()
+            PriceHistoryUI:ResetForUiMode()
+            if wasShown and LAST_ITEMID then
+                PriceHistoryUI:ShowPopup(LAST_ITEMID, LAST_ANCHOR, LAST_POINT)
+            end
+        end)
+    end
 end
 
 ns.PriceHistoryUI = PriceHistoryUI

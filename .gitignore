@@ -1,24 +1,105 @@
-# Track only: LICENSE, this file, and shipped addon sources (toc, lua, xml, Modules, Locales, libs).
-# IDE / Cursor / local tooling stay untracked (not committed).
+# =============================================================================
+# Artisan Nexus — Git tracks only the WoW addon runtime tree (Interface/AddOns).
+# Maintainer tooling lives under _ignored/ (clone locally; not committed).
+# =============================================================================
 
-# --- Deny by default (root) ---
-/*
-!/.gitignore
-!/LICENSE
-!/ArtisanNexus.toc
-!/Core.lua
-!/Config.lua
-!/embeds.xml
-!/Modules/
-!/Modules/**
-!/Locales/
-!/Locales/**
-!/libs/
-!/libs/**
+_ignored/
+_ignored/secrets.env
 
-# --- Dotfiles / paths not covered by /* (leading-dot names) ---
+# IDE / local tooling
 .cursor/
+.claude/
 .vscode/
 .idea/
-.gitattributes
+
+# Debug / logs
+*.log
+debug.log
+*.debug
+
+SavedVariables/
+
+# Backups
+*.bak
+*.backup
+*~
+*.orig
+
+# OS junk
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Temp / editor swap
+*.tmp
+.tmp/
+Locales/.tmp/
+*.temp
+*.swp
+*.swo
+
+# Local dev helpers (not shipped)
 link-to-wow-addons.bat
+CLAUDE.md
+
+# Archives / packager output (local only — never commit)
+*.zip
+*.rar
+*.7z
+build/
+dist/
+ArtisanNexus/
+
+# Python bytecode
+**/__pycache__/
+*.pyc
+
+# ---------------------------------------------------------------------------
+# Allowlist: tracked paths only (addon payload + release metadata).
+# ---------------------------------------------------------------------------
+/*
+!.gitignore
+!.pkgmeta
+!.github/
+!.github/**
+
+!Pack-ArtisanNexus.ps1
+
+!ArtisanNexus.toc
+!Core.lua
+!Config.lua
+!embeds.xml
+!Bindings.xml
+!LICENSE
+!CHANGELOG.md
+!PUBLISHING.md
+
+!Modules/
+!Modules/**
+
+!Locales/
+!Locales/**
+
+!libs/
+!libs/**
+
+!Media/
+!Media/**
+
+# Vendor meta (upstream Ace/lib changelogs — not runtime)
+libs/changelog.txt
+libs/CHANGES.txt
+libs/Changelog*.txt
+libs/**/*.md
+libs/**/*.textile
+libs/Ace3.toc
+libs/LibDBIcon-1.0.toc
+libs/embeds.xml
+libs/Bindings.xml
+libs/Ace3.lua
+libs/LibDeflate/.xml

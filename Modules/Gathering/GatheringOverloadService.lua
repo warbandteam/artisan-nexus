@@ -13,7 +13,8 @@ local E = ns.Constants and ns.Constants.EVENTS
 local GatheringOverloadService = {
     _enabled = false,
     _hooked = false,
-    _scanElapsed = 0,
+    _slowElapsed = 0,
+    _scheduleNonce = 0,
     _lastSig = nil,
 }
 
@@ -37,15 +38,20 @@ local OVERLOAD_SPELLS = {
         infused = { 1223014 }, -- Overload Infused Herb
         wild = { 1225150 }, -- Overload Wild Herb
         empowered = { 423395, 423443 }, -- legacy/alt empowered herb IDs
-        fallback = { 423395, 423443, 1223014, 1225150 },
+        -- Midnight IDs first so the tracker picks the current spell when legacy IDs are phantom-known.
+        fallback = { 1223014, 1225150, 423395, 423443 },
     },
     mine = {
         infused = { 1225392 }, -- Overload Infused Deposit
         wild = { 1225819 }, -- Overload Wild Deposits
         empowered = { 423394, 423334, 423335 }, -- legacy/alt empowered deposit IDs
-        fallback = { 423394, 423334, 423335, 1225392, 1225819 },
+        fallback = { 1225392, 1225819, 423394, 423334, 423335 },
     },
 }
+
+--- Overload HUD tracker — kullanıcı sabitleri (herb 1223014, mine 1225392).
+local TRACKER_SPELL_HERB = 1223014
+local TRACKER_SPELL_MINE = 1225392
 
 --- Path string or numeric fileId (both valid for Texture:SetTexture in Retail).
 local function GetSpellTextureForSpellID(spellID)
@@ -118,6 +124,36 @@ local function IsIndicatorEnabled()
     return db.overloadNodeIndicatorEnabled ~= false
 end
 
+--- Item/spell tooltips owned by Artisan chrome must not run node overload scans (Loot History catalog, etc.).
+local function IsAddonGameTooltipOwner()
+    if not GameTooltip or not GameTooltip.GetOwner then
+        return false
+    end
+    local owner = GameTooltip:GetOwner()
+    if not owner then
+        return false
+    end
+    if owner.IsDescendantOf then
+        local lootF = _G.ArtisanNexusLootHistoryFrame
+        if lootF and owner:IsDescendantOf(lootF) then
+            return true
+        end
+        local overloadBtn = _G.ArtisanNexusOverloadActionButton
+        if overloadBtn and owner:IsDescendantOf(overloadBtn) then
+            return true
+        end
+    end
+    local name = owner.GetName and owner:GetName()
+    if name and name:find("^ArtisanNexus", 1, true) then
+        return true
+    end
+    return false
+end
+
+local function IsWorldInteractionMouseDown()
+    return IsMouseButtonDown("LeftButton") or IsMouseButtonDown("RightButton")
+end
+
 local function IsSecret(v)
     return issecretvalue and v and issecretvalue(v)
 end
@@ -180,6 +216,12 @@ end
 
 local NODE_NAME_KEYWORDS = BuildNodeNameKeywords()
 
+--- Expose the keyword table (read-only usage) so the secure-cast keybind and the
+--- world overlay can classify tooltip / nameplate text without rebuilding it.
+function ns.GetOverloadNodeKeywords()
+    return NODE_NAME_KEYWORDS
+end
+
 local function IsSpellKnownSafe(spellID)
     if not spellID then
         return false
@@ -200,6 +242,7 @@ local function IsSpellKnownSafe(spellID)
 end
 
 --- Same rules as UI `GetSpellCooldownTiming`: long CDs, `isEnabled`, ready state.
+--- NOTE: `startTime` can be **0** with `duration > 0` on long profession CDs; `not startTime` is wrong in Lua (0 is falsy).
 local function GetSpellCooldownTriple(spellID)
     local getVals = ns.GetPlayerSpellCooldownValues
     if not getVals then
@@ -208,21 +251,23 @@ local function GetSpellCooldownTriple(spellID)
     local startTime, duration, isEnabled = getVals(spellID)
     startTime = tonumber(startTime)
     duration = tonumber(duration)
-    if not startTime or not duration then
+    if startTime == nil or duration == nil then
         return nil, nil, nil
     end
+    local onHold = (isEnabled == false or isEnabled == 0)
     if duration > 0.001 and startTime > 0 then
         local rem = (startTime + duration) - GetTime()
         return startTime, duration, math.max(0, rem)
     end
-    if isEnabled == 0 then
+    if onHold then
         return nil, nil, nil
     end
-    if duration <= 0 or startTime <= 0 then
-        return startTime, duration, 0
+    --- Prof / 12.x: bazen `startTime == 0` ve `duration == 12h` iken büyü hâlâ CD’de (hazır değil).
+    if duration > 0.001 and startTime <= 0 then
+        local now = GetTime()
+        return now, duration, duration
     end
-    local rem = (startTime + duration) - GetTime()
-    return startTime, duration, math.max(0, rem)
+    return startTime, duration, 0
 end
 
 --- Node hint / ilk bilinen spell için kalan süre (ResolveOverloadStatus); `IsUsableSpell` ile eski davranış korunur.
@@ -234,9 +279,10 @@ local function GetCooldownRemaining(spellID)
     local startTime, duration, isEnabled = getVals(spellID)
     startTime = tonumber(startTime)
     duration = tonumber(duration)
-    if not startTime or not duration then
+    if startTime == nil or duration == nil then
         return nil
     end
+    local onHold = (isEnabled == false or isEnabled == 0)
     if duration > 0.001 and startTime > 0 then
         local rem = (startTime + duration) - GetTime()
         if rem < 0 then
@@ -244,10 +290,13 @@ local function GetCooldownRemaining(spellID)
         end
         return rem
     end
-    if isEnabled == 0 then
+    if onHold then
         return nil
     end
-    if duration <= 0 or startTime <= 0 then
+    if duration > 0.001 and startTime <= 0 then
+        return duration
+    end
+    if duration <= 0 then
         if IsUsableSpell then
             local usable = IsUsableSpell(spellID)
             if not usable then
@@ -263,40 +312,40 @@ local function GetCooldownRemaining(spellID)
     return rem
 end
 
---- HUD tracker: skill bar Wild / Infused farklı ID’ler — en uzun kalan CD’yi taşıyan spell’i göster.
+--- HUD tracker: herb 1223014, mine 1225392.
 ---@return number|nil displaySpellID
 ---@return number|nil startTime
 ---@return number|nil duration
 ---@return number|nil remaining
 function GatheringOverloadService.GetOverloadTrackerState(category)
-    local by = OVERLOAD_SPELLS[category]
-    if not by or not by.fallback then
+    local SANE_MAX_CD = 14 * 24 * 60 * 60
+    if category ~= "herb" and category ~= "mine" then
         return nil, nil, nil, nil
     end
-    local fb = by.fallback
-    local bestSid, bestSt, bestDur, bestRem
-    for j = 1, #fb do
-        local sid = fb[j]
-        if IsSpellKnownSafe(sid) then
-            local st, dur, rem = GetSpellCooldownTriple(sid)
-            if rem ~= nil and rem > 0.05 then
-                if not bestRem or rem > bestRem then
-                    bestSid, bestSt, bestDur, bestRem = sid, st, dur, rem
-                end
+    --- Prefer the pinned tracker spell, but only when KNOWN: characters without
+    --- the profession (or who only know Wild variants) must not get an unlearned
+    --- Infused spell on the secure button. Fall back through the known list.
+    local pinned = (category == "herb") and TRACKER_SPELL_HERB or TRACKER_SPELL_MINE
+    local sid
+    if IsSpellKnownSafe(pinned) then
+        sid = pinned
+    else
+        local fb = OVERLOAD_SPELLS[category].fallback
+        for i = 1, #fb do
+            if IsSpellKnownSafe(fb[i]) then
+                sid = fb[i]
+                break
             end
         end
     end
-    if bestSid then
-        return bestSid, bestSt, bestDur, bestRem
+    if not sid then
+        return nil, nil, nil, nil
     end
-    for j = 1, #fb do
-        local sid = fb[j]
-        if IsSpellKnownSafe(sid) then
-            local st, dur, rem = GetSpellCooldownTriple(sid)
-            return sid, st, dur, rem
-        end
+    local st, dur, rem = GetSpellCooldownTriple(sid)
+    if rem ~= nil and rem > SANE_MAX_CD then
+        return sid, nil, nil, nil
     end
-    return nil, nil, nil, nil
+    return sid, st, dur, rem
 end
 
 --- Pick the **overload spell for this node**, not “shortest CD among all known overloads” (that showed Infused icon on Wild nodes).
@@ -509,7 +558,36 @@ local function EmitHint(payload)
     ArtisanNexus:SendMessage(E.GATHERING_OVERLOAD_HINT_UPDATED, payload)
 end
 
-local function ScanTooltip()
+local SCAN_MIN_INTERVAL = 0.14
+
+local function After(delaySec, fn)
+    if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, fn)
+    elseif ArtisanNexus and ArtisanNexus.ScheduleTimer then
+        ArtisanNexus:ScheduleTimer(fn, delaySec)
+    else
+        fn()
+    end
+end
+
+local ScanTooltip
+
+--- Trailing debounce: burst mouseover/target events coalesce to one ScanTooltip.
+local function ScheduleThrottledScan()
+    GatheringOverloadService._scheduleNonce = GatheringOverloadService._scheduleNonce + 1
+    local n = GatheringOverloadService._scheduleNonce
+    After(0.12, function()
+        if n ~= GatheringOverloadService._scheduleNonce then
+            return
+        end
+        ScanTooltip()
+    end)
+end
+
+function ScanTooltip()
+    if IsAddonGameTooltipOwner() then
+        return
+    end
     if not GatheringOverloadService._enabled or not IsIndicatorEnabled() then
         EmitHint(nil)
         return
@@ -518,6 +596,13 @@ local function ScanTooltip()
         EmitHint(nil)
         return
     end
+    local now = GetTime()
+    local last = GatheringOverloadService._lastScanAt or 0
+    if (now - last) < SCAN_MIN_INTERVAL then
+        ScheduleThrottledScan()
+        return
+    end
+    GatheringOverloadService._lastScanAt = now
     local lines = ReadDetectionLines()
     if #lines < 1 then
         EmitHint(nil)
@@ -583,6 +668,9 @@ local function HookTooltip()
     GatheringOverloadService._hooked = true
     GameTooltip:HookScript("OnShow", ScanTooltip)
     GameTooltip:HookScript("OnHide", function()
+        if IsAddonGameTooltipOwner() then
+            return
+        end
         EmitHint(nil)
     end)
 end
@@ -592,14 +680,37 @@ function GatheringOverloadService:Enable()
         return
     end
     self._enabled = true
-    self._scanElapsed = 0
+    self._slowElapsed = 0
+    self._scheduleNonce = self._scheduleNonce + 1
     HookTooltip()
-    scanFrame:SetScript("OnUpdate", function(_, elapsed)
-        GatheringOverloadService._scanElapsed = GatheringOverloadService._scanElapsed + (elapsed or 0)
-        if GatheringOverloadService._scanElapsed < 0.18 then
+    scanFrame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+    scanFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    scanFrame:SetScript("OnEvent", function(_, event)
+        if not GatheringOverloadService._enabled then
             return
         end
-        GatheringOverloadService._scanElapsed = 0
+        if event == "UPDATE_MOUSEOVER_UNIT" then
+            --- Camera drag / spam click changes mouseover every frame — defer until buttons released.
+            if IsWorldInteractionMouseDown() then
+                return
+            end
+            ScheduleThrottledScan()
+        elseif event == "PLAYER_TARGET_CHANGED" then
+            ScheduleThrottledScan()
+        end
+    end)
+    -- World-object tooltips often lack unit mouseover signals; keep a slow poll so
+    -- node text / overload hints still refresh without ~5 Hz ScanTooltip cost.
+    scanFrame:SetScript("OnUpdate", function(_, elapsed)
+        if IsWorldInteractionMouseDown() then
+            GatheringOverloadService._slowElapsed = 0
+            return
+        end
+        GatheringOverloadService._slowElapsed = GatheringOverloadService._slowElapsed + (elapsed or 0)
+        if GatheringOverloadService._slowElapsed < 1.0 then
+            return
+        end
+        GatheringOverloadService._slowElapsed = 0
         ScanTooltip()
     end)
 end
@@ -609,6 +720,9 @@ function GatheringOverloadService:Disable()
         return
     end
     self._enabled = false
+    self._scheduleNonce = self._scheduleNonce + 1
+    scanFrame:UnregisterAllEvents()
+    scanFrame:SetScript("OnEvent", nil)
     scanFrame:SetScript("OnUpdate", nil)
     EmitHint(nil)
 end

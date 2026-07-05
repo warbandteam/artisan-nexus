@@ -1,6 +1,6 @@
 --[[
     Midnight gathering reference by category (Herbalism / Mining / Leather / Disenchant / Others motes).
-    Single representative icon per row uses ranks[1]; qualities shown for all ranks[].
+    Single representative icon per row uses ranks[1]; ranks[] are separate item IDs (Midnight uses two reagent tiers per mat, not three DF-style qualities).
 
     Some Midnight mats (e.g. Motes) can drop from more than one activity; they may appear in multiple
     tab grids. `GetGatheringCategoryForItemId` returns a primary tab (mine for motes) for DB reset
@@ -22,7 +22,8 @@ local BY_CAT = {
         { note = "Azeroot", ranks = { 236774, 236775 } },
         { note = "Argentleaf", ranks = { 236776, 236777 } },
         { note = "Mana Lily", ranks = { 236778, 236779 } },
-        { note = "Nocturnal Lotus", ranks = { 236780, 236781 } },
+        --- Rare proc herb: single item id (no Silver/Gold rank split in Midnight).
+        { note = "Nocturnal Lotus", ranks = { 236780 } },
     },
     mine = {
         -- Ores: R2 IDs from Midnight item pairs (Wowhead); copper skips 237360.
@@ -34,6 +35,7 @@ local BY_CAT = {
     },
     --- Midnight skinning (12.0.x). Two item IDs = Silver / Gold reagent ranks where Blizzard split them.
     --- Species-specific side mats may share one ID per type in the DB; add a second ID when confirmed in-game.
+    --- Species-specific plumage / claws / hides use one item ID each in Midnight (no Silver/Gold rank split).
     leather = {
         { note = "Void-Tempered Leather", ranks = { 238511, 238512 } },
         { note = "Void-Tempered Scales", ranks = { 238513, 238514 } },
