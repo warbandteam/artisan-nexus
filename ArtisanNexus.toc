@@ -43,6 +43,7 @@ Modules\UI\ArtisanTheme.lua
 Modules\UI\ArtisanSharedWidgets_Classic.lua
 Modules\UI\ArtisanSharedWidgets.lua
 Modules\UI\ArtisanSharedWidgets_WindowShell.lua
+Modules\UI\UI_DebugOverlay.lua
 Modules\UI\ArtisanSharedWidgets_Factory.lua
 Modules\UI\ProfessionQualityAtlas.lua
 Modules\Data\GatheringCatalog.lua
@@ -76,6 +77,7 @@ Modules\Crafting\CraftQueueActionButton.lua
 Modules\LootWindowBridge.lua
 Modules\UI\LootHistoryUI_Chrome.lua
 Modules\UI\LootHistoryUI_Draw.lua
+Modules\UI\SessionLootOverlayUI.lua
 Modules\UI\LootHistoryUI.lua
 Modules\UI\LootHistoryUI_Init.lua
 Modules\UI\GatheringOverloadIndicator.lua
@@ -86,5 +88,6 @@ Modules\UI\ArtisanHubUI.lua
 Modules\UI\ProfessionSidecarUI.lua
 Modules\UI\ArtisanSettingsFrame.xml
 Modules\UI\ArtisanSettingsUI.lua
+Modules\UI\ArtisanSettingsUI_Layout.lua
 Config.lua
 Modules\MinimapButton.lua

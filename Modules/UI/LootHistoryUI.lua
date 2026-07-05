@@ -14,6 +14,17 @@ local ApplyPanelBackdrop = ns.UI_ApplyPanelBackdrop
 local ApplyVisuals = ns.UI_ApplyVisuals
 
 local PAD = LAYOUT.BASE_INDENT or 12
+
+--- Horizontal clearance for rows anchored straight to the window edge (tabBar,
+--- sessionHost). Classic's ornate dialog border art needs more room than the
+--- plain PAD used by the modern skin — see AN-UI-theme.mdc border footprint.
+local function BodyHInset()
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellHorizontalInset then
+        return ns.UI_GetClassicShellHorizontalInset()
+    end
+    return PAD
+end
+
 local LOOT_TAB_H = LAYOUT.SHELL_TAB_HEIGHT or 30
 local LOOT_TAB_GAP = 5
 local LOOT_TAB_BAR_H = LOOT_TAB_H + 4
@@ -29,42 +40,22 @@ local LOOT_GRIP_INSET_Y = 5
 local LOOT_BOTTOM_CLEARANCE = LOOT_GRIP_SIZE + LOOT_GRIP_INSET_Y + 1
 --- Space above sessionHost reserved for the "Last N pickups" heading (FontString anchors are unreliable for layout).
 local LOOT_SESSION_LABEL_BAND = 26
---- Native UIPanelScrollFrameTemplate right gutter (Blizzard default; bar stays inside panel).
-local LOOT_CLASSIC_SCROLL_PAD_R = 24
-
-local function LootUsesExternalScrollBar()
-    return not (ns.UI_IsClassicUi and ns.UI_IsClassicUi())
-end
 
 local function LootScrollReserve()
-    if not LootUsesExternalScrollBar() then
-        return 0
-    end
     return (LAYOUT.SCROLLBAR_COLUMN_WIDTH or 26) + (LAYOUT.SCROLL_GAP or 2)
 end
 
 local function LootScrollAttachOpts(host, panel)
     local pad = 4
-    if LootUsesExternalScrollBar() then
-        return ns.UI_BuildExternalScrollOpts(host, {
-            padL = pad,
-            padT = -pad,
-            padR = pad,
-            padB = pad,
-            topInset = 0,
-            bottomInset = 0,
-        })
-    end
-    --- Classic: keep Blizzard scrollbar inside the inset panel (no host-level bar column).
-    return {
+    --- Bar column on host right — outside catalog/session inset panels (modern + classic).
+    return ns.UI_BuildExternalScrollOpts(host, {
         padL = pad,
         padT = -pad,
-        padR = LOOT_CLASSIC_SCROLL_PAD_R,
+        padR = pad,
         padB = pad,
         topInset = 0,
         bottomInset = 0,
-        barParent = panel,
-    }
+    })
 end
 
 local function ApplyLootInsetToHost(panel, host)
@@ -264,6 +255,7 @@ LootHistoryUI = {
     settingsBtn = nil,
     resizeGrip = nil,
     overloadTrackerBtn = nil,
+    lootOverlayBtn = nil,
     _sizeSaveTimer = nil,
     --- Grip `StartSizing` aktifken ağır `Refresh` atlanır (takılma önlemi); bırakınca bir kez tam yenileme.
     _isLootFrameSizing = false,
@@ -436,9 +428,10 @@ function LootHistoryUI:LayoutLootBodyChrome()
     local contentTop = (classic and ns.UI_GetClassicShellContentTop and ns.UI_GetClassicShellContentTop())
         or ((layout.SHELL_HEADER_HEIGHT or 44) + 8)
 
+    local hInset = BodyHInset()
     self.tabBar:ClearAllPoints()
-    self.tabBar:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -contentTop)
-    self.tabBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -PAD, -contentTop)
+    self.tabBar:SetPoint("TOPLEFT", f, "TOPLEFT", hInset, -contentTop)
+    self.tabBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -hInset, -contentTop)
 
     if self.modeBar then
         self.modeBar:ClearAllPoints()
@@ -628,6 +621,13 @@ function LootHistoryUI:LayoutLootScrollChrome()
         if self.sessionScroll then
             ns.UI_ApplyClassicScrollBarLayout(self.sessionScroll)
         end
+    elseif ns.UI_ApplyModernScrollBarLayout then
+        if self.catalogScroll then
+            ns.UI_ApplyModernScrollBarLayout(self.catalogScroll)
+        end
+        if self.sessionScroll then
+            ns.UI_ApplyModernScrollBarLayout(self.sessionScroll)
+        end
     end
     if ns.UI_RegisterViewportDebug then
         ns.UI_RegisterViewportDebug(self.catalogHost, "loot_catalog_host")
@@ -641,6 +641,29 @@ function LootHistoryUI:LayoutLootScrollChrome()
         if self.sessionScroll then
             ns.UI_RegisterViewportDebug(self.sessionScroll, "loot_session_scroll")
             ns.UI_RegisterViewportDebug(self.sessionScroll._anScrollBarColumn, "loot_session_bar")
+        end
+    end
+    if ns.UI_RegisterDebugElement then
+        if self.tabBar then
+            ns.UI_RegisterDebugElement(self.tabBar, {
+                id = "loot.tabBar",
+                label = "loot.tabBar",
+                note = "Profession tab row",
+            })
+        end
+        if self.modeBar then
+            ns.UI_RegisterDebugElement(self.modeBar, {
+                id = "loot.modeBar",
+                label = "loot.modeBar",
+                note = "Session / Overall mode row",
+            })
+        end
+        if self.resetRow then
+            ns.UI_RegisterDebugElement(self.resetRow, {
+                id = "loot.resetRow",
+                label = "loot.resetRow",
+                note = "Reset session button row",
+            })
         end
     end
 end
@@ -837,6 +860,14 @@ function LootHistoryUI:Refresh()
         local order = GetVisibleTabOrder()
         self.activeTab = order[1] or "fishing"
     end
+    if not (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) and ns.UI_StylePanelInset then
+        if self.catalogPanel then
+            ns.UI_StylePanelInset(self.catalogPanel)
+        end
+        if self.sessionPanel then
+            ns.UI_StylePanelInset(self.sessionPanel)
+        end
+    end
 
     local isOverall = self.activeMode == "overall"
     local svc = ns.SessionLootService
@@ -899,7 +930,13 @@ function LootHistoryUI:Refresh()
         ns.UI_FinishScrollLayout(self.sessionScroll)
     end
 
-    local cw = math.max((self.catalogScroll and self.catalogScroll:GetWidth()) or 360, 280)
+    local cw = self:GetCatalogInnerWidth()
+    if not cw or cw < 1 then
+        cw = (self.catalogScroll and self.catalogScroll:GetWidth()) or 280
+    end
+    --- Never inflate width — a floor lied to PopulateCatalog about the live
+    --- viewport and kept 2 columns when the scroll area was actually narrow.
+    cw = math.max(80, cw)
     self.catalogContent:SetWidth(cw)
     if self.catalogScroll and self.catalogScroll.Show then
         self.catalogScroll:Show()
@@ -950,13 +987,37 @@ function LootHistoryUI:Refresh()
     LootHistoryUI:RefreshTabButtonVisuals()
     LootHistoryUI:RefreshModeButtonVisuals()
     LootHistoryUI:UpdateOverloadTrackerToggle()
+    LootHistoryUI:UpdateLootOverlayToggle()
+end
+
+--- Dim overlay HUD toggle when the floating overlay is off.
+function LootHistoryUI:UpdateLootOverlayToggle()
+    local b = self.lootOverlayBtn
+    if not b then
+        return
+    end
+    b:Show()
+    local on = ns.db and ns.db.profile and ns.db.profile.sessionLootOverlayEnabled == true
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        if b.SetAlpha then
+            b:SetAlpha(1)
+        end
+    elseif b.SetAlpha then
+        b:SetAlpha(on and 1 or 0.45)
+    end
+    LootHistoryUI:ApplyHeaderTitleClip()
 end
 
 --- Title string clipped to never run under the window control cluster (overload optional).
 function LootHistoryUI:ApplyHeaderTitleClip()
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         if self.headerBar and self.overloadTrackerBtn then
-            self.headerBar._anShellExtraRight = { self.overloadTrackerBtn }
+            local extras = {}
+            if self.lootOverlayBtn then
+                extras[#extras + 1] = self.lootOverlayBtn
+            end
+            extras[#extras + 1] = self.overloadTrackerBtn
+            self.headerBar._anShellExtraRight = extras
         end
         if self.headerBar and ns.UI_RefreshClassicWindowHeader then
             ns.UI_RefreshClassicWindowHeader(self.headerBar)
@@ -1059,11 +1120,17 @@ end
 
 function LootHistoryUI:ResetForUiMode()
     if self.main then
+        if ns.UI_UnregisterDebugFrame then
+            ns.UI_UnregisterDebugFrame(self.main)
+        end
         self.main:Hide()
         --- Discarded subtree must leave BORDER_REGISTRY or every theme/scale
         --- refresh keeps iterating dead frames after each Classic<->Modern switch.
         if ns.UI_UnregisterVisuals then
             ns.UI_UnregisterVisuals(self.main)
+        end
+        if ns.UI_PurgeDebugRegistry then
+            ns.UI_PurgeDebugRegistry()
         end
         self.main = nil
     end
@@ -1129,6 +1196,9 @@ function LootHistoryUI:RefreshClassicChrome()
     if self.overloadTrackerBtn and ns.UI_StyleClassicToolButton then
         ns.UI_StyleClassicToolButton(self.overloadTrackerBtn)
     end
+    if self.lootOverlayBtn and ns.UI_StyleClassicToolButton then
+        ns.UI_StyleClassicToolButton(self.lootOverlayBtn)
+    end
     self:LayoutLootScrollChrome()
 end
 
@@ -1146,6 +1216,14 @@ function LootHistoryUI:RefreshTheme()
     end
     if ns.UI_RefreshClassicMainWindowShell then
         ns.UI_RefreshClassicMainWindowShell(self.main)
+    end
+    if ns.UI_StylePanelInset then
+        if self.catalogPanel then
+            ns.UI_StylePanelInset(self.catalogPanel)
+        end
+        if self.sessionPanel then
+            ns.UI_StylePanelInset(self.sessionPanel)
+        end
     end
     self:LayoutLootBodyChrome()
     self:RefreshClassicChrome()
@@ -1342,9 +1420,37 @@ function LootHistoryUI:Show(which)
     self.recipesBtn = shell.utilities[1]
     self.hubBtn = shell.utilities[2]
 
+    local lootOverlayBtn = CreateFrame("Button", nil, shell.bar)
+    lootOverlayBtn:SetSize(26, 26)
+    local overlayAnchor = shell.utilities[2] or shell.settings or shell.close
+    lootOverlayBtn:SetPoint("RIGHT", overlayAnchor, "LEFT", -2, 0)
+    lootOverlayBtn:SetNormalTexture("Interface\\Icons\\INV_Misc_Bag_10")
+    lootOverlayBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    lootOverlayBtn:SetScript("OnClick", function()
+        if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.Toggle then
+            ns.SessionLootOverlayUI:Toggle()
+        end
+        LootHistoryUI:UpdateLootOverlayToggle()
+    end)
+    lootOverlayBtn:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
+        if GameTooltip.ClearLines then
+            GameTooltip:ClearLines()
+        end
+        local title = (L and L["LOOT_OVERLAY_BTN"]) or "Session loot overlay"
+        local desc = (L and L["LOOT_OVERLAY_BTN_DESC"]) or "Toggle on-screen loot toasts (icon, name, price)."
+        GameTooltip:AddLine(title, 1, 1, 1)
+        GameTooltip:AddLine(desc, 0.85, 0.85, 0.85, true)
+        GameTooltip:Show()
+    end)
+    lootOverlayBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    self.lootOverlayBtn = lootOverlayBtn
+
     local overloadTrackerBtn = CreateFrame("Button", nil, shell.bar)
     overloadTrackerBtn:SetSize(26, 26)
-    local overloadAnchor = shell.utilities[2] or shell.settings or shell.close
+    local overloadAnchor = lootOverlayBtn
     overloadTrackerBtn:SetPoint("RIGHT", overloadAnchor, "LEFT", -2, 0)
     overloadTrackerBtn:SetNormalTexture("Interface\\Icons\\Spell_Shaman_StaticShock")
     overloadTrackerBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
@@ -1373,13 +1479,15 @@ function LootHistoryUI:Show(which)
         GameTooltip:Hide()
     end)
     self.overloadTrackerBtn = overloadTrackerBtn
-    self.shellRightClip = overloadTrackerBtn
+    self.shellRightClip = lootOverlayBtn
     if shell.bar then
-        shell.bar._anShellExtraRight = { overloadTrackerBtn }
+        shell.bar._anShellExtraRight = { lootOverlayBtn, overloadTrackerBtn }
     end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_StyleClassicToolButton then
+        ns.UI_StyleClassicToolButton(lootOverlayBtn)
         ns.UI_StyleClassicToolButton(overloadTrackerBtn)
     end
+    LootHistoryUI:UpdateLootOverlayToggle()
     LootHistoryUI:ApplyHeaderTitleClip()
 
     local function LootTabLabel(key)
@@ -1536,8 +1644,12 @@ function LootHistoryUI:Show(which)
 
     --- Bottom panel: larger share of height (SESSION_FRAC); explicit height so scroll works.
     local sessionHost = CreateFrame("Frame", nil, f)
-    sessionHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PAD, LOOT_BOTTOM_CLEARANCE)
-    sessionHost:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PAD, LOOT_BOTTOM_CLEARANCE)
+    local bodyHInset = BodyHInset()
+    --- Bottom-right corner needs BOTH axes cleared of the border art; take
+    --- whichever clearance (grip footprint vs. border-safe inset) is larger.
+    local bodyBottomClearance = math.max(LOOT_BOTTOM_CLEARANCE, bodyHInset)
+    sessionHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -bodyHInset, bodyBottomClearance)
+    sessionHost:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", bodyHInset, bodyBottomClearance)
     do
         local fh = f:GetHeight() or LAYOUT.WINDOW_HEIGHT or 640
         sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))

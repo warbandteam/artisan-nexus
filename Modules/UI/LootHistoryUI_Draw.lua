@@ -26,6 +26,13 @@ local SESSION_ROW_COIN_ICON_H = 14
 local CAT_SZ = LAYOUT.CATALOG_ICON or 36
 local MAX_QUALITY_TIERS = (ns.PROFESSION_QUALITY_MAX_TIER) or 5
 local CELL_PAD = (LAYOUT.LOOT_CATALOG_CELL_PAD) or 8
+--- Inter-card gap (grid gutter) is intentionally decoupled from CELL_PAD
+--- (interior cell content padding) — tightening the grid must not cramp the
+--- icon/quality/amount pattern inside each card.
+local GRID_GAP = (LAYOUT.LOOT_CATALOG_GRID_GAP) or 5
+--- Fixed left/right margin for the whole catalog grid — distinct from GRID_GAP
+--- so the outer columns never sit flush against the panel edge.
+local GRID_SIDE_PAD = (LAYOUT.LOOT_CATALOG_SIDE_PAD) or 10
 --- Resolve at call time: UI_RefreshColors replaces the palette sub-tables, so
 --- captured refs go stale after a light/dark theme switch.
 local function QTY_ON()
@@ -124,28 +131,105 @@ local function PoolReleaseAll(pool, resetFn)
     end
 end
 
---- Responsive column count: wider window → more columns.
-local function CatalogColumnCount(innerW)
-    if not innerW or innerW < 120 then
+--- Catalog grid is capped at 2 columns but collapses to 1 when the live
+--- viewport cannot give each card enough width for icon + tier + count +
+--- money (embedded coin icons). Thresholds are derived from layout constants,
+--- not hard-coded pixel guesses.
+local CATALOG_MAX_COLS = (LAYOUT.LOOT_CATALOG_MAX_COLS) or 2
+--- Gap between the item icon and the quality/rank block — kept small so the
+--- rank atlas reads as "attached" to the icon rather than floating.
+local RANK_ICON_GAP = 6
+
+local function CatalogCellWidthForCols(usableW, cols)
+    if not usableW or usableW < 1 or not cols or cols < 1 then
+        return usableW or 1
+    end
+    local avail = math.max(1, usableW - GRID_GAP * (cols - 1))
+    return math.floor(avail / cols)
+end
+
+local function CatalogMinCellWidth()
+    local themeMin = LAYOUT.LOOT_CATALOG_MIN_CELL_W
+    if themeMin and themeMin > 0 then
+        return themeMin
+    end
+    local atlasSz = math.max(20, math.floor(CAT_SZ * 0.46))
+    local atlasW = atlasSz + 4
+    local minCntW = 36
+    local minValW = (LAYOUT.LOOT_CATALOG_MIN_VALUE_W) or 72
+    local minRankLineW = atlasW + minCntW + 4 + minValW
+    return CELL_PAD * 2 + CAT_SZ + RANK_ICON_GAP + minRankLineW
+end
+
+local function CatalogColumnCount(usableW)
+    if not usableW or usableW < 1 then
         return 1
     end
-    if innerW >= 640 then
-        return 4
+    local minCellW = CatalogMinCellWidth()
+    local maxCols = CATALOG_MAX_COLS
+    if maxCols < 1 then
+        maxCols = 1
     end
-    if innerW >= 480 then
-        return 3
-    end
-    if innerW >= 320 then
-        return 2
+    for cols = maxCols, 1, -1 do
+        if CatalogCellWidthForCols(usableW, cols) >= minCellW then
+            return cols
+        end
     end
     return 1
 end
 
-local RANK_ICON_GAP = 10
-
---- Rank text block width: icon + gap + right pad must fit inside the cell.
+--- Rank text block width: left inset (icon) + icon + gap + rank block + right
+--- inset must all sum to cellW, with the SAME inset (CELL_PAD) on both sides —
+--- explicit terms here (not a CELL_PAD*3 shortcut) keep left/right symmetric
+--- even if RANK_ICON_GAP is tuned independently of CELL_PAD.
 local function CatalogRankBlockWidth(cellW)
-    return math.max(52, cellW - CAT_SZ - CELL_PAD * 3)
+    return math.max(52, cellW - CAT_SZ - RANK_ICON_GAP - CELL_PAD * 2)
+end
+
+--- Icon + rank lines as one cluster; height drives card/row sizing.
+local function CatalogClusterHeight(showRanks, rowLineH)
+    local blockH = showRanks * rowLineH
+    return math.max(CAT_SZ, blockH), blockH
+end
+
+local function CatalogCellHeight(showRanks, rowLineH)
+    local clusterH = CatalogClusterHeight(showRanks, rowLineH)
+    return CELL_PAD + clusterH + CELL_PAD
+end
+
+--- Vertically center the icon + rank block inside the card. Row height may
+--- exceed this card's own tier count (taller neighbor in the same row), so
+--- leftover space is split evenly above/below instead of piling under the icon.
+local function LayoutCatalogCellChrome(cellFrame, cellH, showRanks, rowLineH, cellW)
+    local ic = cellFrame._icon
+    local rankBlock = cellFrame._rankBlock
+    if not rankBlock then
+        return CatalogRankBlockWidth(cellW)
+    end
+    local clusterH, blockH = CatalogClusterHeight(showRanks, rowLineH)
+    local innerH = math.max(clusterH, cellH - CELL_PAD * 2)
+    local clusterTop = CELL_PAD + math.max(0, math.floor((innerH - clusterH) * 0.5))
+    local rankW = CatalogRankBlockWidth(cellW)
+    local rankLeft = CELL_PAD + CAT_SZ + RANK_ICON_GAP
+
+    rankBlock:SetSize(rankW, blockH)
+    rankBlock:ClearAllPoints()
+
+    if ic then
+        ic:ClearAllPoints()
+        if blockH > CAT_SZ then
+            local iconTop = clusterTop + math.floor((blockH - CAT_SZ) * 0.5)
+            ic:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", CELL_PAD, -iconTop)
+            rankBlock:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", rankLeft, -clusterTop)
+        else
+            ic:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", CELL_PAD, -clusterTop)
+            local rankTop = clusterTop + math.floor((CAT_SZ - blockH) * 0.5)
+            rankBlock:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", rankLeft, -rankTop)
+        end
+    else
+        rankBlock:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", rankLeft, -clusterTop)
+    end
+    return rankW
 end
 
 --- Keep count + copper value inside the rank line without bleeding past the cell edge.
@@ -162,7 +246,10 @@ local function LayoutCatalogValueLine(line, lineW, atlasSz, showValue)
     cnt:ClearAllPoints()
     val:ClearAllPoints()
     if showValue then
-        local valW = math.max(24, math.min(math.floor(lineW * 0.42), 72))
+        --- 2-column cards are wide enough that the value column rarely needs
+        --- to hit this cap — it exists only to stop the count from being
+        --- squeezed to nothing, not to artificially truncate the money text.
+        local valW = math.max(26, math.min(math.floor(lineW * 0.5), 120))
         if valW + atlasW + minCntW + 2 > lineW then
             valW = math.max(20, lineW - atlasW - minCntW - 2)
         end
@@ -443,6 +530,12 @@ local function GetCellLine(cell, r, rowLineH, atlasSz)
     local val = line:CreateFontString(nil, "OVERLAY", CATALOG_CELL_TEXT_FONT)
     val:SetJustifyH("RIGHT")
     val:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+    --- Without this, a money string wider than its allotted column (embedded
+    --- coin icons + digits) wraps to a 2nd line — the FontString is anchored
+    --- by its vertical center, so the extra line spills downward past the
+    --- row's box and into the card's bottom border/next row.
+    val:SetWordWrap(false)
+    val:SetMaxLines(1)
     --- Narrow 2-col band: count must yield to the money string, never overlap it.
     cntStr:SetPoint("RIGHT", val, "LEFT", -4, 0)
     cntStr:SetWordWrap(false)
@@ -503,10 +596,13 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
 
     local innerW = innerWOverride or content:GetWidth()
     if not innerW or innerW < 100 then innerW = 280 end
-    local cols = CatalogColumnCount(innerW)
-    local gapX = CELL_PAD
-   --- Kalan piksel `remPx` ilk sütunlara +1: grid genişliği tam `innerW` (scroll içi ile hizalı, sütunlar eşit ±1px).
-    local availForCells = math.max(1, innerW - gapX * (cols - 1))
+    --- Fixed side margins carve out the usable grid width first; the
+    --- inter-card gap only governs spacing *between* cards, not the edges.
+    local usableW = math.max(1, innerW - GRID_SIDE_PAD * 2)
+    local cols = CatalogColumnCount(usableW)
+    local gapX = GRID_GAP
+   --- Kalan piksel `remPx` ilk sütunlara +1: grid genişliği tam `usableW` (scroll içi ile hizalı, sütunlar eşit ±1px).
+    local availForCells = math.max(1, usableW - gapX * (cols - 1))
     local baseCellW = cols > 0 and math.floor(availForCells / cols) or 108
     local remPx = cols > 0 and (availForCells - baseCellW * cols) or 0
     local function CellWidthForCol(col0)
@@ -514,32 +610,59 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
         return baseCellW + (c <= remPx and 1 or 0)
     end
     local colLeft = {}
-    local xAcc = 0
+    local xAcc = GRID_SIDE_PAD
     for col0 = 0, cols - 1 do
         colLeft[col0] = xAcc
         xAcc = xAcc + CellWidthForCol(col0) + gapX
     end
-    local rowLineH = math.max(24, math.floor(CAT_SZ * 0.52))
+    --- Tall enough for embedded coin icons in the value column, but not so
+    --- loose that 1–2 tier cards leave a large dead band under the icon.
+    local rowLineH = math.max(25, math.floor(CAT_SZ * 0.55))
     local atlasSz = math.max(20, math.floor(CAT_SZ * 0.46))
     local fmt = (L and L["LOOT_REF_TOTAL_FMT"]) or "×%d"
 
     local n = #entries
     local rows = math.max(1, math.ceil(n / cols))
 
-    local maxRankLines = 1
+    --- Row-relative card height: each row's height matches only the ranks
+    --- actually present IN THAT ROW, not the tab-wide worst case. A tab-wide
+    --- max (old behavior) forced every 1-2 line card to inherit a single
+    --- 5-tier outlier's height, leaving large dead space at the bottom of
+    --- every other card ("kartlar aşağı doğru çok kalıyor").
+    local entryRanks = {}
+    local rowMaxLines = {}
+    for r = 0, rows - 1 do
+        rowMaxLines[r] = 1
+    end
     for idx = 1, n do
         local entry = entries[idx]
         local ranks = resolveRanks(entry)
         if #ranks < 1 and entry and entry.id then
             ranks = { entry.id }
         end
+        entryRanks[idx] = ranks
         if #ranks >= 1 then
-            maxRankLines = math.max(maxRankLines, math.min(MAX_QUALITY_TIERS, #ranks))
+            local row = math.floor((idx - 1) / cols)
+            local lines = math.min(MAX_QUALITY_TIERS, #ranks)
+            rowMaxLines[row] = math.max(rowMaxLines[row] or 1, lines)
+        end
+    end
+
+    --- Cumulative Y per row (rows are NOT uniform height) — each card's top
+    --- padding (icon + first line) is CELL_PAD from ITS OWN row's top, and
+    --- bottom padding is CELL_PAD from ITS OWN row's bottom: fully fixed on
+    --- all 4 sides for every card, math derived (not eyeballed).
+    local rowH, rowY = {}, {}
+    do
+        local yAcc = 0
+        for r = 0, rows - 1 do
+            rowH[r] = CatalogCellHeight(rowMaxLines[r], rowLineH)
+            rowY[r] = yAcc
+            yAcc = yAcc + rowH[r] + gapX
         end
     end
 
     local svcLoot = ns.SessionLootService
-    local fixedCellH = CELL_PAD + math.max(CAT_SZ, maxRankLines * rowLineH) + CELL_PAD
     local cellBorder = COLORS.lootCellBorder
     if not cellBorder then
         cellBorder = { COLORS.border[1], COLORS.border[2], COLORS.border[3], 0.44 }
@@ -551,16 +674,14 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
 
     for idx = 1, n do
         local entry = entries[idx]
-        local ranks = resolveRanks(entry)
-        if #ranks < 1 and entry.id then
-            ranks = { entry.id }
-        end
+        local ranks = entryRanks[idx]
         local row = math.floor((idx - 1) / cols)
         local col = (idx - 1) % cols
         local showRanks = math.min(MAX_QUALITY_TIERS, #ranks)
 
         local cellW = CellWidthForCol(col)
         local cellX = colLeft[col] or 0
+        local cellH = rowH[row]
 
         --- Rankless entries render nothing (positions are absolute; the old
         --- invisible placeholder frame carried no visuals and is skipped).
@@ -568,12 +689,12 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
             local cellFrame = PoolAcquire(cellPool, CreateCatalogCell, content, classicUi)
             cellFrame._glowEntryId = entry and entry.id or nil
             cellFrame._glowRankIds = ranks
-            cellFrame:SetSize(cellW, fixedCellH)
+            cellFrame:SetSize(cellW, cellH)
             if cellFrame.SetClipsChildren then
                 cellFrame:SetClipsChildren(true)
             end
             cellFrame:ClearAllPoints()
-            cellFrame:SetPoint("TOPLEFT", content, "TOPLEFT", cellX, -row * (fixedCellH + gapX))
+            cellFrame:SetPoint("TOPLEFT", content, "TOPLEFT", cellX, -rowY[row])
             cellFrame:Show()
             if ns.UI_StyleLootCatalogCell then
                 ns.UI_StyleLootCatalogCell(cellFrame, cellBorder)
@@ -601,18 +722,8 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
                 end
             end
 
-            local blockH = showRanks * rowLineH
-            local rankW = CatalogRankBlockWidth(cellW)
+            local rankW = LayoutCatalogCellChrome(cellFrame, cellH, showRanks, rowLineH, cellW)
             local rankBlock = cellFrame._rankBlock
-            rankBlock:SetSize(rankW, blockH)
-            rankBlock:ClearAllPoints()
-            if ic then
-                --- Snap to icon’s right; stack vertically centered on the icon (WoW: +y is up).
-                rankBlock:SetPoint("LEFT", ic, "RIGHT", RANK_ICON_GAP, 0)
-                rankBlock:SetPoint("TOP", ic, "TOP", 0, (blockH - CAT_SZ) / 2)
-            else
-                rankBlock:SetPoint("TOPLEFT", cellFrame, "TOPLEFT", CELL_PAD + CAT_SZ, -CELL_PAD)
-            end
 
             local usedLines = 0
             for r = 1, showRanks do
@@ -665,7 +776,10 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
     end
 
     local gridW = innerW
-    local gridH = rows * fixedCellH + math.max(0, rows - 1) * gapX + 8
+    --- Sum of per-row heights + inter-row gaps (rows are non-uniform now) —
+    --- rowY[lastRow] already carries every prior row's height + gap, so add
+    --- just the last row's own height on top, plus bottom margin.
+    local gridH = (rows > 0 and (rowY[rows - 1] + rowH[rows - 1]) or 0) + 8
     content:SetSize(gridW, gridH)
     content:SetScript("OnUpdate", nil)
 end
@@ -862,12 +976,36 @@ local function ResetSessionRow(row)
     end
 end
 
-local function PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)
+local function ResolveCatalogEntriesForTab(tabKey)
+    if tabKey == "fishing" then
+        return (ns.GetFishingCatalogEntries and ns.GetFishingCatalogEntries()) or {}
+    end
+    if tabKey == "crafted" then
+        return {}
+    end
+    return (ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(tabKey)) or {}
+end
+
+local function ResolveEventTabKey(e, fallbackTabKey)
+    if e and e.tabKey then
+        return e.tabKey
+    end
+    if e and e.cat then
+        return e.cat
+    end
+    if e and (e.spellID or e.profession) then
+        return "crafted"
+    end
+    return fallbackTabKey or "fishing"
+end
+
+local function PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY, opts)
     listCap = listCap or GetLastLootListCap()
+    opts = opts or {}
     local rs = ns.RecipeService
     local nowRt = GetTime()
     local y = tonumber(startY) or 0
-    if y > 0 then
+    if y > 0 and not opts.skipSubHeader then
         local sub = content._anPickupsSubHeader
         if not sub then
             sub = content:CreateFontString(nil, "OVERLAY", FONTS.WINDOW_SECTION or "GameFontHighlightMedium")
@@ -884,7 +1022,10 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
     elseif content._anPickupsSubHeader then
         content._anPickupsSubHeader:Hide()
     end
-    local w = content:GetWidth() > 80 and content:GetWidth() or 360
+    local w = tonumber(opts.contentWidth)
+    if not w or w < 80 then
+        w = content:GetWidth() > 80 and content:GetWidth() or 360
+    end
     local maxN = math.min(listCap, #events)
     local borderEndIdx = math.min(
         SessionPickBorderEndIndex(events, maxN, nowRt, SESSION_ROW_GLOW_RT_SEC, MULTI_LOOT_RT_CLUSTER_SEC),
@@ -896,6 +1037,12 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
         if not e then break end
         local itemID = e.itemID
         local qty = e.qty or 1
+        local rowTabKey = tabKey
+        local rowCatalog = catalogEntries
+        if opts.perEventTabKey then
+            rowTabKey = ResolveEventTabKey(e, tabKey)
+            rowCatalog = ResolveCatalogEntriesForTab(rowTabKey)
+        end
         local row = PoolAcquire(rowPool, CreateSessionRow, content, classicUi)
         --- Tam scroll genişliği; vurgu soldan sağa liste alanıyla hizalı (eskiden w-8 + x=2 kesiyordu).
         row:SetSize(w, ROW_H)
@@ -925,7 +1072,7 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
 
         local tierFb = 1
         if GetCatalogRankIndexForItem then
-            tierFb = GetCatalogRankIndexForItem(itemID, catalogEntries) or 1
+            tierFb = GetCatalogRankIndexForItem(itemID, rowCatalog) or 1
         end
         tierFb = math.min(math.max(tierFb, 1), MAX_QUALITY_TIERS)
 
@@ -985,7 +1132,7 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
             end
             if nm and not (issecretvalue and issecretvalue(nm)) then
                 local display = nm
-                if tabKey == "crafted" and e.spellID and rs and rs.GetRecipeName then
+                if rowTabKey == "crafted" and e.spellID and rs and rs.GetRecipeName then
                     local rname = rs:GetRecipeName(e.spellID)
                     if rname and not (issecretvalue and issecretvalue(rname)) then
                         display = nm .. " — " .. rname
@@ -1076,8 +1223,17 @@ function Draw.PopulateCatalog(content, entries, totals, tabKey, innerW)
     return PopulateCatalog(content, entries, totals, tabKey, innerW)
 end
 
-function Draw.PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)
-    return PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)
+function Draw.PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY, opts)
+    return PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY, opts)
+end
+
+--- Floating loot overlay: mixed-tab session rows (icon, name, qty, AH/vendor price).
+function Draw.PopulateOverlaySessionList(content, events, listCap, emptyMsg, contentWidth)
+    return PopulateSessionList(content, events, {}, listCap, emptyMsg, "fishing", 0, {
+        perEventTabKey = true,
+        skipSubHeader = true,
+        contentWidth = contentWidth,
+    })
 end
 
 function Draw.PopulateCharEarnings(content, rows)

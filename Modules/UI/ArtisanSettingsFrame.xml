@@ -115,16 +115,68 @@
                                 </Anchors>
                             </CheckButton>
 
-                            <CheckButton name="ArtisanNexusSettings_ClassicUi" inherits="UICheckButtonTemplate">
+                            <CheckButton name="ArtisanNexusSettings_ClassColorAccent" inherits="UICheckButtonTemplate">
                                 <Anchors>
                                     <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LightTheme" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
                                 </Anchors>
                             </CheckButton>
 
+                            <Frame name="ArtisanNexusSettings_UiModeFrame" enableMouse="true">
+                                <Size x="524" y="32"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_ClassColorAccent" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_UiModeLabel" inherits="GameFontNormal" justifyH="LEFT" text="Interface style">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="0" y="0"/>
+                                            </Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                                <Frames>
+                                    <Frame name="ArtisanNexusSettings_UiModeDropDown" inherits="UIDropDownMenuTemplate" enableMouse="true">
+                                        <Anchors>
+                                            <Anchor point="LEFT" relativeTo="ArtisanNexusSettings_UiModeLabel" relativePoint="RIGHT" x="12" y="-2"/>
+                                        </Anchors>
+                                    </Frame>
+                                </Frames>
+                            </Frame>
+
+                            <Frame name="ArtisanNexusSettings_AccentFrame" enableMouse="true">
+                                <Size x="524" y="32"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_UiModeFrame" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="ARTWORK">
+                                        <FontString name="ArtisanNexusSettings_AccentLabel" inherits="GameFontNormal" justifyH="LEFT" text="Accent color">
+                                            <Anchors>
+                                                <Anchor point="LEFT" x="0" y="0"/>
+                                            </Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                                <Frames>
+                                    <Frame name="ArtisanNexusSettings_AccentDropDown" inherits="UIDropDownMenuTemplate" enableMouse="true">
+                                        <Anchors>
+                                            <Anchor point="LEFT" relativeTo="ArtisanNexusSettings_AccentLabel" relativePoint="RIGHT" x="12" y="-2"/>
+                                        </Anchors>
+                                    </Frame>
+                                    <Button name="ArtisanNexusSettings_AccentSwatch" inherits="UIPanelButtonTemplate" hidden="true">
+                                        <Size x="26" y="22"/>
+                                        <Anchors>
+                                            <Anchor point="LEFT" relativeTo="ArtisanNexusSettings_AccentDropDown" relativePoint="RIGHT" x="8" y="0"/>
+                                        </Anchors>
+                                    </Button>
+                                </Frames>
+                            </Frame>
+
                             <Frame name="ArtisanNexusSettings_TitleGathering" enableMouse="false">
                                 <Size x="524" y="26"/>
                                 <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_ClassicUi" relativePoint="BOTTOMLEFT" x="0" y="-22"/>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_AccentFrame" relativePoint="BOTTOMLEFT" x="0" y="-22"/>
                                 </Anchors>
                                 <Layers>
                                     <Layer level="ARTWORK">
@@ -210,10 +262,23 @@
                                 </Anchors>
                             </CheckButton>
 
+                            <CheckButton name="ArtisanNexusSettings_LootOverlay" inherits="UICheckButtonTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootAuto" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
+                                </Anchors>
+                            </CheckButton>
+
+                            <Button name="ArtisanNexusSettings_LootOverlayPosition" inherits="UIPanelButtonTemplate" text="Position overlay">
+                                <Size x="220" y="22"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootOverlay" relativePoint="BOTTOMLEFT" x="24" y="-8"/>
+                                </Anchors>
+                            </Button>
+
                             <Slider name="ArtisanNexusSettings_SessionRecentSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
                                 <Size x="300" y="20"/>
                                 <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootAuto" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootOverlayPosition" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
                                 </Anchors>
                             </Slider>
 

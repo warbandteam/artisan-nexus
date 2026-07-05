@@ -43,6 +43,12 @@ local defaults = {
         themeMode = "dark",
         --- "modern" | "classic" — classic uses plain Blizzard panel/button templates (no themed chrome).
         uiMode = "modern",
+        --- Accent preset for modern themed chrome: default | violet | gold | teal | rose | cobalt | custom
+        accentPreset = "default",
+        --- RGB when accentPreset == "custom" (0–1).
+        accentCustom = { 0.44, 0.32, 0.58 },
+        --- When true, accent (and derived tab/border tones) follows the logged-in character's class color.
+        useClassColorAccent = false,
         debugMode = false,
         modulesEnabled = {
             fishing = true,
@@ -100,6 +106,16 @@ local defaults = {
             relativePoint = "BOTTOMRIGHT",
             x = -24,
             y = 120,
+        },
+        --- Floating session loot overlay (recent pickups + prices); independent of Session loot window visibility.
+        sessionLootOverlayEnabled = false,
+        sessionLootOverlayHoldSec = 4,
+        sessionLootOverlayStackMax = 3,
+        sessionLootOverlayFrame = {
+            point = "TOPRIGHT",
+            relativePoint = "TOPRIGHT",
+            x = -24,
+            y = -120,
         },
         --- Warn when bag free slots are low while gathering.
         bagPressureGuardEnabled = true,
@@ -260,9 +276,13 @@ function ArtisanNexus:OnInitialize()
     if E.MODULE_TOGGLED then
         self:RegisterMessage(E.MODULE_TOGGLED, "OnModuleToggled")
     end
+    self:RegisterEvent("PLAYER_ENTERING_WORLD", "OnPlayerEnteringWorld")
 
     if ns.LootHistoryUI and ns.LootHistoryUI.Init then
         ns.LootHistoryUI:Init()
+    end
+    if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.Init then
+        ns.SessionLootOverlayUI:Init()
     end
     if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.Init then
         ns.ArtisanSettingsUI:Init()
@@ -282,6 +302,9 @@ end
 function ArtisanNexus:RefreshTheme()
     if ns.UI_RefreshColors then
         ns.UI_RefreshColors()
+    end
+    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.RefreshIfShown then
+        ns.ArtisanSettingsUI:RefreshIfShown()
     end
     if E and E.THEME_CHANGED then
         self:SendMessage(E.THEME_CHANGED)
@@ -312,6 +335,9 @@ function ArtisanNexus:OnProfileChanged()
     end
     if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.RefreshIfShown then
         ns.ArtisanSettingsUI:RefreshIfShown()
+    end
+    if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ApplySettingsAnchor then
+        ns.SessionLootOverlayUI:ApplySettingsAnchor()
     end
     if E and E.THEME_CHANGED then
         self:SendMessage(E.THEME_CHANGED)
@@ -374,6 +400,12 @@ end
 function ArtisanNexus:OnMessageLoadingComplete()
     if ns.DebugPrint then
         ns.DebugPrint("AN_LOADING_COMPLETE")
+    end
+end
+
+function ArtisanNexus:OnPlayerEnteringWorld(_, isInitialLogin, isReloadingUi)
+    if self.db and self.db.profile and self.db.profile.useClassColorAccent then
+        self:RefreshTheme()
     end
 end
 
@@ -523,6 +555,37 @@ function ArtisanNexus:SlashCommand(input)
     if input == "history" or input == "loot" then
         if ns.LootHistoryUI then
             ns.LootHistoryUI:Toggle()
+        end
+        return
+    end
+    if input == "overlay" or input == "lootoverlay" or input == "loothud"
+        or input:match("^overlay%s+")
+        or input:match("^lootoverlay%s+")
+        or input:match("^loothud%s+") then
+        local O = ns.SessionLootOverlayUI
+        if not O then
+            self:Print((L and L["SLASH_OVERLAY_UNAVAILABLE"]) or "Session loot overlay is unavailable.")
+            return
+        end
+        local sub = input:match("^%S+%s+(.+)$") or ""
+        sub = sub:match("^%s*(.-)%s*$") or ""
+        if sub == "move" or sub == "position" or sub == "pos" then
+            if O.TogglePositionEdit then
+                O:TogglePositionEdit()
+            end
+            return
+        end
+        if sub ~= "" then
+            return
+        end
+        local on
+        if O.Toggle then
+            on = O:Toggle()
+        end
+        if on then
+            self:Print((L and L["SLASH_OVERLAY_ON"]) or "Session loot overlay shown.")
+        else
+            self:Print((L and L["SLASH_OVERLAY_OFF"]) or "Session loot overlay hidden.")
         end
         return
     end

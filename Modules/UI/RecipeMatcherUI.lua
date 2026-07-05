@@ -35,6 +35,16 @@ local FONTS = ns.UI_FONTS or {}
 local function Font(role)
     return (role and FONTS[role]) or FONTS.WINDOW_BODY or "GameFontNormal"
 end
+
+--- Bottom pane anchors touch the window edge directly. Classic's ornate border
+--- art needs more clearance than the plain PAD used by the modern skin — see
+--- AN-UI-theme.mdc border footprint.
+local function BodySafeInset(basePad)
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellHorizontalInset then
+        return ns.UI_GetClassicShellHorizontalInset()
+    end
+    return basePad
+end
 local ROW_H = LAYOUT.MATCHER_ROW_HEIGHT or 36
 local ICON_SZ = LAYOUT.MATCHER_ICON_SIZE or 28
 local SECTION_H = LAYOUT.MATCHER_SECTION_HEIGHT or 28
@@ -649,8 +659,9 @@ function RecipeMatcherUI:Init()
     --- Left: recipe list. Bottom x matches the toolbar chain's left edge
     --- (PAD + 4) — a mismatched second left anchor skews the pane rect.
     local left = CreateScrollList(f)
+    local bottomSafePad = BodySafeInset(PAD)
     left:SetPoint("TOPLEFT", toolRow2, "BOTTOMLEFT", 0, -PAD)
-    left:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PAD + 4, PAD)
+    left:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", bottomSafePad + 4, bottomSafePad)
     left:SetWidth(math.floor(WINDOW_W * LEFT_PANE_FRAC))
 
     local divider
@@ -674,7 +685,7 @@ function RecipeMatcherUI:Init()
     rightOuter:SetPoint("TOPLEFT", divider, "TOPRIGHT", PANE_GAP, 0)
     --- Mirror the toolbar right edge (PAD + 4) so both panes sit symmetric
     --- under the rows above.
-    rightOuter:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -(PAD + 4), PAD)
+    rightOuter:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -(bottomSafePad + 4), bottomSafePad)
     rightOuter:SetClipsChildren(true)
     if ns.UI_StylePanelInset then
         ns.UI_StylePanelInset(rightOuter, COLORS.bgCard, COLORS.border)

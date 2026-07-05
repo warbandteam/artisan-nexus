@@ -964,4 +964,51 @@ function SessionLootService:GetTable(kind)
     return {}
 end
 
+--- Newest-first session pickups merged across fishing, gathering, and crafted.
+--- Each row includes `tabKey` for mixed-tab overlay / list drawing.
+---@param maxN number|nil defaults to GetMaxRecentLoot()
+---@return table[]
+function SessionLootService:GetMergedRecentSessionEvents(maxN)
+    maxN = tonumber(maxN)
+    if not maxN or maxN < 1 then
+        maxN = self:GetMaxRecentLoot()
+    else
+        maxN = math.floor(maxN + 0.5)
+    end
+    local scratch = {}
+    local function pushEvent(e, tabKey)
+        if not e or not e.itemID then
+            return
+        end
+        scratch[#scratch + 1] = {
+            itemID = e.itemID,
+            qty = e.qty or 1,
+            rt = e.rt or 0,
+            t = e.t,
+            cat = e.cat,
+            spellID = e.spellID,
+            profession = e.profession,
+            tabKey = tabKey or e.cat or "fishing",
+        }
+    end
+    for i = 1, #(self.fishingEvents or {}) do
+        pushEvent(self.fishingEvents[i], "fishing")
+    end
+    for i = 1, #(self.craftedEvents or {}) do
+        pushEvent(self.craftedEvents[i], "crafted")
+    end
+    for i = 1, #(self.gatheringEvents or {}) do
+        local e = self.gatheringEvents[i]
+        pushEvent(e, e and e.cat)
+    end
+    table.sort(scratch, function(a, b)
+        return (a.rt or 0) > (b.rt or 0)
+    end)
+    local out = {}
+    for i = 1, math.min(maxN, #scratch) do
+        out[i] = scratch[i]
+    end
+    return out
+end
+
 ns.SessionLootService = SessionLootService

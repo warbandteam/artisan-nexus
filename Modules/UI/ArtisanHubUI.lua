@@ -22,6 +22,17 @@ local tinsert = table.insert
 
 local L = ns.L
 
+--- bodyHost's BOTTOMRIGHT anchors straight to the window edge (bypasses the
+--- tabBar/filterBar chain), so it doesn't inherit UI_AnchorClassicShellBodyRow's
+--- classic-safe inset. Widen it here too — classic's ornate border art needs
+--- more clearance than the plain shellPad (AN-UI-theme.mdc border footprint).
+local function HubBodySafeInset(basePad)
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellHorizontalInset then
+        return ns.UI_GetClassicShellHorizontalInset()
+    end
+    return basePad
+end
+
 local function SafeL(key, fallback)
     if ns.SafeLocaleString then
         local s = ns.SafeLocaleString(key, fallback)
@@ -711,8 +722,9 @@ local function BuildChrome()
     f.briefingBanner = briefingBanner
 
     local bodyHost = CreateFrame("Frame", nil, f)
+    local bodySafePad = HubBodySafeInset(shellPad)
     bodyHost:SetPoint("TOPLEFT", filterBar, "BOTTOMLEFT", 0, -6)
-    bodyHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -shellPad, shellPad)
+    bodyHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -bodySafePad, bodySafePad)
     bodyHost:SetClipsChildren(true)
     f.bodyHost = bodyHost
 
@@ -873,9 +885,10 @@ local function RefreshHubBanners()
         briefingBanner:Hide()
     end
 
+    local bodySafePad = HubBodySafeInset(shellPad)
     bodyHost:ClearAllPoints()
     bodyHost:SetPoint("TOPLEFT", filterBar, "BOTTOMLEFT", 0, -(6 + bannerDrop))
-    bodyHost:SetPoint("BOTTOMRIGHT", FRAME, "BOTTOMRIGHT", -shellPad, shellPad)
+    bodyHost:SetPoint("BOTTOMRIGHT", FRAME, "BOTTOMRIGHT", -bodySafePad, bodySafePad)
 end
 
 local function ApplyTabState()

@@ -174,6 +174,22 @@ end
 
 
 
+--- Drop tooltip/dialog 9-slice edges before modern ApplyVisuals (classic->modern residue).
+function ns.UI_StripClassicBackdropEdge(frame)
+    if not frame or not frame.SetBackdrop then
+        return
+    end
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        return
+    end
+    frame:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+    })
+    if frame.SetBackdropBorderColor then
+        frame:SetBackdropBorderColor(0, 0, 0, 0)
+    end
+end
+
 --- Re-show Artisan pixel borders after a classic->modern skin switch.
 
 function ns.UI_RestoreArtisanChrome(frame)
@@ -201,13 +217,42 @@ end
 
 
 function ns.UI_GetClassicDialogInset()
-    return (ns.UI_LAYOUT and ns.UI_LAYOUT.CLASSIC_DIALOG_INSET) or 8
+    local layout = ns.UI_LAYOUT or {}
+    if layout.CLASSIC_DIALOG_INSET_LEFT ~= nil then
+        return layout.CLASSIC_DIALOG_INSET_LEFT
+    end
+    return layout.CLASSIC_DIALOG_INSET or 11
 end
 
---- Horizontal inset for classic shell body rows and title strip (matches SHELL_PAD).
+--- Warband parity: asymmetric dialog tile insets for classic main shells.
+---@return number insetLeft, number insetRight, number insetTop, number insetBottom
+function ns.UI_GetClassicShellFrameInsets()
+    local layout = ns.UI_LAYOUT or {}
+    local left = layout.CLASSIC_DIALOG_INSET_LEFT
+    if left == nil then
+        left = layout.CLASSIC_DIALOG_INSET or 11
+    end
+    local right = layout.CLASSIC_DIALOG_INSET_RIGHT
+    if right == nil then
+        right = left
+    end
+    local top = layout.CLASSIC_DIALOG_INSET_TOP
+    if top == nil then
+        top = left
+    end
+    local bottom = layout.CLASSIC_DIALOG_INSET_BOTTOM
+    if bottom == nil then
+        bottom = left
+    end
+    return left, right, top, bottom
+end
+
+--- Horizontal/vertical inset for classic shell body rows (tabs, catalog/session
+--- hosts) so they clear the ornate dialog border art — wider than SHELL_PAD,
+--- which only matches the plain backdrop background inset (11/12).
 function ns.UI_GetClassicShellHorizontalInset()
     local layout = ns.UI_LAYOUT or {}
-    return layout.SHELL_PAD or layout.BASE_INDENT or 12
+    return layout.CLASSIC_SHELL_BODY_SAFE_INSET or layout.SHELL_PAD or layout.BASE_INDENT or 12
 end
 
 --- Wing width for UI-DialogBox-Header caps; shrinks on narrow windows (overload tracker).
@@ -241,7 +286,7 @@ function ns.UI_ApplyClassicDialogBackdrop(frame)
 
     ns.UI_SuppressArtisanChrome(frame)
 
-    local inset = ns.UI_GetClassicDialogInset()
+    local insetL, insetR, insetT, insetB = ns.UI_GetClassicShellFrameInsets()
 
     frame:SetBackdrop({
 
@@ -255,7 +300,7 @@ function ns.UI_ApplyClassicDialogBackdrop(frame)
 
         edgeSize = 32,
 
-        insets = { left = inset, right = inset, top = inset, bottom = inset },
+        insets = { left = insetL, right = insetR, top = insetT, bottom = insetB },
 
     })
 
@@ -376,12 +421,15 @@ local function EnsureClassicDialogTitleTextures(frame)
     if not frame or frame._anClassicTitleBgC then
         return
     end
-    frame._anClassicTitleBgL = frame:CreateTexture(nil, "ARTWORK", nil, 1)
-    frame._anClassicTitleBgC = frame:CreateTexture(nil, "ARTWORK", nil, 1)
-    frame._anClassicTitleBgR = frame:CreateTexture(nil, "ARTWORK", nil, 1)
+    -- OVERLAY (+7) guarantees the strip paints above the backdrop border pieces
+    -- (BACKGROUND/BORDER layers) regardless of texture creation order.
+    frame._anClassicTitleBgL = frame:CreateTexture(nil, "OVERLAY", nil, 7)
+    frame._anClassicTitleBgC = frame:CreateTexture(nil, "OVERLAY", nil, 7)
+    frame._anClassicTitleBgR = frame:CreateTexture(nil, "OVERLAY", nil, 7)
 end
 
 --- AceGUI Frame.lua texcoords — center stretch + capped wings (no square tiling).
+--- Wings pin to frame left/right; center fills the band between them (shell = dialog inner width).
 local function LayoutClassicDialogTitleTextures(frame, opts)
     if not frame then
         return
@@ -392,7 +440,14 @@ local function LayoutClassicDialogTitleTextures(frame, opts)
     local topOffset = opts.topOffset or 0
     local h = opts.height or 32
     local wingW = opts.wingWidth or 36
-    local inset = opts.inset or 6
+    local insetL = opts.insetLeft
+    local insetR = opts.insetRight
+    if insetL == nil then
+        insetL = opts.inset or 6
+    end
+    if insetR == nil then
+        insetR = opts.inset or 6
+    end
     EnsureClassicDialogTitleTextures(frame)
     local bgL = frame._anClassicTitleBgL
     local bgC = frame._anClassicTitleBgC
@@ -401,25 +456,25 @@ local function LayoutClassicDialogTitleTextures(frame, opts)
     bgC:SetTexture(DIALOG_HEADER_TEX)
     bgC:SetTexCoord(0.31, 0.67, 0, 0.63)
     bgC:ClearAllPoints()
-    bgC:SetPoint("TOPLEFT", frame, "TOPLEFT", inset + wingW, topOffset)
-    bgC:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -(inset + wingW), topOffset)
+    bgC:SetPoint("TOPLEFT", frame, "TOPLEFT", insetL + wingW, topOffset)
+    bgC:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -(insetR + wingW), topOffset)
     bgC:SetHeight(h)
     bgC:Show()
 
     bgL:SetTexture(DIALOG_HEADER_TEX)
     bgL:SetTexCoord(0.21, 0.31, 0, 0.63)
     bgL:ClearAllPoints()
-    bgL:SetPoint("TOPRIGHT", bgC, "TOPLEFT", 0, 0)
-    bgL:SetPoint("BOTTOMRIGHT", bgC, "BOTTOMLEFT", 0, 0)
+    bgL:SetPoint("TOPLEFT", frame, "TOPLEFT", insetL, topOffset)
     bgL:SetWidth(wingW)
+    bgL:SetHeight(h)
     bgL:Show()
 
     bgR:SetTexture(DIALOG_HEADER_TEX)
     bgR:SetTexCoord(0.67, 0.77, 0, 0.63)
     bgR:ClearAllPoints()
-    bgR:SetPoint("TOPLEFT", bgC, "TOPRIGHT", 0, 0)
-    bgR:SetPoint("BOTTOMLEFT", bgC, "BOTTOMRIGHT", 0, 0)
+    bgR:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -insetR, topOffset)
     bgR:SetWidth(wingW)
+    bgR:SetHeight(h)
     bgR:Show()
 end
 
@@ -463,8 +518,11 @@ function ns.UI_GetClassicShellContentTop()
     if layout.CLASSIC_SHELL_CONTENT_TOP then
         return layout.CLASSIC_SHELL_CONTENT_TOP
     end
-    local topY = layout.CLASSIC_TITLE_TOP_OFFSET or 12
-    local stripH = layout.CLASSIC_SHELL_TITLE_STRIP_HEIGHT or 40
+    local topY = layout.CLASSIC_SHELL_TITLE_TOP_OFFSET
+    if topY == nil then
+        topY = layout.CLASSIC_TITLE_TOP_OFFSET or 12
+    end
+    local stripH = layout.CLASSIC_SHELL_TITLE_STRIP_HEIGHT or 48
     local gap = layout.CLASSIC_SHELL_TITLE_BODY_GAP or 4
     return topY + stripH + gap
 end
@@ -479,14 +537,27 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
         return
     end
     local layout = ns.UI_LAYOUT or {}
-    local topY = layout.CLASSIC_TITLE_TOP_OFFSET or 12
-    local stripH = layout.CLASSIC_SHELL_TITLE_STRIP_HEIGHT or 40
-    local hInset = (ns.UI_GetClassicShellHorizontalInset and ns.UI_GetClassicShellHorizontalInset())
-        or layout.SHELL_PAD or 12
-    local wingW = (ns.UI_ComputeClassicTitleWingWidth and ns.UI_ComputeClassicTitleWingWidth(parent, hInset))
-        or (layout.CLASSIC_SHELL_TITLE_WING or 28)
+    local topY = layout.CLASSIC_SHELL_TITLE_TOP_OFFSET
+    if topY == nil then
+        topY = 0
+    end
+    local extraHInset = layout.CLASSIC_SHELL_TITLE_H_INSET or 0
+    local insetL = extraHInset
+    local insetR = extraHInset
+    local stripH = layout.CLASSIC_SHELL_TITLE_STRIP_HEIGHT or 48
+    local hInsetTotal = insetL + insetR
+    local wingW = (ns.UI_ComputeClassicTitleWingWidth and ns.UI_ComputeClassicTitleWingWidth(parent, hInsetTotal))
+        or (layout.CLASSIC_SHELL_TITLE_WING or 30)
     local contentTop = ns.UI_GetClassicShellContentTop()
-    local padV = 4
+    local padV = layout.CLASSIC_SHELL_TITLE_PAD_V or 5
+    local ctrlSz = layout.CLASSIC_SHELL_TITLE_CONTROL_SIZE or 24
+    local logoSz = layout.CLASSIC_SHELL_TITLE_LOGO_SIZE or 28
+    local iconGap = layout.CLASSIC_SHELL_TITLE_ICON_GAP or 4
+    local titleLeftPad = layout.CLASSIC_SHELL_TITLE_LEFT_PAD or 10
+    local titleTextGap = layout.CLASSIC_SHELL_TITLE_TEXT_GAP or 8
+    local utilityRight = layout.CLASSIC_SHELL_HEADER_UTILITY_RIGHT or 18
+    ctrlSz = math.max(18, math.min(ctrlSz, stripH - padV * 2))
+    logoSz = math.max(18, math.min(logoSz, stripH - padV * 2))
 
     if headerBar.SetBackdrop then
         headerBar:SetBackdrop(nil)
@@ -498,7 +569,8 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
         topOffset = topY,
         height = stripH,
         wingWidth = wingW,
-        inset = hInset,
+        insetLeft = insetL,
+        insetRight = insetR,
     })
 
     if not parent._anClassicShellLayoutHooked and parent.HookScript then
@@ -520,44 +592,47 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
     headerBar:SetHeight(contentTop)
 
     local titleCenter = parent._anClassicTitleBgC or parent
-    local titleWingL = parent._anClassicTitleBgL or parent
     local titleWingR = parent._anClassicTitleBgR or parent
 
-    --- Square controls vertically centered in the title strip via TOP+BOTTOM on center bg.
-    local function FitSquareControlInStrip(widget, point, rel, relPoint, x)
-        if not widget or not titleCenter then
+    local titleStripCenterY = -math.floor((stripH - ctrlSz) * 0.5)
+    local logoCenterY = -math.floor((stripH - logoSz) * 0.5)
+
+    --- WN parity: utility cluster from header inner right; chain left for siblings.
+    local function PlaceTitleStripControlRight(widget, chainFrom, chainGap)
+        if not widget or not headerBar then
             return
         end
         widget:ClearAllPoints()
-        local sz = math.max(18, math.min(26, stripH - padV * 2))
-        if point and rel then
-            widget:SetPoint(point, rel, relPoint or point, x or 0, 0)
+        widget:SetSize(ctrlSz, ctrlSz)
+        if chainFrom then
+            widget:SetPoint("RIGHT", chainFrom, "LEFT", -(chainGap or iconGap), 0)
+        else
+            widget:SetPoint("RIGHT", headerBar, "TOPRIGHT", -utilityRight, 0)
         end
-        widget:SetPoint("TOP", titleCenter, "TOP", 0, -padV)
-        widget:SetPoint("BOTTOM", titleCenter, "BOTTOM", 0, padV)
-        if widget.SetWidth then
-            widget:SetWidth(sz)
-        end
+        widget:SetPoint("TOP", titleCenter, "TOP", 0, titleStripCenterY)
     end
 
     if headerBar._anShellLogo then
-        local logoSz = math.max(18, math.min(24, stripH - padV * 2))
         headerBar._anShellLogo:ClearAllPoints()
         headerBar._anShellLogo:SetSize(logoSz, logoSz)
-        headerBar._anShellLogo:SetPoint("CENTER", titleWingL, "CENTER", 8, 0)
+        -- Anchor to the header bar's true left edge (not titleCenter/bgC), so the
+        -- logo sits close to the frame corner, over the decorative wing cap —
+        -- matching default WoW dialog headers (icon overlapping the left cap).
+        headerBar._anShellLogo:SetPoint("LEFT", headerBar, "LEFT", titleLeftPad, 0)
+        headerBar._anShellLogo:SetPoint("TOP", titleCenter, "TOP", 0, logoCenterY)
         headerBar._anShellLogo:Show()
     end
 
     local rightClip = headerBar._anShellClose
     if rightClip then
-        FitSquareControlInStrip(rightClip, "RIGHT", titleWingR, "RIGHT", -5)
+        PlaceTitleStripControlRight(rightClip, nil, nil)
     end
     local settingsBtn = headerBar._anShellSettings
     if settingsBtn then
         if rightClip then
-            FitSquareControlInStrip(settingsBtn, "RIGHT", rightClip, "LEFT", -4)
+            PlaceTitleStripControlRight(settingsBtn, rightClip, iconGap)
         else
-            FitSquareControlInStrip(settingsBtn, "RIGHT", titleWingR, "RIGHT", -30)
+            PlaceTitleStripControlRight(settingsBtn, nil, nil)
         end
         rightClip = settingsBtn
     end
@@ -566,11 +641,7 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
         for i = 1, #utilities do
             local btn = utilities[i]
             if btn and btn.ClearAllPoints then
-                if rightClip then
-                    FitSquareControlInStrip(btn, "RIGHT", rightClip, "LEFT", -4)
-                else
-                    FitSquareControlInStrip(btn, "RIGHT", titleWingR, "RIGHT", -6)
-                end
+                PlaceTitleStripControlRight(btn, rightClip, iconGap)
                 rightClip = btn
             end
         end
@@ -580,11 +651,7 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
         for i = 1, #extras do
             local btn = extras[i]
             if btn and btn.ClearAllPoints then
-                if rightClip then
-                    FitSquareControlInStrip(btn, "RIGHT", rightClip, "LEFT", -4)
-                else
-                    FitSquareControlInStrip(btn, "RIGHT", titleWingR, "RIGHT", -6)
-                end
+                PlaceTitleStripControlRight(btn, rightClip, iconGap)
                 rightClip = btn
             end
         end
@@ -592,19 +659,23 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
     headerBar._anShellRightClip = rightClip
 
     if headerBar._anShellTitle then
-        headerBar._anShellTitle:ClearAllPoints()
+        local title = headerBar._anShellTitle
+        title:ClearAllPoints()
+        -- Single-point LEFT/RIGHT anchors both resolve Y via the target's own
+        -- vertical middle; since logo/controls are already centered on the
+        -- strip (titleStripCenterY / logoCenterY), the title lands on that
+        -- same center line without needing a separate TOP offset.
         if headerBar._anShellLogo then
-            headerBar._anShellTitle:SetPoint("LEFT", headerBar._anShellLogo, "RIGHT", 6, 0)
+            title:SetPoint("LEFT", headerBar._anShellLogo, "RIGHT", titleTextGap, 0)
         else
-            headerBar._anShellTitle:SetPoint("LEFT", titleWingL, "LEFT", 8, 0)
+            title:SetPoint("LEFT", titleCenter, "LEFT", titleLeftPad, 0)
         end
-        headerBar._anShellTitle:SetPoint("TOP", titleCenter, "TOP", 0, -14)
         if rightClip then
-            headerBar._anShellTitle:SetPoint("RIGHT", rightClip, "LEFT", -8, 0)
+            title:SetPoint("RIGHT", rightClip, "LEFT", -8, 0)
         else
-            headerBar._anShellTitle:SetPoint("RIGHT", titleWingR, "LEFT", -8, 0)
+            title:SetPoint("RIGHT", titleWingR, "LEFT", -8, 0)
         end
-        headerBar._anShellTitle:SetTextColor(1, 0.82, 0, 1)
+        title:SetTextColor(1, 0.82, 0, 1)
     end
 end
 
@@ -1135,6 +1206,12 @@ function ns.UI_ResetMainWindowsForUiMode()
     if ns.GatheringOverloadIndicator and ns.GatheringOverloadIndicator.ResetForUiMode then
 
         ns.GatheringOverloadIndicator:ResetForUiMode()
+
+    end
+
+    if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ResetForUiMode then
+
+        ns.SessionLootOverlayUI:ResetForUiMode()
 
     end
 

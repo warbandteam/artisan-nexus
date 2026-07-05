@@ -51,22 +51,25 @@ function ns.UI_RefreshWindowHeader(headerBar)
         if ns.UI_RefreshClassicWindowHeader then
             ns.UI_RefreshClassicWindowHeader(headerBar)
         end
-        return
+    elseif ns.UI_ApplyVisuals then
+        local c = Colors()
+        local hb = c.lootHeaderBg or c.bgLight
+        local ac = c.accent or { 0.44, 0.32, 0.58, 1 }
+        local br = c.lootHeaderBorder or { ac[1], ac[2], ac[3], 0.68 }
+        ns.UI_ApplyVisuals(headerBar, hb, br)
+        if headerBar._anShellTitle then
+            local tb = c.textBright or { 0.96, 0.95, 0.97, 1 }
+            headerBar._anShellTitle:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1)
+        end
+        if headerBar._anShellLogo and headerBar._anShellLogo.Show then
+            headerBar._anShellLogo:Show()
+        end
     end
-    if not ns.UI_ApplyVisuals then
-        return
-    end
-    local c = Colors()
-    local hb = c.lootHeaderBg or c.bgLight
-    local ac = c.accent or { 0.44, 0.32, 0.58, 1 }
-    local br = c.lootHeaderBorder or { ac[1], ac[2], ac[3], 0.68 }
-    ns.UI_ApplyVisuals(headerBar, hb, br)
-    if headerBar._anShellTitle then
-        local tb = c.textBright or { 0.96, 0.95, 0.97, 1 }
-        headerBar._anShellTitle:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1)
-    end
-    if headerBar._anShellLogo and headerBar._anShellLogo.Show then
-        headerBar._anShellLogo:Show()
+    if ns.UI_RegisterClassicShellDebug and headerBar then
+        local parent = headerBar._anShellParent or headerBar:GetParent()
+        if parent then
+            ns.UI_RegisterClassicShellDebug(parent, headerBar)
+        end
     end
 end
 
@@ -99,6 +102,10 @@ function ns.UI_AnchorClassicShellBodyRow(row, parent, headerBar, leftPad, gapBel
     gapBelowTop = gapBelowTop or 0
     row:ClearAllPoints()
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellContentTop then
+        --- Body rows must clear the ornate border art, not just SHELL_PAD.
+        if ns.UI_GetClassicShellHorizontalInset then
+            leftPad = math.max(leftPad, ns.UI_GetClassicShellHorizontalInset())
+        end
         local top = ns.UI_GetClassicShellContentTop() + gapBelowTop
         row:SetPoint("TOPLEFT", parent, "TOPLEFT", leftPad, -top)
         row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -leftPad, -top)
@@ -126,6 +133,9 @@ function ns.UI_StylePanelInset(frame, bgColor, borderColor)
     if not ns.UI_ApplyVisuals then
         return
     end
+    if ns.UI_StripClassicBackdropEdge then
+        ns.UI_StripClassicBackdropEdge(frame)
+    end
     local c = Colors()
     local bg = bgColor or c.bgCard or { 0.078, 0.075, 0.089, 1 }
     local bd = borderColor
@@ -133,7 +143,7 @@ function ns.UI_StylePanelInset(frame, bgColor, borderColor)
         local b = c.border or { 0.26, 0.24, 0.30, 1 }
         bd = { b[1], b[2], b[3], 0.52 }
     end
-    ns.UI_ApplyVisuals(frame, bg, bd)
+    ns.UI_ApplyVisuals(frame, bg, bd, { bgType = "bgCard" })
     --- Frames that lived through a classic phase have hidden pixel borders.
     if ns.UI_RestoreArtisanChrome then
         ns.UI_RestoreArtisanChrome(frame)

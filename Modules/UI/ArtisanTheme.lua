@@ -23,7 +23,7 @@ local SURFACE_VARIANTS = {
         textNormal = { 0.82, 0.80, 0.86, 1 },
         textDim = { 0.52, 0.50, 0.56, 1 },
         textMuted = { 0.72, 0.69, 0.78, 1 },
-        lootQtyOn = { 0.93, 0.92, 0.96, 1 },
+        lootQtyOn = { 1, 1, 1, 1 }, -- pure white for obtained counts — GRAY BAN (AN-UX-readability.mdc)
         lootQtyZero = { 0.48, 0.46, 0.54, 1 },
         lootCellBg = { 0.08, 0.077, 0.09, 0.92 },
         lootCellBorder = { 0.30, 0.28, 0.34, 0.40 },
@@ -96,13 +96,34 @@ local LAYOUT = {
     HEADER_HEIGHT = 52,
     SHELL_PAD = 12,
     SHELL_HEADER_HEIGHT = 44,
-    SHELL_HEADER_HEIGHT_CLASSIC = 32,
+    SHELL_HEADER_HEIGHT_CLASSIC = 36,
     CLASSIC_DIALOG_INSET = 8,
+    CLASSIC_DIALOG_INSET_LEFT = 11,
+    CLASSIC_DIALOG_INSET_RIGHT = 12,
+    CLASSIC_DIALOG_INSET_TOP = 12,
+    CLASSIC_DIALOG_INSET_BOTTOM = 11,
     CLASSIC_TITLE_TOP_OFFSET = 12,
-    CLASSIC_SHELL_TITLE_STRIP_HEIGHT = 40,
+    CLASSIC_SHELL_TITLE_TOP_OFFSET = 0,
+    CLASSIC_SHELL_TITLE_STRIP_HEIGHT = 52,
     CLASSIC_SHELL_TITLE_BODY_GAP = 4,
     CLASSIC_SHELL_CONTENT_TOP = 56,
-    CLASSIC_SHELL_TITLE_WING = 28,
+    CLASSIC_SHELL_TITLE_H_INSET = 0, -- 0 = full bleed to shell.main left/right edges
+    CLASSIC_SHELL_TITLE_LEFT_PAD = 16, -- from headerBar's true left edge; clears the ornate corner accent
+    CLASSIC_SHELL_TITLE_TEXT_GAP = 8,
+    CLASSIC_SHELL_TITLE_LOGO_SIZE = 28,
+    CLASSIC_SHELL_TITLE_CONTROL_SIZE = 24,
+    CLASSIC_SHELL_TITLE_PAD_V = 5,
+    CLASSIC_SHELL_TITLE_ICON_GAP = 4,
+    CLASSIC_SHELL_HEADER_UTILITY_RIGHT = 18,
+    CLASSIC_SHELL_TITLE_WING = 32, -- >= backdrop edgeSize (32) so the corner border art is fully covered
+    --- Body content (tabs, catalog/session hosts, rows, scrollbars) must clear
+    --- the ornate dialog border art. The border backdrop uses edgeSize = 32
+    --- (see UI_ApplyClassicDialogBackdrop) but only insets its background fill
+    --- by 11/12 — the decorative corner art itself occupies the full 32px band,
+    --- so body content needs >= edgeSize clearance, not just SHELL_PAD (12) or
+    --- the background fill inset, or scrollbars/rows visually cross the border
+    --- (worst near corners, e.g. the bottom-right session list scrollbar cap).
+    CLASSIC_SHELL_BODY_SAFE_INSET = 32,
     CLASSIC_SHELL_TITLE_MIN_CENTER = 96,
     SHELL_LOGO_SIZE = 28,
     SHELL_TAB_HEIGHT = 30,
@@ -140,7 +161,14 @@ local LAYOUT = {
     POSTING_PANEL_WIDTH = 272,
     POSTING_PANEL_HEIGHT = 184,
     POSTING_BUTTON_HEIGHT = 26,
-    LOOT_CATALOG_CELL_PAD = 8,
+    LOOT_CATALOG_CELL_PAD = 8, -- interior cell padding (icon offset, rank block sizing) — keep roomy so text never clips
+    LOOT_CATALOG_GRID_GAP = 5, -- gap between catalog cards (and between rows) — tighter than CELL_PAD
+    LOOT_CATALOG_SIDE_PAD = 10, -- fixed left/right margin for the whole catalog grid, independent of the inter-card gap
+    --- Minimum catalog card width: icon + rank block must fit atlas + count + money
+    --- (embedded coin icons). PopulateCatalog drops to 1 column when 2-up would
+    --- squeeze below this — prevents truncation at narrow window widths.
+    LOOT_CATALOG_MIN_VALUE_W = 72,
+    LOOT_CATALOG_MAX_COLS = 2,
     SCROLL_BAR_WIDTH = 16,
     SCROLL_BAR_BUTTON_SIZE = 18,
     SCROLL_BAR_COLUMN_X_BIAS = 3,
@@ -184,40 +212,243 @@ function ns.UI_GetThemeMode()
     return ResolveThemeMode()
 end
 
+--- Named accent presets (RGB). "default" uses the active dark/light palette accent.
+local ACCENT_PRESET_RGB = {
+    violet = { 0.44, 0.32, 0.58 },
+    gold = { 0.78, 0.62, 0.22 },
+    teal = { 0.22, 0.58, 0.54 },
+    rose = { 0.72, 0.28, 0.42 },
+    cobalt = { 0.28, 0.42, 0.78 },
+}
+
+ns.UI_ACCENT_PRESET_IDS = { "default", "violet", "gold", "teal", "rose", "cobalt", "custom" }
+
+local DEFAULT_THEME_ACCENT = { 0.44, 0.32, 0.58 }
+
+--- Derive accent ladder from a master RGB (Warband SharedWidgets_Theme parity).
+function ns.UI_CalculateThemeColors(masterR, masterG, masterB)
+    local function Desaturate(r, g, b, amount)
+        local gray = (r + g + b) / 3
+        return r + (gray - r) * amount,
+            g + (gray - g) * amount,
+            b + (gray - b) * amount
+    end
+    local function AdjustBrightness(r, g, b, factor)
+        return math.min(1, r * factor),
+            math.min(1, g * factor),
+            math.min(1, b * factor)
+    end
+    local darkR, darkG, darkB = AdjustBrightness(masterR, masterG, masterB, 0.7)
+    local borderR, borderG, borderB = Desaturate(masterR * 0.5, masterG * 0.5, masterB * 0.5, 0.6)
+    local activeR, activeG, activeB = AdjustBrightness(masterR, masterG, masterB, 0.5)
+    local hoverR, hoverG, hoverB = AdjustBrightness(masterR, masterG, masterB, 0.6)
+    return {
+        accent = { masterR, masterG, masterB },
+        accentDark = { darkR, darkG, darkB },
+        border = { borderR, borderG, borderB },
+        tabActive = { activeR, activeG, activeB },
+        tabHover = { hoverR, hoverG, hoverB },
+    }
+end
+
+--- Class color when available; else fallback accent triple.
+function ns.ResolveAccentColor(fallbackAccent)
+    local fr = fallbackAccent and fallbackAccent[1]
+    local fg = fallbackAccent and fallbackAccent[2]
+    local fb = fallbackAccent and fallbackAccent[3]
+    if type(fr) ~= "number" or type(fg) ~= "number" or type(fb) ~= "number" then
+        fr, fg, fb = DEFAULT_THEME_ACCENT[1], DEFAULT_THEME_ACCENT[2], DEFAULT_THEME_ACCENT[3]
+    end
+    local _, classFile = UnitClass("player")
+    if not classFile or classFile == "" then
+        return fr, fg, fb
+    end
+    if C_ClassColor and C_ClassColor.GetClassColor then
+        local ok, cc = pcall(C_ClassColor.GetClassColor, classFile)
+        if ok and cc then
+            if cc.GetRGB then
+                local r, g, b = cc:GetRGB()
+                if type(r) == "number" and type(g) == "number" and type(b) == "number" then
+                    return r, g, b
+                end
+            elseif type(cc.r) == "number" and type(cc.g) == "number" and type(cc.b) == "number" then
+                return cc.r, cc.g, cc.b
+            end
+        end
+    end
+    local rc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile]
+    if rc and type(rc.r) == "number" and type(rc.g) == "number" and type(rc.b) == "number" then
+        return rc.r, rc.g, rc.b
+    end
+    return fr, fg, fb
+end
+
+--- Section / settings card header accent border (subtle, not full chroma wash).
+function ns.UI_GetSectionHeaderBorderRGBA()
+    local ac = COLORS.accent or DEFAULT_THEME_ACCENT
+    return ac[1], ac[2], ac[3], 0.45
+end
+
+local function ResolvePaletteFallbackAccent()
+    local mode = ResolveThemeMode()
+    local src = SURFACE_VARIANTS[mode] or SURFACE_VARIANTS.dark
+    local ac = src.accent or { DEFAULT_THEME_ACCENT[1], DEFAULT_THEME_ACCENT[2], DEFAULT_THEME_ACCENT[3], 1 }
+    return ac[1], ac[2], ac[3]
+end
+
+local function ResolveMasterAccentRgb()
+    local p = ns.db and ns.db.profile
+    if not p then
+        return ResolvePaletteFallbackAccent()
+    end
+    local fr, fg, fb = ResolvePaletteFallbackAccent()
+    if p.useClassColorAccent then
+        return ns.ResolveAccentColor({ fr, fg, fb })
+    end
+    local preset = p.accentPreset or "default"
+    if preset == "custom" and type(p.accentCustom) == "table" then
+        return p.accentCustom[1] or fr, p.accentCustom[2] or fg, p.accentCustom[3] or fb
+    end
+    if preset ~= "default" and ACCENT_PRESET_RGB[preset] then
+        local rgb = ACCENT_PRESET_RGB[preset]
+        return rgb[1], rgb[2], rgb[3]
+    end
+    return fr, fg, fb
+end
+
+local function ApplyDerivedThemeColors(theme, masterR, masterG, masterB)
+    COLORS.accent[1], COLORS.accent[2], COLORS.accent[3] = theme.accent[1], theme.accent[2], theme.accent[3]
+    COLORS.accentDark[1], COLORS.accentDark[2], COLORS.accentDark[3] = theme.accentDark[1], theme.accentDark[2], theme.accentDark[3]
+    COLORS.border[1], COLORS.border[2], COLORS.border[3] = theme.border[1], theme.border[2], theme.border[3]
+    COLORS.tabActive[1], COLORS.tabActive[2], COLORS.tabActive[3] = theme.tabActive[1], theme.tabActive[2], theme.tabActive[3]
+    COLORS.tabHover[1], COLORS.tabHover[2], COLORS.tabHover[3] = theme.tabHover[1], theme.tabHover[2], theme.tabHover[3]
+    local ad = theme.accentDark
+    COLORS.lootHeaderBg = {
+        ad[1] * 0.85 + 0.02,
+        ad[2] * 0.85 + 0.02,
+        ad[3] * 0.85 + 0.02,
+        1,
+    }
+    COLORS.lootHeaderBorder = {
+        math.min(1, masterR * 1.12),
+        math.min(1, masterG * 1.12),
+        math.min(1, masterB * 1.12),
+        0.88,
+    }
+    if COLORS.lootPickBorder then
+        COLORS.lootPickBorder[1] = masterR
+        COLORS.lootPickBorder[2] = masterG
+        COLORS.lootPickBorder[3] = masterB
+    end
+    if ResolveThemeMode() == "light" then
+        local bgL = COLORS.bgLight or COLORS.bg
+        for _, key in ipairs({ "tabActive", "tabHover" }) do
+            local c = COLORS[key]
+            local mix = (key == "tabActive") and 0.18 or 0.14
+            local surf = 1 - mix
+            c[1] = c[1] * mix + bgL[1] * surf
+            c[2] = c[2] * mix + bgL[2] * surf
+            c[3] = c[3] * mix + bgL[3] * surf
+        end
+    end
+end
+
+local function ApplyAccentOverrides()
+    local p = ns.db and ns.db.profile
+    if not p then
+        return
+    end
+    local preset = p.accentPreset or "default"
+    if not p.useClassColorAccent and preset == "default" then
+        return
+    end
+    local r, g, b = ResolveMasterAccentRgb()
+    local theme = ns.UI_CalculateThemeColors(r, g, b)
+    ApplyDerivedThemeColors(theme, r, g, b)
+    p.themeColors = p.themeColors or {}
+    for k, v in pairs(theme) do
+        p.themeColors[k] = { v[1], v[2], v[3] }
+    end
+end
+
+function ns.UI_GetAccentPresetRgb(presetKey)
+    if presetKey == "custom" then
+        local p = ns.db and ns.db.profile
+        if p and type(p.accentCustom) == "table" then
+            return p.accentCustom[1], p.accentCustom[2], p.accentCustom[3]
+        end
+        return 0.44, 0.32, 0.58
+    end
+    if presetKey == "default" then
+        local mode = ResolveThemeMode()
+        local src = SURFACE_VARIANTS[mode] or SURFACE_VARIANTS.dark
+        local ac = src.accent or { 0.44, 0.32, 0.58, 1 }
+        return ac[1], ac[2], ac[3]
+    end
+    local rgb = ACCENT_PRESET_RGB[presetKey]
+    if rgb then
+        return rgb[1], rgb[2], rgb[3]
+    end
+    return 0.44, 0.32, 0.58
+end
+
+local function ResolveRegistryBackdrop(frame, accentDarkColor, bgColor)
+    local bgType = frame._bgType
+    local bgAlpha = frame._bgAlpha or 1
+    if bgType == "searchChrome" then
+        return 0, 0, 0, 0
+    elseif bgType == "controlChrome" then
+        local c = ns.UI_GetControlChromeBackdrop()
+        return c[1], c[2], c[3], c[4] or bgAlpha
+    elseif bgType == "controlChromeHover" then
+        local c = ns.UI_GetControlChromeHoverBackdrop()
+        return c[1], c[2], c[3], c[4] or bgAlpha
+    elseif bgType == "bgCard" then
+        local c = COLORS.bgCard or bgColor
+        return c[1], c[2], c[3], c[4] or bgAlpha
+    elseif bgType == "lootHeader" then
+        local c = COLORS.lootHeaderBg or accentDarkColor
+        return c[1], c[2], c[3], c[4] or bgAlpha
+    elseif bgType == "accentDark" then
+        return accentDarkColor[1], accentDarkColor[2], accentDarkColor[3], bgAlpha
+    end
+    return bgColor[1], bgColor[2], bgColor[3], bgAlpha
+end
+
 local function RefreshRegisteredBorderColors()
     local registry = ns.BORDER_REGISTRY
     if not registry then return end
-    for i = 1, #registry do
+    local accentColor = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
+    local accentDarkColor = COLORS.accentDark or accentColor
+    local borderColor = COLORS.border or { 0.26, 0.24, 0.30, 1 }
+    local bgColor = COLORS.bg or { 0.065, 0.062, 0.076, 0.97 }
+    for i = #registry, 1, -1 do
         local fr = registry[i]
-        if fr and fr.BorderTop then
-            local br, bg
-            if fr._borderType == "accent" then
-                local ac = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
-                br = { ac[1], ac[2], ac[3], fr._borderAlpha or 0.6 }
+        if not fr then
+            table.remove(registry, i)
+        elseif fr.BorderTop then
+            local br
+            local alpha = fr._borderAlpha or 0.6
+            if fr._borderType == "sectionHeader" then
+                local sr, sg, sb, sa = ns.UI_GetSectionHeaderBorderRGBA()
+                br = { sr, sg, sb, sa or alpha }
+            elseif fr._borderType == "accent" then
+                br = { accentColor[1], accentColor[2], accentColor[3], alpha }
             else
-                local bd = COLORS.border or { 0.26, 0.24, 0.30, 1 }
-                br = { bd[1], bd[2], bd[3], fr._borderAlpha or 0.6 }
-            end
-            if fr._bgType == "accentDark" then
-                local ad = COLORS.accentDark or COLORS.lootHeaderBg or COLORS.bgCard
-                bg = { ad[1], ad[2], ad[3], fr._bgAlpha or 1 }
-            elseif fr._bgType == "bg" and fr.SetBackdropColor then
-                local b = COLORS.bg or { 0.065, 0.062, 0.076, 0.97 }
-                fr:SetBackdropColor(b[1], b[2], b[3], fr._bgAlpha or b[4] or 1)
+                br = { borderColor[1], borderColor[2], borderColor[3], alpha }
             end
             if ns.UI_UpdateBorderColor and br then
                 ns.UI_UpdateBorderColor(fr, br)
             end
-            if bg and fr.SetBackdropColor then
-                fr:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
+            if fr.SetBackdropColor and fr._bgType then
+                local brgb, bgg, bb, ba = ResolveRegistryBackdrop(fr, accentDarkColor, bgColor)
+                fr:SetBackdropColor(brgb, bgg, bb, ba)
             end
-            if fr._iconTexture and COLORS.accent then
-                local ac = COLORS.accent
-                fr._iconTexture:SetVertexColor(ac[1], ac[2], ac[3], 1)
+            if fr._iconTexture then
+                fr._iconTexture:SetVertexColor(accentColor[1], accentColor[2], accentColor[3], 1)
             end
-            if fr._thumbTexture and COLORS.accent then
-                local ac = COLORS.accent
-                fr._thumbTexture:SetColorTexture(ac[1], ac[2], ac[3], 0.9)
+            if fr._thumbTexture then
+                fr._thumbTexture:SetColorTexture(accentColor[1], accentColor[2], accentColor[3], 0.9)
             end
         end
     end
@@ -315,7 +546,15 @@ function ns.UI_RefreshColors()
     local mode = ResolveThemeMode()
     local src = SURFACE_VARIANTS[mode] or SURFACE_VARIANTS.dark
     CopyPalette(COLORS, src)
+    ApplyAccentOverrides()
+    ns.UI_COLORS = COLORS
     RefreshRegisteredBorderColors()
+    if ns.FontManager and ns.FontManager.RefreshThemeTypography then
+        ns.FontManager.RefreshThemeTypography()
+    end
+    if ns.UI_RefreshScrollBarColumns then
+        ns.UI_RefreshScrollBarColumns()
+    end
     if ns.UI_RefreshScrollChrome then
         ns.UI_RefreshScrollChrome()
     end

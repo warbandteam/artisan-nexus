@@ -16,6 +16,14 @@ local L = ns.L
 local COLORS = ns.UI_COLORS or {}
 local ApplyVisuals = ns.UI_ApplyVisuals
 
+local UIDropDownMenu_Initialize = UIDropDownMenu_Initialize
+local UIDropDownMenu_CreateInfo = UIDropDownMenu_CreateInfo
+local UIDropDownMenu_AddButton = UIDropDownMenu_AddButton
+local UIDropDownMenu_SetWidth = UIDropDownMenu_SetWidth
+local UIDropDownMenu_SetText = UIDropDownMenu_SetText
+
+local UI_MODE_VALUES = { "modern", "classic" }
+
 local AH_FRESH_DEFAULT_SEC = 60 * 60 * 6
 
 --- Single source for the footer strip reserve (tip text + reset buttons zone)
@@ -23,16 +31,15 @@ local AH_FRESH_DEFAULT_SEC = 60 * 60 * 6
 local SETTINGS_FOOTER_RESERVE = 38
 local SETTINGS_SCROLL_TOP_MODERN = 54
 
---- OptionsSliderTemplate ships Text/Low/High only; the current-value readout
---- FontString must be created here or every `slider.Value:SetText` no-ops.
-local SETTINGS_SLIDER_NAMES = {
-    "ArtisanNexusSettings_BagSlider",
-    "ArtisanNexusSettings_AhFreshSlider",
-    "ArtisanNexusSettings_SessionRecentSlider",
-    "ArtisanNexusSettings_SessionOverallSlider",
-    "ArtisanNexusSettings_CraftBriefingTopSlider",
-    "ArtisanNexusSettings_CraftBriefingAlertMinSlider",
-}
+local function ReapplyModernSettingsWidgetChrome()
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        return
+    end
+    local settingsUI = ns.ArtisanSettingsUI
+    if settingsUI and settingsUI.ApplyXmlThemedChrome then
+        settingsUI:ApplyXmlThemedChrome()
+    end
+end
 
 local function EnsureSliderValueText(sl)
     if not sl or sl.Value then
@@ -45,119 +52,7 @@ local function EnsureSliderValueText(sl)
     sl.Value = fs
 end
 
---- XML `UICheckButton` global names — themed like Warband `CreateThemedCheckbox`.
-local SETTINGS_CHECKBOX_NAMES = {
-    "ArtisanNexusSettings_Minimap",
-    "ArtisanNexusSettings_LoginChat",
-    "ArtisanNexusSettings_LightTheme",
-    "ArtisanNexusSettings_ClassicUi",
-    "ArtisanNexusSettings_Gathering",
-    "ArtisanNexusSettings_Fishing",
-    "ArtisanNexusSettings_OverloadInd",
-    "ArtisanNexusSettings_OverloadHud",
-    "ArtisanNexusSettings_OverloadCastBtn",
-    "ArtisanNexusSettings_BagGuard",
-    "ArtisanNexusSettings_LootHistory",
-    "ArtisanNexusSettings_LootAuto",
-    "ArtisanNexusSettings_Debug",
-    "ArtisanNexusSettings_PostingUndercut",
-    "ArtisanNexusSettings_PostingAverage",
-    "ArtisanNexusSettings_PostingMax",
-    "ArtisanNexusSettings_CraftBriefing",
-    "ArtisanNexusSettings_CraftBriefingChat",
-    "ArtisanNexusSettings_CraftBriefingOwned",
-    "ArtisanNexusSettings_CraftBriefingAlert",
-    "ArtisanNexusSettings_CraftBriefingConc",
-    "ArtisanNexusSettings_CraftBriefingEquip",
-    "ArtisanNexusSettings_CraftBriefingPriceSpot",
-    "ArtisanNexusSettings_CraftBriefingPriceAvg",
-}
-
-local SETTINGS_SECTION_FRAMES = {
-    "ArtisanNexusSettings_TitleGeneral",
-    "ArtisanNexusSettings_TitleGathering",
-    "ArtisanNexusSettings_TitleLoot",
-    "ArtisanNexusSettings_TitleCraftBriefing",
-    "ArtisanNexusSettings_TitleAdvanced",
-}
-
---- Checkbox groups laid out in 2–3 columns (positions computed in Lua; XML keeps widget defs only).
-local SETTINGS_GRID_SECTIONS = {
-    {
-        title = "ArtisanNexusSettings_TitleGeneral",
-        cols = 2,
-        checks = {
-            "ArtisanNexusSettings_Minimap",
-            "ArtisanNexusSettings_LoginChat",
-            "ArtisanNexusSettings_LightTheme",
-            "ArtisanNexusSettings_ClassicUi",
-        },
-    },
-    {
-        title = "ArtisanNexusSettings_TitleGathering",
-        cols = 2,
-        checks = {
-            "ArtisanNexusSettings_Gathering",
-            "ArtisanNexusSettings_Fishing",
-            "ArtisanNexusSettings_OverloadInd",
-            "ArtisanNexusSettings_OverloadHud",
-            "ArtisanNexusSettings_OverloadCastBtn",
-            "ArtisanNexusSettings_BagGuard",
-        },
-        sliders = { "ArtisanNexusSettings_BagSlider" },
-    },
-    {
-        title = "ArtisanNexusSettings_TitleLoot",
-        cols = 2,
-        checks = {
-            "ArtisanNexusSettings_LootHistory",
-            "ArtisanNexusSettings_LootAuto",
-        },
-        sliders = {
-            "ArtisanNexusSettings_SessionRecentSlider",
-            "ArtisanNexusSettings_SessionOverallSlider",
-        },
-    },
-    {
-        title = "ArtisanNexusSettings_TitleCraftBriefing",
-        cols = 2,
-        checks = {
-            "ArtisanNexusSettings_CraftBriefing",
-            "ArtisanNexusSettings_CraftBriefingChat",
-            "ArtisanNexusSettings_CraftBriefingOwned",
-            "ArtisanNexusSettings_CraftBriefingAlert",
-            "ArtisanNexusSettings_CraftBriefingConc",
-            "ArtisanNexusSettings_CraftBriefingEquip",
-        },
-        sliders = {
-            "ArtisanNexusSettings_CraftBriefingAlertMinSlider",
-            "ArtisanNexusSettings_CraftBriefingTopSlider",
-        },
-        labelFrames = { "ArtisanNexusSettings_CraftBriefingPriceFrame" },
-        tailChecks = {
-            "ArtisanNexusSettings_CraftBriefingPriceSpot",
-            "ArtisanNexusSettings_CraftBriefingPriceAvg",
-        },
-        tailCols = 2,
-    },
-    {
-        title = "ArtisanNexusSettings_TitleAdvanced",
-        cols = 1,
-        checks = { "ArtisanNexusSettings_Debug" },
-        labelFrames = { "ArtisanNexusSettings_PostingLabelFrame" },
-        tailChecks = {
-            "ArtisanNexusSettings_PostingUndercut",
-            "ArtisanNexusSettings_PostingAverage",
-            "ArtisanNexusSettings_PostingMax",
-        },
-        tailCols = 2,
-        sliders = { "ArtisanNexusSettings_AhFreshSlider" },
-        resetButtons = {
-            "ArtisanNexusSettings_ResetSession",
-            "ArtisanNexusSettings_ResetOverall",
-        },
-    },
-}
+--- Control name lists + grid layout: ArtisanSettingsUI_Layout.lua (loaded after this file).
 
 local ArtisanSettingsUI = {
     frame = nil,
@@ -283,6 +178,38 @@ local function SetLootHistoryEnabled(v)
     end
 end
 
+local function SetSessionLootOverlayEnabled(v)
+    ArtisanNexus.db.profile.sessionLootOverlayEnabled = v and true or false
+    if ns.SessionLootOverlayUI then
+        if v and ns.SessionLootOverlayUI.Open then
+            ns.SessionLootOverlayUI:Open()
+        elseif ns.SessionLootOverlayUI.Hide then
+            ns.SessionLootOverlayUI:Hide()
+        end
+    end
+    if ns.LootHistoryUI and ns.LootHistoryUI.UpdateLootOverlayToggle then
+        ns.LootHistoryUI:UpdateLootOverlayToggle()
+    end
+end
+
+local function RefreshOverlayPositionButtonLabel()
+    local btn = _G.ArtisanNexusSettings_LootOverlayPosition
+    if not btn or not btn.SetText then
+        return
+    end
+    local editing = ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.IsPositionEditing
+        and ns.SessionLootOverlayUI:IsPositionEditing()
+    if editing then
+        btn:SetText((L and L["CONFIG_LOOT_OVERLAY_POSITION_ACTIVE"]) or "Done positioning")
+    else
+        btn:SetText((L and L["CONFIG_LOOT_OVERLAY_POSITION"]) or "Position overlay")
+    end
+end
+
+function ArtisanSettingsUI:RefreshOverlayPositionButton()
+    RefreshOverlayPositionButtonLabel()
+end
+
 local function SetPostingStrategy(strat)
     local p = ArtisanNexus.db.profile
     p.posting = p.posting or {}
@@ -325,6 +252,247 @@ local function CheckText(btn, label)
     btn.Text:SetText(label or "")
 end
 
+local function NormalizeUiMode(mode)
+    return mode == "classic" and "classic" or "modern"
+end
+
+local function UiModeDisplayText(mode)
+    if mode == "classic" then
+        return (L and L["CONFIG_UI_MODE_CLASSIC"]) or "Classic"
+    end
+    return (L and L["CONFIG_UI_MODE_MODERN"]) or "Modern"
+end
+
+local function ApplyUiModeSelection(mode)
+    mode = NormalizeUiMode(mode)
+    local cur = NormalizeUiMode(ArtisanNexus.db.profile.uiMode)
+    if mode == cur then
+        ArtisanSettingsUI:RefreshUiModeDropdown()
+        return
+    end
+    ArtisanNexus.db.profile.uiMode = mode
+    ReloadUI()
+end
+
+local function InitializeUiModeDropDown(self, level)
+    local info = UIDropDownMenu_CreateInfo()
+    for i = 1, #UI_MODE_VALUES do
+        local mode = UI_MODE_VALUES[i]
+        info.text = UiModeDisplayText(mode)
+        info.value = mode
+        info.checked = (NormalizeUiMode(ArtisanNexus.db.profile.uiMode) == mode)
+        info.func = function()
+            ApplyUiModeSelection(mode)
+            CloseDropDownMenus()
+        end
+        UIDropDownMenu_AddButton(info)
+    end
+end
+
+local ACCENT_PRESET_IDS = ns.UI_ACCENT_PRESET_IDS or {
+    "default", "violet", "gold", "teal", "rose", "cobalt", "custom",
+}
+
+local ACCENT_LOCALE_KEYS = {
+    default = "CONFIG_ACCENT_PRESET_DEFAULT",
+    violet = "CONFIG_ACCENT_PRESET_VIOLET",
+    gold = "CONFIG_ACCENT_PRESET_GOLD",
+    teal = "CONFIG_ACCENT_PRESET_TEAL",
+    rose = "CONFIG_ACCENT_PRESET_ROSE",
+    cobalt = "CONFIG_ACCENT_PRESET_COBALT",
+    custom = "CONFIG_ACCENT_PRESET_CUSTOM",
+}
+
+local function AccentPresetDisplayText(presetKey)
+    local locKey = ACCENT_LOCALE_KEYS[presetKey]
+    if locKey and L and L[locKey] then
+        return L[locKey]
+    end
+    return presetKey or "Default"
+end
+
+local function NormalizeAccentPreset(preset)
+    for i = 1, #ACCENT_PRESET_IDS do
+        if ACCENT_PRESET_IDS[i] == preset then
+            return preset
+        end
+    end
+    return "default"
+end
+
+local function ApplyAccentPresetSelection(preset)
+    preset = NormalizeAccentPreset(preset)
+    ArtisanNexus.db.profile.accentPreset = preset
+    ArtisanNexus:RefreshTheme()
+    ArtisanSettingsUI:RefreshAccentControls()
+    if preset == "custom" then
+        ArtisanSettingsUI:OpenAccentColorPicker()
+    end
+end
+
+local function InitializeAccentDropDown(self, level)
+    local info = UIDropDownMenu_CreateInfo()
+    local cur = NormalizeAccentPreset(ArtisanNexus.db.profile.accentPreset)
+    for i = 1, #ACCENT_PRESET_IDS do
+        local preset = ACCENT_PRESET_IDS[i]
+        info.text = AccentPresetDisplayText(preset)
+        info.value = preset
+        info.checked = (cur == preset)
+        info.func = function()
+            ApplyAccentPresetSelection(preset)
+            CloseDropDownMenus()
+        end
+        UIDropDownMenu_AddButton(info)
+    end
+end
+
+function ArtisanSettingsUI:OpenAccentColorPicker()
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        return
+    end
+    if ArtisanNexus.db.profile.useClassColorAccent then
+        return
+    end
+    local p = ArtisanNexus.db.profile
+    p.accentCustom = p.accentCustom or { 0.44, 0.32, 0.58 }
+    local r, g, b = p.accentCustom[1], p.accentCustom[2], p.accentCustom[3]
+    if ColorPickerFrame and ColorPickerFrame.SetupColorPickerAndShow then
+        local prevR, prevG, prevB = r, g, b
+        local pendingR, pendingG, pendingB = r, g, b
+        local cancelled = false
+        local function ApplyPending()
+            p.accentCustom = { pendingR, pendingG, pendingB }
+            p.accentPreset = "custom"
+            ArtisanNexus:RefreshTheme()
+            ArtisanSettingsUI:RefreshAccentControls()
+        end
+        local info = {
+            r = r,
+            g = g,
+            b = b,
+            hasOpacity = false,
+            swatchFunc = function()
+                if ColorPickerFrame then
+                    pendingR, pendingG, pendingB = ColorPickerFrame:GetColorRGB()
+                end
+            end,
+            cancelFunc = function()
+                cancelled = true
+                pendingR, pendingG, pendingB = prevR, prevG, prevB
+                ApplyPending()
+            end,
+        }
+        ColorPickerFrame:SetupColorPickerAndShow(info)
+        if C_Timer and C_Timer.NewTicker then
+            local ticker
+            ticker = C_Timer.NewTicker(0.15, function()
+                if cancelled then
+                    ticker:Cancel()
+                    return
+                end
+                if not ColorPickerFrame or not ColorPickerFrame.IsShown or not ColorPickerFrame:IsShown() then
+                    ticker:Cancel()
+                    ApplyPending()
+                end
+            end)
+        end
+        return
+    end
+    if ColorPickerFrame then
+        ColorPickerFrame.func = function()
+            local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+            p.accentCustom = { nr, ng, nb }
+            p.accentPreset = "custom"
+            ArtisanNexus:RefreshTheme()
+            ArtisanSettingsUI:RefreshAccentControls()
+        end
+        ColorPickerFrame:SetColorRGB(r, g, b)
+        ColorPickerFrame:Show()
+    end
+end
+
+function ArtisanSettingsUI:RefreshAccentDropdown()
+    local dd = _G.ArtisanNexusSettings_AccentDropDown
+    if not dd then
+        return
+    end
+    UIDropDownMenu_SetWidth(dd, self.GetSettingsDropdownWidth and self:GetSettingsDropdownWidth() or 180)
+    UIDropDownMenu_SetText(dd, AccentPresetDisplayText(NormalizeAccentPreset(ArtisanNexus.db.profile.accentPreset)))
+    if ns.UI_StyleSettingsDropDown then
+        ns.UI_StyleSettingsDropDown(dd)
+    end
+end
+
+function ArtisanSettingsUI:RefreshAccentSwatch()
+    local btn = _G.ArtisanNexusSettings_AccentSwatch
+    if not btn then
+        return
+    end
+    if not btn._anSwatchTex then
+        btn._anSwatchTex = btn:CreateTexture(nil, "ARTWORK")
+        btn._anSwatchTex:SetPoint("TOPLEFT", 3, -3)
+        btn._anSwatchTex:SetPoint("BOTTOMRIGHT", -3, 3)
+        if btn.SetText then
+            btn:SetText("")
+        end
+    end
+    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
+    local preset = NormalizeAccentPreset(ArtisanNexus.db.profile.accentPreset)
+    local show = (preset == "custom") and not classic
+    btn:SetShown(show)
+    if not show then
+        return
+    end
+    local r, g, b = ns.UI_GetAccentPresetRgb("custom")
+    btn._anSwatchTex:SetColorTexture(r, g, b, 1)
+end
+
+function ArtisanSettingsUI:SyncAccentAvailability()
+    local classic = ArtisanNexus.db.profile.uiMode == "classic"
+    local classAccent = ArtisanNexus.db.profile.useClassColorAccent and true or false
+    local disabled = classic or classAccent
+    local frame = _G.ArtisanNexusSettings_AccentFrame
+    local dd = _G.ArtisanNexusSettings_AccentDropDown
+    local label = _G.ArtisanNexusSettings_AccentLabel
+    local swatch = _G.ArtisanNexusSettings_AccentSwatch
+    if dd and dd.SetEnabled then
+        dd:SetEnabled(not disabled)
+    end
+    if frame and frame.SetEnabled then
+        frame:SetEnabled(not classic)
+    end
+    if swatch and swatch.SetEnabled then
+        swatch:SetEnabled(not disabled)
+    end
+    if label and label.SetTextColor then
+        if classic or classAccent then
+            label:SetTextColor(0.5, 0.5, 0.5)
+        else
+            local tn = COLORS.textNormal or { 0.82, 0.80, 0.86, 1 }
+            label:SetTextColor(tn[1], tn[2], tn[3], tn[4] or 1)
+        end
+    end
+    local classCb = _G.ArtisanNexusSettings_ClassColorAccent
+    if classCb and classCb.SetEnabled then
+        classCb:SetEnabled(not classic)
+    end
+    if classCb and classCb.Text and classCb.Text.SetTextColor then
+        if classic then
+            classCb.Text:SetTextColor(0.5, 0.5, 0.5)
+        else
+            local tn = COLORS.textNormal or { 0.82, 0.80, 0.86, 1 }
+            classCb.Text:SetTextColor(tn[1], tn[2], tn[3], tn[4] or 1)
+        end
+    end
+    self:RefreshAccentSwatch()
+end
+
+function ArtisanSettingsUI:RefreshAccentControls()
+    self:RefreshAccentDropdown()
+    self:RefreshAccentSwatch()
+    self:SyncAccentAvailability()
+end
+
 function ArtisanSettingsUI:GetRoot()
     if self.frame then
         return self.frame
@@ -338,126 +506,6 @@ function ArtisanSettingsUI:GetRoot()
 end
 
 --- Two/three-column settings layout; scroll child height derived from placed widgets.
-function ArtisanSettingsUI:LayoutContentGrid()
-    local content = _G.ArtisanNexusSettings_ScrollContent
-    local scroll = _G.ArtisanNexusSettings_Scroll
-    if not content then
-        return
-    end
-    local PAD = 16
-    local GAP_X = 12
-    local GAP_Y = 10
-    local ROW_H = 32
-    local TITLE_H = 26
-    local SECTION_GAP = 18
-    local SLIDER_H = 34
-    local LABEL_H = 22
-    local FULL_GAP = 12
-
-    local scrollW = (scroll and scroll:GetWidth()) or 556
-    local usableW = max(320, scrollW - PAD * 2)
-
-    local y = -12
-
-    local function placeTitle(name)
-        local fr = _G[name]
-        if not fr then
-            return
-        end
-        fr:ClearAllPoints()
-        fr:SetPoint("TOPLEFT", content, "TOPLEFT", PAD, y)
-        fr:SetWidth(usableW)
-        y = y - TITLE_H - 8
-    end
-
-    local function placeChecks(names, cols)
-        if not names or #names < 1 then
-            return
-        end
-        cols = cols or 2
-        local colW = floor((usableW - (cols - 1) * GAP_X) / cols)
-        local startY = y
-        for i = 1, #names do
-            local btn = _G[names[i]]
-            if btn then
-                local col = (i - 1) % cols
-                local row = floor((i - 1) / cols)
-                local x = PAD + col * (colW + GAP_X)
-                local rowY = startY - row * (ROW_H + GAP_Y)
-                btn:ClearAllPoints()
-                btn:SetPoint("TOPLEFT", content, "TOPLEFT", x, rowY)
-                if btn.Text and btn.Text.SetWidth then
-                    btn.Text:SetWidth(max(120, colW - 28))
-                    btn.Text:SetWordWrap(true)
-                    btn.Text:SetMaxLines(2)
-                    btn.Text:SetJustifyH("LEFT")
-                end
-            end
-        end
-        local rows = ceil(#names / cols)
-        y = startY - rows * ROW_H - max(0, rows - 1) * GAP_Y - SECTION_GAP
-    end
-
-    local function placeSliders(names)
-        if not names then
-            return
-        end
-        for i = 1, #names do
-            local sl = _G[names[i]]
-            if sl then
-                sl:ClearAllPoints()
-                sl:SetPoint("TOPLEFT", content, "TOPLEFT", PAD, y)
-                sl:SetWidth(min(usableW, 420))
-                y = y - SLIDER_H - FULL_GAP
-            end
-        end
-    end
-
-    local function placeLabelFrames(names)
-        if not names then
-            return
-        end
-        for i = 1, #names do
-            local fr = _G[names[i]]
-            if fr then
-                fr:ClearAllPoints()
-                fr:SetPoint("TOPLEFT", content, "TOPLEFT", PAD, y)
-                fr:SetWidth(usableW)
-                y = y - LABEL_H - 8
-            end
-        end
-    end
-
-    local function placeResetButtons(names)
-        if not names then
-            return
-        end
-        for i = 1, #names do
-            local btn = _G[names[i]]
-            if btn then
-                btn:ClearAllPoints()
-                btn:SetPoint("TOPLEFT", content, "TOPLEFT", PAD, y)
-                btn:SetWidth(usableW)
-                y = y - 30 - 8
-            end
-        end
-    end
-
-    for s = 1, #SETTINGS_GRID_SECTIONS do
-        local sec = SETTINGS_GRID_SECTIONS[s]
-        placeTitle(sec.title)
-        placeChecks(sec.checks, sec.cols)
-        placeSliders(sec.sliders)
-        placeLabelFrames(sec.labelFrames)
-        if sec.tailChecks then
-            placeChecks(sec.tailChecks, sec.tailCols or 2)
-        end
-        placeResetButtons(sec.resetButtons)
-    end
-
-    content:SetHeight(max(420, -y + 48))
-end
-
 function ArtisanSettingsUI:ApplySettingsHeaderClip()
     local header = _G.ArtisanNexusSettings_Header
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
@@ -509,7 +557,17 @@ function ArtisanSettingsUI:ApplyLocalizedStaticText()
     CheckText(_G.ArtisanNexusSettings_Minimap, (L and L["CONFIG_MINIMAP_BUTTON"]) or "")
     CheckText(_G.ArtisanNexusSettings_LoginChat, (L and L["CONFIG_SHOW_LOGIN_CHAT"]) or "")
     CheckText(_G.ArtisanNexusSettings_LightTheme, (L and L["CONFIG_LIGHT_THEME"]) or "Light theme")
-    CheckText(_G.ArtisanNexusSettings_ClassicUi, (L and L["CONFIG_CLASSIC_UI"]) or "Classic UI")
+    CheckText(_G.ArtisanNexusSettings_ClassColorAccent, (L and L["CONFIG_USE_CLASS_COLOR_ACCENT"]) or "Use class color as accent")
+
+    local uiModeLabel = _G.ArtisanNexusSettings_UiModeLabel
+    if uiModeLabel then
+        uiModeLabel:SetText((L and L["CONFIG_UI_MODE"]) or "Interface style")
+    end
+
+    local accentLabel = _G.ArtisanNexusSettings_AccentLabel
+    if accentLabel then
+        accentLabel:SetText((L and L["CONFIG_ACCENT_COLOR"]) or "Accent color")
+    end
 
     CheckText(_G.ArtisanNexusSettings_Gathering, (L and L["CONFIG_GATHERING_LOOT"]) or "")
     CheckText(_G.ArtisanNexusSettings_Fishing, (L and L["CONFIG_FISHING_MODULE"]) or "Fishing module")
@@ -520,6 +578,7 @@ function ArtisanSettingsUI:ApplyLocalizedStaticText()
 
     CheckText(_G.ArtisanNexusSettings_LootHistory, (L and L["CONFIG_LOOT_HISTORY_ENABLED"]) or "")
     CheckText(_G.ArtisanNexusSettings_LootAuto, (L and L["CONFIG_LOOT_HISTORY_AUTO_OPEN"]) or "")
+    CheckText(_G.ArtisanNexusSettings_LootOverlay, (L and L["CONFIG_LOOT_OVERLAY"]) or "")
 
     CheckText(_G.ArtisanNexusSettings_Debug, (L and L["CONFIG_DEBUG"]) or "")
 
@@ -580,14 +639,17 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
     if not StyleCb or not StyleSec then
         return
     end
-    for i = 1, #SETTINGS_SECTION_FRAMES do
-        StyleSec(_G[SETTINGS_SECTION_FRAMES[i]])
+    local sectionFrames = ArtisanSettingsUI.SETTINGS_SECTION_FRAMES or {}
+    local checkboxNames = ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES or {}
+    local sliderNames = ArtisanSettingsUI.SETTINGS_SLIDER_NAMES or {}
+    for i = 1, #sectionFrames do
+        StyleSec(_G[sectionFrames[i]])
     end
-    for i = 1, #SETTINGS_CHECKBOX_NAMES do
-        StyleCb(_G[SETTINGS_CHECKBOX_NAMES[i]])
+    for i = 1, #checkboxNames do
+        StyleCb(_G[checkboxNames[i]])
     end
 
-    --- Radio-group cards: mode-aware and re-runnable (classic inset <-> pixel chrome).
+    --- Radio-group cards for multi-option rows only; dropdown rows stay inline (WN Theme tab parity).
     local function StyleRadioCard(fr)
         if not fr then
             return
@@ -603,8 +665,45 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
                 { b[1], b[2], b[3], 0.45 })
         end
     end
+    local function ClearInlineRowFrame(fr)
+        if not fr then
+            return
+        end
+        if ns.UI_SuppressArtisanChrome then
+            ns.UI_SuppressArtisanChrome(fr)
+        end
+        if fr.SetBackdropColor then
+            pcall(function()
+                fr:SetBackdropColor(0, 0, 0, 0)
+            end)
+        end
+    end
     StyleRadioCard(_G.ArtisanNexusSettings_PostingLabelFrame)
     StyleRadioCard(_G.ArtisanNexusSettings_CraftBriefingPriceFrame)
+    ClearInlineRowFrame(_G.ArtisanNexusSettings_UiModeFrame)
+    ClearInlineRowFrame(_G.ArtisanNexusSettings_AccentFrame)
+
+    if ns.UI_StyleSettingsDropDown then
+        ns.UI_StyleSettingsDropDown(_G.ArtisanNexusSettings_UiModeDropDown)
+        ns.UI_StyleSettingsDropDown(_G.ArtisanNexusSettings_AccentDropDown)
+    end
+
+    local function tintInlineLabel(fs)
+        if not fs or not fs.SetTextColor then
+            return
+        end
+        if classic then
+            fs:SetTextColor(1, 0.82, 0, 1)
+            return
+        end
+        local role = (fs == _G.ArtisanNexusSettings_UiModeLabel or fs == _G.ArtisanNexusSettings_AccentLabel) and "normal" or "bright"
+        local c = role == "normal" and (COLORS.textNormal or { 0.88, 0.84, 0.92, 1 }) or (COLORS.textBright or { 0.98, 0.97, 0.99, 1 })
+        fs:SetTextColor(c[1], c[2], c[3], c[4] or 1)
+    end
+    tintInlineLabel(_G.ArtisanNexusSettings_UiModeLabel)
+    tintInlineLabel(_G.ArtisanNexusSettings_AccentLabel)
+    tintInlineLabel(_G.ArtisanNexusSettings_PostingLabel)
+    tintInlineLabel(_G.ArtisanNexusSettings_CraftBriefingPriceLabel)
 
     local function tintSliderFonts(sl)
         if not sl then return end
@@ -617,21 +716,51 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
             if sl.Value then sl.Value:SetTextColor(1, 1, 1, 1) end
             return
         end
-        local tb = COLORS.textBright or { 0.98, 0.97, 0.99, 1 }
+        local tb = COLORS.textNormal or { 0.88, 0.84, 0.92, 1 }
         local dim = COLORS.textDim or { 0.58, 0.54, 0.64, 1 }
+        local muted = COLORS.textMuted or { 0.72, 0.68, 0.78, 1 }
         if sl.Text then sl.Text:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1) end
         if sl.Low then sl.Low:SetTextColor(dim[1], dim[2], dim[3], dim[4] or 1) end
         if sl.High then sl.High:SetTextColor(dim[1], dim[2], dim[3], dim[4] or 1) end
-        if sl.Value then sl.Value:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1) end
+        if sl.Value then sl.Value:SetTextColor(muted[1], muted[2], muted[3], muted[4] or 1) end
     end
-    for i = 1, #SETTINGS_SLIDER_NAMES do
-        tintSliderFonts(_G[SETTINGS_SLIDER_NAMES[i]])
+    for i = 1, #sliderNames do
+        local sl = _G[sliderNames[i]]
+        if ns.UI_StyleSettingsSlider then
+            ns.UI_StyleSettingsSlider(sl)
+        end
+        tintSliderFonts(sl)
+        if self.LayoutSettingsSliderRow and sl then
+            local scroll = _G.ArtisanNexusSettings_Scroll
+            local scrollW = (scroll and scroll:GetWidth()) or 556
+            local layout = self.SETTINGS_LAYOUT or {}
+            local usableW = max(320, scrollW - (layout.PAD or 16) * 2)
+            self:LayoutSettingsSliderRow(sl, usableW)
+        end
+    end
+    if ns.UI_StyleSettingsPanelButton then
+        ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_LootOverlayPosition)
+    end
+    if not classic and self.ApplySettingsTypography then
+        self:ApplySettingsTypography()
+    end
+end
+
+function ArtisanSettingsUI:RefreshUiModeDropdown()
+    local dd = _G.ArtisanNexusSettings_UiModeDropDown
+    if not dd then
+        return
+    end
+    UIDropDownMenu_SetWidth(dd, self.GetSettingsDropdownWidth and self:GetSettingsDropdownWidth() or 180)
+    UIDropDownMenu_SetText(dd, UiModeDisplayText(NormalizeUiMode(ArtisanNexus.db.profile.uiMode)))
+    if ns.UI_StyleSettingsDropDown then
+        ns.UI_StyleSettingsDropDown(dd)
     end
 end
 
 function ArtisanSettingsUI:SyncThemedToggleDots()
-    for i = 1, #SETTINGS_CHECKBOX_NAMES do
-        local b = _G[SETTINGS_CHECKBOX_NAMES[i]]
+    for i = 1, #ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES do
+        local b = _G[ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES[i]]
         if b and b.anThemedDot then
             b.anThemedDot:SetShown(b:GetChecked())
         end
@@ -660,6 +789,9 @@ function ArtisanSettingsUI:SyncLightThemeAvailability()
                 lt.Text:SetTextColor(tn[1], tn[2], tn[3], tn[4] or 1)
             end
         end
+    end
+    if ArtisanSettingsUI.SyncAccentAvailability then
+        ArtisanSettingsUI:SyncAccentAvailability()
     end
 end
 
@@ -763,6 +895,14 @@ function ArtisanSettingsUI:ApplyChrome()
     if ns.UI_StyleSettingsPanelButton then
         ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_ResetSession)
         ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_ResetOverall)
+        ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_LootOverlayPosition)
+    end
+    if ns.UI_StyleSettingsDropDown then
+        ns.UI_StyleSettingsDropDown(_G.ArtisanNexusSettings_UiModeDropDown)
+        ns.UI_StyleSettingsDropDown(_G.ArtisanNexusSettings_AccentDropDown)
+    end
+    if ns.UI_StyleSettingsPanelButton then
+        ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_AccentSwatch)
     end
 end
 
@@ -774,18 +914,38 @@ function ArtisanSettingsUI:InstallSettingsScroll()
     local scroll = _G.ArtisanNexusSettings_Scroll
     local f = self:GetRoot()
     local header = _G.ArtisanNexusSettings_Header
-    if not scroll or not f or not header or scroll._anModernScrollInstalled then
+    if not scroll or not f or not header then
         return
     end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         return
     end
-    scroll._anModernScrollInstalled = true
 
     local Factory = ns.UI and ns.UI.Factory
     if not Factory or not Factory.InstallScrollBarStyle then
         return
     end
+
+    if scroll._anModernScrollInstalled then
+        Factory:InstallScrollBarStyle(scroll)
+        local barCol = scroll._anScrollBarColumn
+        if not barCol then
+            barCol = Factory:CreateScrollBarColumn(f, nil, SETTINGS_SCROLL_TOP_MODERN, SETTINGS_FOOTER_RESERVE)
+            scroll._anScrollBarColumn = barCol
+        elseif Factory.EnsureScrollBarColumnChrome then
+            Factory:EnsureScrollBarColumnChrome(barCol)
+        end
+        scroll._anExternalBarColumn = true
+        if scroll.ScrollBar and barCol then
+            Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0, scroll)
+        end
+        if ns.UI_FinishScrollLayout then
+            ns.UI_FinishScrollLayout(scroll)
+        end
+        self:LayoutContentGrid()
+        return
+    end
+    scroll._anModernScrollInstalled = true
 
     Factory:InstallScrollBarStyle(scroll)
     local barCol = scroll._anScrollBarColumn
@@ -803,7 +963,7 @@ function ArtisanSettingsUI:InstallSettingsScroll()
     scroll._anScrollAnchorTL = { a1 = "TOPLEFT", frame = header, a2 = "BOTTOMLEFT", x = 4, y = -8 }
     scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = f, a2 = "BOTTOMRIGHT", x = -4, y = SETTINGS_FOOTER_RESERVE }
     scroll._anScrollAnchorBRShown = { a1 = "BOTTOMRIGHT", frame = barCol, a2 = "BOTTOMLEFT", x = -2, y = 0 }
-    Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0)
+    Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0, scroll)
     if ns.UI_FinishScrollLayout then
         ns.UI_FinishScrollLayout(scroll)
     end
@@ -860,6 +1020,7 @@ function ArtisanSettingsUI:ApplyClassicSettingsScroll(scroll, f, header)
         scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -4, footerReserve)
     end
     scroll._anClassicScroll = true
+    scroll._anModernScrollInstalled = nil
     scroll._anScrollAnchorTL = { a1 = "TOPLEFT", frame = f, a2 = "TOPLEFT", x = 4, y = -scrollTopInset }
     scroll._anScrollAnchorBRShown = col and { a1 = "BOTTOMRIGHT", frame = col, a2 = "BOTTOMLEFT", x = -gap, y = 0 } or nil
     scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = f, a2 = "BOTTOMRIGHT", x = -4, y = footerReserve }
@@ -904,6 +1065,9 @@ function ArtisanSettingsUI:SyncScrollSkin()
         self:InstallSettingsScroll()
     end
     if not scroll._anClassicScroll and not firstInstall then
+        if ns.UI_ApplyModernScrollBarLayout then
+            ns.UI_ApplyModernScrollBarLayout(scroll)
+        end
         return
     end
     scroll._anClassicScroll = nil
@@ -911,60 +1075,15 @@ function ArtisanSettingsUI:SyncScrollSkin()
         scroll.UpdateScrollBarVisibility = scroll._anSavedUpdateVis
         scroll._anSavedUpdateVis = nil
     end
-    local bar = scroll.ScrollBar
+    if ns.UI_ApplyModernScrollBarLayout then
+        ns.UI_ApplyModernScrollBarLayout(scroll)
+    end
     local col = scroll._anScrollBarColumn
     if col then
-        --- Column insets were re-resolved for the classic dialog; snap back.
         col:ClearAllPoints()
         col:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, -SETTINGS_SCROLL_TOP_MODERN)
         col:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, SETTINGS_FOOTER_RESERVE)
         col:Show()
-    end
-    if bar then
-        if bar.ScrollUpButton then
-            bar.ScrollUpButton:Hide()
-            bar.ScrollUpButton:SetSize(0.1, 0.1)
-        end
-        if bar.ScrollDownButton then
-            bar.ScrollDownButton:Hide()
-            bar.ScrollDownButton:SetSize(0.1, 0.1)
-        end
-        --- Classic rail art (UI-Character-ScrollBar slices) lives on the same
-        --- template bar; it must not stay visible behind the modern thumb.
-        for _, key in ipairs({ "Top", "Middle", "Bottom", "Background" }) do
-            local tex = bar[key]
-            if tex and tex.Hide then
-                tex:Hide()
-            end
-        end
-        if bar.CustomTrack then
-            bar.CustomTrack:Show()
-        end
-        if ns.UI_RestoreArtisanChrome then
-            ns.UI_RestoreArtisanChrome(bar)
-        end
-        if bar.ThumbTexture then
-            local ac = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
-            local layout = ns.UI_LAYOUT or {}
-            bar.ThumbTexture:SetColorTexture(ac[1], ac[2], ac[3], 0.9)
-            bar.ThumbTexture:SetSize(layout.SCROLL_BAR_WIDTH or 16, 60)
-        end
-        bar:SetScript("OnEnter", function(s)
-            if s.ThumbTexture then
-                local a = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
-                s.ThumbTexture:SetColorTexture(min(1, a[1] * 1.2), min(1, a[2] * 1.2), min(1, a[3] * 1.2), 1)
-            end
-        end)
-        bar:SetScript("OnLeave", function(s)
-            if s.ThumbTexture then
-                local a = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
-                s.ThumbTexture:SetColorTexture(a[1], a[2], a[3], 0.9)
-            end
-        end)
-        local Factory = ns.UI and ns.UI.Factory
-        if Factory and col then
-            Factory:PositionScrollBarInContainer(bar, col, 0)
-        end
     end
     scroll:ClearAllPoints()
     local tl = scroll._anScrollAnchorTL
@@ -990,14 +1109,20 @@ function ArtisanSettingsUI:RefreshThemeChrome()
     --- Mode-reversible chrome first: themed toggles / section strips / radio
     --- cards flip between skins, and the scroll column swaps with the template
     --- scrollbar. Both are idempotent, so re-running on theme refresh is safe.
-    if self.wired then
-        self:ApplyXmlThemedChrome()
-    end
+    self:ApplyXmlThemedChrome()
     self:SyncScrollSkin()
     --- Reset buttons flip between template art (Classic) and pixel chrome (Modern).
     if ns.UI_StyleSettingsPanelButton then
         ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_ResetSession)
         ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_ResetOverall)
+        ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_LootOverlayPosition)
+    end
+    if ns.UI_StyleSettingsDropDown then
+        ns.UI_StyleSettingsDropDown(_G.ArtisanNexusSettings_UiModeDropDown)
+        ns.UI_StyleSettingsDropDown(_G.ArtisanNexusSettings_AccentDropDown)
+    end
+    if ns.UI_StyleSettingsPanelButton then
+        ns.UI_StyleSettingsPanelButton(_G.ArtisanNexusSettings_AccentSwatch)
     end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         local f = self:GetRoot()
@@ -1016,8 +1141,8 @@ function ArtisanSettingsUI:RefreshThemeChrome()
         if fh then
             fh:SetTextColor(0.8, 0.8, 0.8)
         end
-        for i = 1, #SETTINGS_CHECKBOX_NAMES do
-            local b = _G[SETTINGS_CHECKBOX_NAMES[i]]
+        for i = 1, #ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES do
+            local b = _G[ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES[i]]
             if b and b.Text then
                 b.Text:SetTextColor(1, 1, 1)
             end
@@ -1044,18 +1169,25 @@ function ArtisanSettingsUI:RefreshThemeChrome()
             fs:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1)
         end
     end
-    for i = 1, #SETTINGS_SECTION_FRAMES do
-        local sec = _G[SETTINGS_SECTION_FRAMES[i]]
+    for i = 1, #ArtisanSettingsUI.SETTINGS_SECTION_FRAMES do
+        local sec = _G[ArtisanSettingsUI.SETTINGS_SECTION_FRAMES[i]]
         if sec and sec._anTitleText and sec._anTitleText.SetTextColor then
             sec._anTitleText:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1)
         end
-        if sec and sec.BorderTop and ns.UI_UpdateBorderColor then
-            local ac = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
-            local brBase = COLORS.lootHeaderBorder or { ac[1], ac[2], ac[3], 0.88 }
-            local br = { brBase[1], brBase[2], brBase[3], math.min(brBase[4] or 0.88, 0.55) }
-            ns.UI_UpdateBorderColor(sec, br)
+        if sec and sec._anSectionUnderline then
+            local ac = COLORS.accent or { 0.52, 0.40, 0.66, 1 }
+            sec._anSectionUnderline:SetColorTexture(ac[1], ac[2], ac[3], 0.55)
+        elseif sec and sec.BorderTop and ns.UI_UpdateBorderColor then
+            local sr, sg, sb, sa = 0.52, 0.40, 0.66, 0.35
+            if ns.UI_GetSectionHeaderBorderRGBA then
+                sr, sg, sb, sa = ns.UI_GetSectionHeaderBorderRGBA()
+            else
+                local ac = COLORS.accent or { 0.44, 0.32, 0.58, 1 }
+                sr, sg, sb, sa = ac[1], ac[2], ac[3], 0.35
+            end
+            ns.UI_UpdateBorderColor(sec, { sr, sg, sb, sa })
             if sec.SetBackdropColor then
-                local bg = COLORS.lootHeaderBg or COLORS.accentDark or { 0.125, 0.105, 0.155, 1 }
+                local bg = COLORS.bgCard or { 0.125, 0.118, 0.138, 0.92 }
                 sec:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
             end
         end
@@ -1064,23 +1196,13 @@ function ArtisanSettingsUI:RefreshThemeChrome()
     if fh then
         fh:SetTextColor(dim[1], dim[2], dim[3], dim[4] or 1)
     end
-    local chromeBg = ns.UI_GetControlChromeBackdrop and ns.UI_GetControlChromeBackdrop()
-    local ac = COLORS.accent or { 0.52, 0.40, 0.66, 1 }
-    local borderCol = { ac[1], ac[2], ac[3], 0.82 }
-    for i = 1, #SETTINGS_CHECKBOX_NAMES do
-        local b = _G[SETTINGS_CHECKBOX_NAMES[i]]
-        if b and b.anThemedHost then
-            if chromeBg and b.anThemedHost.SetBackdropColor then
-                b.anThemedHost:SetBackdropColor(chromeBg[1], chromeBg[2], chromeBg[3], chromeBg[4] or 1)
-            end
-            if b.anThemedHost.BorderTop and ns.UI_UpdateBorderColor then
-                ns.UI_UpdateBorderColor(b.anThemedHost, borderCol)
-            end
-        end
-        if b and b.Text then
-            b.Text:SetTextColor(tn[1], tn[2], tn[3], tn[4] or 1)
+    for i = 1, #ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES do
+        local b = _G[ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES[i]]
+        if b and ns.UI_StyleSettingsCheckButton then
+            ns.UI_StyleSettingsCheckButton(b)
         end
     end
+    local ac = COLORS.accent or { 0.52, 0.40, 0.66, 1 }
     local f = self:GetRoot()
     if f then
         ApplyFrame(f, COLORS.bg or { 0.11, 0.105, 0.125, 0.98 }, {
@@ -1095,10 +1217,11 @@ function ArtisanSettingsUI:RefreshThemeChrome()
     end
     local function tintSliderFonts(sl)
         if not sl then return end
-        if sl.Text then sl.Text:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1) end
+        if sl.Text then sl.Text:SetTextColor(tn[1], tn[2], tn[3], tn[4] or 1) end
         if sl.Low then sl.Low:SetTextColor(dim[1], dim[2], dim[3], dim[4] or 1) end
         if sl.High then sl.High:SetTextColor(dim[1], dim[2], dim[3], dim[4] or 1) end
-        if sl.Value then sl.Value:SetTextColor(tb[1], tb[2], tb[3], tb[4] or 1) end
+        local muted = COLORS.textMuted or { 0.72, 0.68, 0.78, 1 }
+        if sl.Value then sl.Value:SetTextColor(muted[1], muted[2], muted[3], muted[4] or 1) end
     end
     tintSliderFonts(_G.ArtisanNexusSettings_BagSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_AhFreshSlider)
@@ -1106,6 +1229,11 @@ function ArtisanSettingsUI:RefreshThemeChrome()
     tintSliderFonts(_G.ArtisanNexusSettings_SessionOverallSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_CraftBriefingTopSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_CraftBriefingAlertMinSlider)
+    if ns.UI_StyleSettingsSlider then
+        for i = 1, #ArtisanSettingsUI.SETTINGS_SLIDER_NAMES do
+            ns.UI_StyleSettingsSlider(_G[ArtisanSettingsUI.SETTINGS_SLIDER_NAMES[i]])
+        end
+    end
     local scroll = _G.ArtisanNexusSettings_Scroll
     if scroll and ns.UI_FinishScrollLayout then
         ns.UI_FinishScrollLayout(scroll)
@@ -1124,8 +1252,8 @@ function ArtisanSettingsUI:WireControls()
 
     --- Current-value readouts: template has none; every handler and
     --- RefreshControls writes into `slider.Value` guarded, so create them once.
-    for i = 1, #SETTINGS_SLIDER_NAMES do
-        EnsureSliderValueText(_G[SETTINGS_SLIDER_NAMES[i]])
+    for i = 1, #ArtisanSettingsUI.SETTINGS_SLIDER_NAMES do
+        EnsureSliderValueText(_G[ArtisanSettingsUI.SETTINGS_SLIDER_NAMES[i]])
     end
 
     local bag = _G.ArtisanNexusSettings_BagSlider
@@ -1161,6 +1289,28 @@ function ArtisanSettingsUI:WireControls()
     end
 
     local SLS = ns.SessionLootService
+
+    local overlayPosBtn = _G.ArtisanNexusSettings_LootOverlayPosition
+    if overlayPosBtn then
+        if ns.UI_StyleSettingsPanelButton then
+            ns.UI_StyleSettingsPanelButton(overlayPosBtn)
+        end
+        overlayPosBtn:SetScript("OnClick", function()
+            if not (ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.TogglePositionEdit) then
+                return
+            end
+            local editing = ns.SessionLootOverlayUI:TogglePositionEdit()
+            RefreshOverlayPositionButtonLabel()
+            if editing then
+                local root = ArtisanSettingsUI:GetRoot()
+                if root and root:IsShown() then
+                    root:Hide()
+                end
+            end
+        end)
+        RefreshOverlayPositionButtonLabel()
+    end
+
     local sessRecent = _G.ArtisanNexusSettings_SessionRecentSlider
     if sessRecent and SLS and SLS.GetSessionRecentHardLimits and SLS.GetMaxRecentLoot then
         local rMin, rMax = SLS:GetSessionRecentHardLimits()
@@ -1214,15 +1364,42 @@ function ArtisanSettingsUI:WireControls()
             ArtisanSettingsUI:RefreshIfShown()
         end)
     end
-    if _G.ArtisanNexusSettings_ClassicUi then
-        _G.ArtisanNexusSettings_ClassicUi:SetScript("OnClick", function(self)
-            ArtisanNexus.db.profile.uiMode = self:GetChecked() and "classic" or "modern"
-            if ArtisanNexus.RefreshUiMode then
-                ArtisanNexus:RefreshUiMode()
-            end
+    if _G.ArtisanNexusSettings_ClassColorAccent then
+        _G.ArtisanNexusSettings_ClassColorAccent:SetScript("OnClick", function(self)
+            ArtisanNexus.db.profile.useClassColorAccent = self:GetChecked() and true or false
+            ArtisanNexus:RefreshTheme()
+            ArtisanSettingsUI:RefreshAccentControls()
             ArtisanSettingsUI:RefreshIfShown()
         end)
     end
+
+    local uiModeDd = _G.ArtisanNexusSettings_UiModeDropDown
+    if uiModeDd then
+        UIDropDownMenu_Initialize(uiModeDd, InitializeUiModeDropDown)
+        ArtisanSettingsUI:RefreshUiModeDropdown()
+    end
+
+    local accentDd = _G.ArtisanNexusSettings_AccentDropDown
+    if accentDd then
+        UIDropDownMenu_Initialize(accentDd, InitializeAccentDropDown)
+        if ArtisanSettingsUI.RefreshAccentDropdown then
+            ArtisanSettingsUI:RefreshAccentDropdown()
+        end
+    end
+    local accentSwatch = _G.ArtisanNexusSettings_AccentSwatch
+    if accentSwatch then
+        if ns.UI_StyleSettingsPanelButton then
+            ns.UI_StyleSettingsPanelButton(accentSwatch)
+        end
+        accentSwatch:SetScript("OnClick", function()
+            ArtisanNexus.db.profile.accentPreset = "custom"
+            ArtisanSettingsUI:OpenAccentColorPicker()
+        end)
+        HookTooltip(accentSwatch,
+            (L and L["CONFIG_ACCENT_PRESET_CUSTOM"]) or "Custom",
+            (L and L["CONFIG_ACCENT_PICK_CUSTOM"]) or "")
+    end
+    ArtisanSettingsUI:RefreshAccentControls()
 
     _G.ArtisanNexusSettings_Gathering:SetScript("OnClick", function(self)
         SetGatheringEnabled(self:GetChecked())
@@ -1254,6 +1431,9 @@ function ArtisanSettingsUI:WireControls()
     end)
     _G.ArtisanNexusSettings_LootAuto:SetScript("OnClick", function(self)
         ArtisanNexus.db.profile.lootHistoryAutoOpen = self:GetChecked()
+    end)
+    _G.ArtisanNexusSettings_LootOverlay:SetScript("OnClick", function(self)
+        SetSessionLootOverlayEnabled(self:GetChecked())
     end)
 
     _G.ArtisanNexusSettings_Debug:SetScript("OnClick", function(self)
@@ -1379,9 +1559,15 @@ function ArtisanSettingsUI:WireControls()
     HookTooltip(_G.ArtisanNexusSettings_LightTheme,
         (L and L["CONFIG_LIGHT_THEME"]) or "Light theme",
         (L and L["CONFIG_LIGHT_THEME_DESC"]) or "")
-    HookTooltip(_G.ArtisanNexusSettings_ClassicUi,
-        (L and L["CONFIG_CLASSIC_UI"]) or "Classic UI",
-        (L and L["CONFIG_CLASSIC_UI_DESC"]) or "")
+    HookTooltip(_G.ArtisanNexusSettings_ClassColorAccent,
+        (L and L["CONFIG_USE_CLASS_COLOR_ACCENT"]) or "Use class color as accent",
+        (L and L["CONFIG_USE_CLASS_COLOR_ACCENT_DESC"]) or "")
+    HookTooltip(_G.ArtisanNexusSettings_UiModeFrame,
+        (L and L["CONFIG_UI_MODE"]) or "Interface style",
+        (L and L["CONFIG_UI_MODE_DESC"]) or "")
+    HookTooltip(_G.ArtisanNexusSettings_AccentFrame,
+        (L and L["CONFIG_ACCENT_COLOR"]) or "Accent color",
+        (L and L["CONFIG_ACCENT_COLOR_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_Gathering, (L and L["CONFIG_GATHERING_LOOT"]) or "", (L and L["CONFIG_GATHERING_LOOT_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_Fishing, (L and L["CONFIG_FISHING_MODULE"]) or "Fishing module", (L and L["CONFIG_FISHING_MODULE_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_OverloadInd, (L and L["CONFIG_OVERLOAD_NODE_INDICATOR"]) or "", (L and L["CONFIG_OVERLOAD_NODE_INDICATOR_DESC"]) or "")
@@ -1391,6 +1577,11 @@ function ArtisanSettingsUI:WireControls()
     HookTooltip(bag, (L and L["CONFIG_BAG_PRESSURE_THRESHOLD"]) or "", (L and L["CONFIG_BAG_PRESSURE_THRESHOLD_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_LootHistory, (L and L["CONFIG_LOOT_HISTORY_ENABLED"]) or "", (L and L["CONFIG_LOOT_HISTORY_ENABLED_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_LootAuto, (L and L["CONFIG_LOOT_HISTORY_AUTO_OPEN"]) or "", (L and L["CONFIG_LOOT_HISTORY_AUTO_OPEN_DESC"]) or "")
+    HookTooltip(_G.ArtisanNexusSettings_LootOverlay, (L and L["CONFIG_LOOT_OVERLAY"]) or "", (L and L["CONFIG_LOOT_OVERLAY_DESC"]) or "")
+    if _G.ArtisanNexusSettings_LootOverlayPosition then
+        HookTooltip(_G.ArtisanNexusSettings_LootOverlayPosition, (L and L["CONFIG_LOOT_OVERLAY_POSITION"]) or "",
+            (L and L["CONFIG_LOOT_OVERLAY_POSITION_DESC"]) or "")
+    end
     if _G.ArtisanNexusSettings_SessionRecentSlider then
         HookTooltip(_G.ArtisanNexusSettings_SessionRecentSlider, (L and L["CONFIG_SESSION_LOOT_MAX_RECENT"]) or "",
             (L and L["CONFIG_SESSION_LOOT_MAX_RECENT_DESC"]) or "")
@@ -1460,10 +1651,12 @@ function ArtisanSettingsUI:RefreshControls()
     if _G.ArtisanNexusSettings_LightTheme then
         _G.ArtisanNexusSettings_LightTheme:SetChecked(p.themeMode == "light")
     end
-    if _G.ArtisanNexusSettings_ClassicUi then
-        _G.ArtisanNexusSettings_ClassicUi:SetChecked(p.uiMode == "classic")
+    if _G.ArtisanNexusSettings_ClassColorAccent then
+        _G.ArtisanNexusSettings_ClassColorAccent:SetChecked(p.useClassColorAccent and true or false)
     end
+    self:RefreshUiModeDropdown()
     self:SyncLightThemeAvailability()
+    self:RefreshAccentControls()
 
     local m = p.modulesEnabled
     _G.ArtisanNexusSettings_Gathering:SetChecked(m and m.gathering ~= false)
@@ -1480,6 +1673,8 @@ function ArtisanSettingsUI:RefreshControls()
     _G.ArtisanNexusSettings_BagGuard:SetChecked(p.bagPressureGuardEnabled ~= false)
     _G.ArtisanNexusSettings_LootHistory:SetChecked(p.lootHistoryEnabled ~= false)
     _G.ArtisanNexusSettings_LootAuto:SetChecked(p.lootHistoryAutoOpen and true or false)
+    _G.ArtisanNexusSettings_LootOverlay:SetChecked(p.sessionLootOverlayEnabled == true)
+    RefreshOverlayPositionButtonLabel()
     _G.ArtisanNexusSettings_Debug:SetChecked(p.debugMode and true or false)
 
     local thresh = p.bagPressureThreshold or 8
@@ -1582,13 +1777,20 @@ function ArtisanSettingsUI:RefreshControls()
     end
     _G.ArtisanNexusSettings_LootAuto:SetEnabled(not (p.lootHistoryEnabled == false) and (p.enabled ~= false))
     _G.ArtisanNexusSettings_OverloadHud:SetEnabled(p.overloadNodeIndicatorEnabled ~= false and (p.enabled ~= false))
+    local overlayPosOn = p.enabled ~= false
+    if _G.ArtisanNexusSettings_LootOverlayPosition then
+        _G.ArtisanNexusSettings_LootOverlayPosition:SetEnabled(overlayPosOn)
+    end
 
     local addonOn = p.enabled ~= false
     local names = {
-        "ArtisanNexusSettings_Minimap", "ArtisanNexusSettings_LoginChat", "ArtisanNexusSettings_LightTheme", "ArtisanNexusSettings_ClassicUi",
+        "ArtisanNexusSettings_Minimap", "ArtisanNexusSettings_LoginChat", "ArtisanNexusSettings_LightTheme",
+        "ArtisanNexusSettings_ClassColorAccent",
+        "ArtisanNexusSettings_UiModeDropDown",
+        "ArtisanNexusSettings_AccentDropDown",
         "ArtisanNexusSettings_Gathering", "ArtisanNexusSettings_Fishing", "ArtisanNexusSettings_OverloadInd", "ArtisanNexusSettings_OverloadHud",
         "ArtisanNexusSettings_OverloadCastBtn", "ArtisanNexusSettings_BagGuard",
-        "ArtisanNexusSettings_LootHistory", "ArtisanNexusSettings_LootAuto",
+        "ArtisanNexusSettings_LootHistory", "ArtisanNexusSettings_LootAuto", "ArtisanNexusSettings_LootOverlay",
         "ArtisanNexusSettings_SessionRecentSlider", "ArtisanNexusSettings_SessionOverallSlider",
         "ArtisanNexusSettings_Debug",
         "ArtisanNexusSettings_PostingUndercut", "ArtisanNexusSettings_PostingAverage", "ArtisanNexusSettings_PostingMax",
@@ -1602,6 +1804,12 @@ function ArtisanSettingsUI:RefreshControls()
     end
     if ah and ah.SetEnabled then
         ah:SetEnabled(addonOn)
+    end
+
+    if ns.UI_UpdateSettingsSliderFill and ArtisanSettingsUI.SETTINGS_SLIDER_NAMES then
+        for i = 1, #ArtisanSettingsUI.SETTINGS_SLIDER_NAMES do
+            ns.UI_UpdateSettingsSliderFill(_G[ArtisanSettingsUI.SETTINGS_SLIDER_NAMES[i]])
+        end
     end
 
     self:SyncThemedToggleDots()
@@ -1653,6 +1861,14 @@ function ArtisanSettingsUI:ShowPanel()
     self:ApplySettingsHeaderClip()
     fr:Show()
     fr:Raise()
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0, function()
+            if fr:IsShown() then
+                ArtisanSettingsUI:RefreshThemeChrome()
+                ArtisanSettingsUI:SyncThemedToggleDots()
+            end
+        end)
+    end
 end
 
 function ArtisanSettingsUI:HidePanel()

@@ -54,6 +54,16 @@ function ns.UI_ApplyViewportDebugBg(frame, key)
     if not frame then
         return
     end
+    if ns.UI_RegisterDebugElement then
+        local c = VIEWPORT_DEBUG_COLORS[key] or { 1, 0, 1, 0.30 }
+        ns.UI_RegisterDebugElement(frame, {
+            id = key,
+            label = key,
+            color = c,
+            note = "Scroll/viewport layout region",
+        })
+        return
+    end
     local tex = frame._anViewportDebugBg
     if not ns.UI_IsViewportDebugEnabled() then
         if tex then
@@ -90,6 +100,10 @@ function ns.UI_RegisterViewportDebug(frame, key)
 end
 
 function ns.UI_RefreshAllViewportDebugChrome()
+    if ns.UI_RefreshAllDebugChrome then
+        ns.UI_RefreshAllDebugChrome()
+        return
+    end
     local reg = ns.VIEWPORT_DEBUG_REGISTRY
     if not reg then
         return
@@ -125,6 +139,124 @@ local function RegisterScrollChrome(host)
     end
 end
 
+ns.SCROLL_COLUMN_REGISTRY = ns.SCROLL_COLUMN_REGISTRY or {}
+ns.SCROLL_FRAME_REGISTRY = ns.SCROLL_FRAME_REGISTRY or {}
+
+local SCROLL_CLASSIC_TEX_KEYS = { "Top", "Middle", "Bottom", "Background" }
+
+local function SuppressBlizzardScrollButton(btn)
+    if not btn then
+        return
+    end
+    btn:Hide()
+    btn:SetAlpha(0)
+    btn:EnableMouse(false)
+    btn:SetSize(0.1, 0.1)
+    pcall(function()
+        btn:SetNormalTexture(nil)
+        btn:SetPushedTexture(nil)
+        btn:SetHighlightTexture(nil)
+        btn:SetDisabledTexture(nil)
+    end)
+    local nt = btn.GetNormalTexture and btn:GetNormalTexture()
+    if nt then
+        pcall(function()
+            if nt.SetAtlas then nt:SetAtlas(nil) end
+            if nt.SetTexture then nt:SetTexture(nil) end
+            nt:Hide()
+        end)
+    end
+    local pt = btn.GetPushedTexture and btn:GetPushedTexture()
+    if pt and pt.Hide then
+        pt:Hide()
+    end
+    local ht = btn.GetHighlightTexture and btn:GetHighlightTexture()
+    if ht and ht.Hide then
+        ht:Hide()
+    end
+    local dt = btn.GetDisabledTexture and btn:GetDisabledTexture()
+    if dt and dt.Hide then
+        dt:Hide()
+    end
+end
+
+local function SuppressBlizzardScrollButtons(scrollBar)
+    if not scrollBar then
+        return
+    end
+    SuppressBlizzardScrollButton(scrollBar.ScrollUpButton)
+    SuppressBlizzardScrollButton(scrollBar.ScrollDownButton)
+end
+
+local function HideClassicScrollTemplateArt(scrollFrame, scrollBar)
+    local modern = not (ns.UI_IsClassicUi and ns.UI_IsClassicUi())
+    if scrollBar then
+        for i = 1, #SCROLL_CLASSIC_TEX_KEYS do
+            local tex = scrollBar[SCROLL_CLASSIC_TEX_KEYS[i]]
+            if tex and tex.Hide then
+                tex:Hide()
+            end
+            if modern and tex and tex.SetTexture then
+                pcall(function()
+                    tex:SetTexture(nil)
+                end)
+            end
+        end
+        if scrollBar._anClassicTrack and scrollBar._anClassicTrack.Hide then
+            scrollBar._anClassicTrack:Hide()
+        end
+        if modern then
+            SuppressBlizzardScrollButtons(scrollBar)
+        end
+    end
+    if scrollFrame then
+        local hideFrameArt = scrollFrame._anExternalBarColumn
+        if not hideFrameArt and ns.UI_IsClassicUi and not ns.UI_IsClassicUi() then
+            hideFrameArt = true
+        end
+        if hideFrameArt then
+            for i = 1, 3 do
+                local tex = scrollFrame[SCROLL_CLASSIC_TEX_KEYS[i]]
+                if tex and tex.Hide then
+                    tex:Hide()
+                end
+                if modern and tex and tex.SetTexture then
+                    pcall(function()
+                        tex:SetTexture(nil)
+                    end)
+                end
+            end
+        end
+    end
+end
+
+local function RefreshModernScrollArrowIcons(scrollBar)
+    if not scrollBar then
+        return
+    end
+    local C = GetColors()
+    local ac = C.accent or { 0.44, 0.32, 0.58, 1 }
+    if scrollBar.ScrollUpBtn and scrollBar.ScrollUpBtn._iconTexture then
+        scrollBar.ScrollUpBtn._iconTexture:SetVertexColor(ac[1], ac[2], ac[3], 1)
+    end
+    if scrollBar.ScrollDownBtn and scrollBar.ScrollDownBtn._iconTexture then
+        scrollBar.ScrollDownBtn._iconTexture:SetVertexColor(ac[1], ac[2], ac[3], 1)
+    end
+end
+
+local function RegisterScrollFrame(scrollFrame)
+    if not scrollFrame then
+        return
+    end
+    local reg = ns.SCROLL_FRAME_REGISTRY
+    for i = 1, #reg do
+        if reg[i] == scrollFrame then
+            return
+        end
+    end
+    reg[#reg + 1] = scrollFrame
+end
+
 local function RefreshScrollChromeHost(host)
     if not host then return end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
@@ -153,6 +285,7 @@ local function RefreshScrollChromeHost(host)
         host.BorderTop:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
         host.BorderBottom:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
     end
+    RefreshModernScrollArrowIcons(host)
 end
 
 function ns.UI_RefreshScrollChrome()
@@ -166,6 +299,12 @@ function ns.UI_RefreshScrollChrome()
     end
     if ns.UI_RefreshScrollBarColumns then
         ns.UI_RefreshScrollBarColumns()
+    end
+    if not (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) and Factory.ApplyModernScrollBarLayout then
+        local reg = ns.SCROLL_FRAME_REGISTRY
+        for j = 1, #reg do
+            Factory:ApplyModernScrollBarLayout(reg[j])
+        end
     end
 end
 
@@ -328,20 +467,50 @@ local function CreateScrollArrowButton(scrollBar, scrollFrame, isUp)
 end
 
 function Factory:InstallScrollBarStyle(scrollFrame)
-    if not scrollFrame or scrollFrame._anScrollStyled or not scrollFrame.ScrollBar then
+    if not scrollFrame or not scrollFrame.ScrollBar then
+        return scrollFrame
+    end
+    RegisterScrollFrame(scrollFrame)
+
+    local scrollBar = scrollFrame.ScrollBar
+    HideClassicScrollTemplateArt(scrollFrame, scrollBar)
+    SuppressBlizzardScrollButtons(scrollBar)
+
+    if scrollFrame._anScrollStyled then
+        CreateScrollArrowButton(scrollBar, scrollFrame, true)
+        CreateScrollArrowButton(scrollBar, scrollFrame, false)
+        RefreshModernScrollArrowIcons(scrollBar)
+        if scrollBar.ThumbTexture then
+            local C = GetColors()
+            local ac = C.accent or { 0.44, 0.32, 0.58, 1 }
+            scrollBar.ThumbTexture:SetTexture(nil)
+            scrollBar.ThumbTexture:SetColorTexture(ac[1], ac[2], ac[3], 0.9)
+            scrollBar._thumbTexture = scrollBar.ThumbTexture
+        end
+        if scrollBar.CustomTrack then
+            ApplyScrollChromeBackdrop(scrollBar.CustomTrack)
+        end
+        if scrollBar.BorderTop then
+            scrollBar.BorderTop:Hide()
+            scrollBar.BorderBottom:Hide()
+            scrollBar.BorderLeft:Hide()
+            scrollBar.BorderRight:Hide()
+        end
+        local col = scrollFrame._anScrollBarColumn
+        if col then
+            self:PositionScrollBarInContainer(scrollBar, col, 0, scrollFrame)
+        end
+        if scrollFrame.UpdateScrollBarVisibility then
+            scrollFrame:UpdateScrollBarVisibility()
+        else
+            local ch = scrollFrame:GetScrollChild()
+            if ch then
+                ApplyThemedScrollThumb(scrollBar, scrollFrame:GetHeight() or 0, ch:GetHeight() or 0)
+            end
+        end
         return scrollFrame
     end
     scrollFrame._anScrollStyled = true
-
-    local scrollBar = scrollFrame.ScrollBar
-    if scrollBar.ScrollUpButton then
-        scrollBar.ScrollUpButton:Hide()
-        scrollBar.ScrollUpButton:SetSize(0.1, 0.1)
-    end
-    if scrollBar.ScrollDownButton then
-        scrollBar.ScrollDownButton:Hide()
-        scrollBar.ScrollDownButton:SetSize(0.1, 0.1)
-    end
 
     if not scrollBar.CustomTrack then
         scrollBar.CustomTrack = scrollBar:CreateTexture(nil, "BACKGROUND")
@@ -392,6 +561,7 @@ function Factory:InstallScrollBarStyle(scrollFrame)
     scrollFrame.UpdateScrollBarVisibility = function(self)
         if not self.ScrollBar then return end
         local bar = self.ScrollBar
+        SuppressBlizzardScrollButtons(bar)
         local scrollChild = self:GetScrollChild()
         if not scrollChild then return end
         local contentHeight = scrollChild:GetHeight() or 0
@@ -459,30 +629,51 @@ function Factory:CreateScrollFrame(parent, template, customStyle)
     return scrollFrame
 end
 
-ns.SCROLL_COLUMN_REGISTRY = ns.SCROLL_COLUMN_REGISTRY or {}
-
 local function InstallScrollBarColumnChrome(container)
-    if not container or container._anColumnChromeInstalled then
+    if not container then
         return
     end
-    container._anColumnChromeInstalled = true
-
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
+    if classic then
+        if container._anTrackBg and container._anTrackBg.Hide then
+            container._anTrackBg:Hide()
+        end
+        if container.BorderLeft and container.BorderLeft.Hide then
+            container.BorderLeft:Hide()
+            container.BorderRight:Hide()
+            container.BorderTop:Hide()
+            container.BorderBottom:Hide()
+        end
         if container.SetBackdrop then
             container:SetBackdrop(nil)
         end
+        container._anColumnChromeInstalled = true
         return
     end
 
     if not container._anTrackBg then
         local track = container:CreateTexture(nil, "BACKGROUND", nil, -2)
         track:SetAllPoints()
-        ApplyScrollChromeBackdrop(track)
         container._anTrackBg = track
+        local pixelScale = GetPixelScale(container)
+        ApplyAccentBorders(container, pixelScale)
+        RegisterScrollChrome(container)
     end
-    local pixelScale = GetPixelScale(container)
-    ApplyAccentBorders(container, pixelScale)
-    RegisterScrollChrome(container)
+    container._anTrackBg:Show()
+    ApplyScrollChromeBackdrop(container._anTrackBg)
+    if container.BorderLeft then
+        container.BorderLeft:Show()
+        container.BorderRight:Show()
+        container.BorderTop:Show()
+        container.BorderBottom:Show()
+        local C = GetColors()
+        local ac = C.accent or { 0.44, 0.32, 0.58, 1 }
+        container.BorderLeft:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
+        container.BorderRight:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
+        container.BorderTop:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
+        container.BorderBottom:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
+    end
+    container._anColumnChromeInstalled = true
 end
 
 function ns.UI_RefreshScrollBarColumns()
@@ -541,11 +732,19 @@ function Factory:CreateScrollBarColumn(parent, width, topInset, bottomInset, rig
     return container
 end
 
-function Factory:PositionScrollBarInContainer(scrollBar, scrollBarContainer, inset)
+function Factory:PositionScrollBarInContainer(scrollBar, scrollBarContainer, inset, scrollFrame)
     if not scrollBar or not scrollBarContainer then return end
+    scrollFrame = scrollFrame or scrollBar._scrollFrame
+    if scrollFrame then
+        scrollBar._scrollFrame = scrollFrame
+    end
+    SuppressBlizzardScrollButtons(scrollBar)
     local layout = ns.UI_LAYOUT or {}
     local btnSize = layout.SCROLL_BAR_BUTTON_SIZE or 16
     local barWidth = layout.SCROLL_BAR_WIDTH or 16
+    local colW = (scrollBarContainer.GetWidth and scrollBarContainer:GetWidth()) or layout.SCROLLBAR_COLUMN_WIDTH or 26
+    local btnPadX = math.max(0, math.floor((colW - btnSize) * 0.5))
+    local barPadX = math.max(0, math.floor((colW - barWidth) * 0.5))
 
     local containerLevel = scrollBarContainer:GetFrameLevel()
     scrollBar:SetParent(scrollBarContainer)
@@ -557,7 +756,7 @@ function Factory:PositionScrollBarInContainer(scrollBar, scrollBarContainer, ins
         scrollBar.ScrollUpBtn:SetFrameLevel(containerLevel + 3)
         scrollBar.ScrollUpBtn:ClearAllPoints()
         scrollBar.ScrollUpBtn:SetSize(btnSize, btnSize)
-        scrollBar.ScrollUpBtn:SetPoint("TOP", scrollBarContainer, "TOP", 0, 0)
+        scrollBar.ScrollUpBtn:SetPoint("TOPLEFT", scrollBarContainer, "TOPLEFT", btnPadX, 0)
         scrollBar.ScrollUpBtn:Show()
     end
     if scrollBar.ScrollDownBtn then
@@ -565,7 +764,7 @@ function Factory:PositionScrollBarInContainer(scrollBar, scrollBarContainer, ins
         scrollBar.ScrollDownBtn:SetFrameLevel(containerLevel + 3)
         scrollBar.ScrollDownBtn:ClearAllPoints()
         scrollBar.ScrollDownBtn:SetSize(btnSize, btnSize)
-        scrollBar.ScrollDownBtn:SetPoint("BOTTOM", scrollBarContainer, "BOTTOM", 0, 0)
+        scrollBar.ScrollDownBtn:SetPoint("BOTTOMLEFT", scrollBarContainer, "BOTTOMLEFT", btnPadX, 0)
         scrollBar.ScrollDownBtn:Show()
     end
     scrollBar:ClearAllPoints()
@@ -577,7 +776,8 @@ function Factory:PositionScrollBarInContainer(scrollBar, scrollBarContainer, ins
         scrollBar:SetPoint("BOTTOM", scrollBarContainer, "BOTTOM", 0, 0)
     end
     scrollBar:SetWidth(barWidth)
-    scrollBar:SetPoint("CENTER", scrollBarContainer, "CENTER", 0, 0)
+    scrollBar:SetPoint("LEFT", scrollBarContainer, "LEFT", barPadX, 0)
+    scrollBar:SetPoint("RIGHT", scrollBarContainer, "RIGHT", -barPadX, 0)
 end
 
 --- Reparent native scrollbar into external column; keep scroll via hooked OnValueChanged.
@@ -752,7 +952,7 @@ function ns.UI_AttachThemedScroll(parent, opts)
     scroll._anScrollAnchorBRHidden = { a1 = "BOTTOMRIGHT", frame = parent, a2 = "BOTTOMRIGHT", x = -padR, y = padB }
     scroll._anScrollAnchorBRShown = { a1 = "BOTTOMRIGHT", frame = barCol, a2 = "BOTTOMLEFT", x = -gap, y = 0 }
     scroll._anExternalBarColumn = (barParent ~= parent)
-    Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0)
+    Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0, scroll)
 
     local content = CreateFrame("Frame", nil, scroll)
     content:SetSize(1, 1)
@@ -782,6 +982,80 @@ function ns.UI_RefreshNativeScrollFrame(scrollFrame)
     end
 end
 
+function Factory:ApplyModernScrollBarLayout(scrollFrame)
+    if not scrollFrame or (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) then
+        return
+    end
+    RegisterScrollFrame(scrollFrame)
+    self:InstallScrollBarStyle(scrollFrame)
+
+    local bar = scrollFrame.ScrollBar
+    if not bar then
+        return
+    end
+
+    HideClassicScrollTemplateArt(scrollFrame, bar)
+    SuppressBlizzardScrollButtons(bar)
+
+    if bar.CustomTrack and bar.CustomTrack.Show then
+        bar.CustomTrack:Show()
+        ApplyScrollChromeBackdrop(bar.CustomTrack)
+    end
+    if ns.UI_RestoreArtisanChrome then
+        ns.UI_RestoreArtisanChrome(bar)
+    end
+    if bar.BorderTop then
+        bar.BorderTop:Hide()
+        bar.BorderBottom:Hide()
+        bar.BorderLeft:Hide()
+        bar.BorderRight:Hide()
+    end
+
+    if bar.ScrollUpButton then
+        SuppressBlizzardScrollButton(bar.ScrollUpButton)
+    end
+    if bar.ScrollDownButton then
+        SuppressBlizzardScrollButton(bar.ScrollDownButton)
+    end
+    if bar.ScrollUpBtn then bar.ScrollUpBtn:Show() end
+    if bar.ScrollDownBtn then bar.ScrollDownBtn:Show() end
+
+    local thumb = bar.ThumbTexture or bar._thumbTexture
+    if thumb and thumb.SetColorTexture then
+        local ac = GetColors().accent or { 0.44, 0.32, 0.58, 1 }
+        thumb:SetTexture(nil)
+        thumb:SetColorTexture(ac[1], ac[2], ac[3], 0.9)
+        bar._thumbTexture = thumb
+    end
+
+    local col = scrollFrame._anScrollBarColumn
+    if col then
+        InstallScrollBarColumnChrome(col)
+        self:PositionScrollBarInContainer(bar, col, 0, scrollFrame)
+    end
+
+    if scrollFrame._anSavedUpdateVis and not scrollFrame.UpdateScrollBarVisibility then
+        scrollFrame.UpdateScrollBarVisibility = scrollFrame._anSavedUpdateVis
+        scrollFrame._anSavedUpdateVis = nil
+    end
+    scrollFrame._anClassicScroll = nil
+    local ch = scrollFrame:GetScrollChild()
+    local frameH = scrollFrame:GetHeight() or 0
+    local contentH = ch and ch:GetHeight() or 0
+    if scrollFrame.UpdateScrollBarVisibility then
+        scrollFrame:UpdateScrollBarVisibility()
+    else
+        self:UpdateScrollBarVisibility(scrollFrame)
+    end
+    if ch and bar then
+        ApplyThemedScrollThumb(bar, frameH, contentH)
+    end
+end
+
+ns.UI_ApplyModernScrollBarLayout = function(scrollFrame)
+    Factory:ApplyModernScrollBarLayout(scrollFrame)
+end
+
 function ns.UI_FinishScrollLayout(scrollFrame)
     Factory:UpdateScrollBarVisibility(scrollFrame)
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
@@ -799,6 +1073,8 @@ function ns.UI_FinishScrollLayout(scrollFrame)
         else
             ns.UI_RefreshNativeScrollFrame(scrollFrame)
         end
+    elseif Factory.ApplyModernScrollBarLayout then
+        Factory:ApplyModernScrollBarLayout(scrollFrame)
     end
 end
 
