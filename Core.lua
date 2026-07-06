@@ -108,9 +108,10 @@ local defaults = {
             y = 120,
         },
         --- Floating session loot overlay (recent pickups + prices); independent of Session loot window visibility.
-        sessionLootOverlayEnabled = false,
+        sessionLootOverlayEnabled = true,
         sessionLootOverlayHoldSec = 4,
         sessionLootOverlayStackMax = 3,
+        sessionLootOverlayScale = 1.15,
         sessionLootOverlayFrame = {
             point = "TOPRIGHT",
             relativePoint = "TOPRIGHT",
@@ -338,6 +339,9 @@ function ArtisanNexus:OnProfileChanged()
     end
     if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ApplySettingsAnchor then
         ns.SessionLootOverlayUI:ApplySettingsAnchor()
+    end
+    if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ApplySettingsScale then
+        ns.SessionLootOverlayUI:ApplySettingsScale()
     end
     if E and E.THEME_CHANGED then
         self:SendMessage(E.THEME_CHANGED)

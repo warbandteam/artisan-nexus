@@ -759,6 +759,85 @@ local function IsArtisanBorderTex(frame, tex)
         or tex == frame.BorderLeft or tex == frame.BorderRight
 end
 
+local function IsModernSettingsSliderTex(slider, tex)
+    if not slider or not tex then
+        return false
+    end
+    if IsArtisanBorderTex(slider, tex) then
+        return true
+    end
+    local shell = slider._anSliderTrackShell
+    if shell and (tex == shell.BorderTop or tex == shell.BorderBottom
+        or tex == shell.BorderLeft or tex == shell.BorderRight) then
+        return true
+    end
+    return tex == slider._anModernThumb or tex == slider._anSliderFill
+        or tex == slider._anSliderTrack or tex == slider._anSliderTrackBorder
+end
+
+--- Remove OptionsSliderTemplate UI-SliderBar chrome (rounded border/track) in Modern skin.
+--- Must run on every style pass — template regions can respawn on show.
+---@param slider Slider|nil
+local function StripOptionsSliderClassicChrome(slider)
+    if not slider then
+        return
+    end
+    StripTemplateTextures(slider, slider._anModernThumb)
+    if slider.SetBackdrop then
+        pcall(function()
+            slider:SetBackdrop(nil)
+        end)
+    end
+    if slider.GetThumbTexture then
+        local ok, thumb = pcall(slider.GetThumbTexture, slider)
+        if ok and thumb and thumb ~= slider._anModernThumb then
+            pcall(function()
+                if thumb.SetAtlas then
+                    thumb:SetAtlas(nil)
+                end
+                if thumb.SetTexture then
+                    thumb:SetTexture(nil)
+                end
+                if thumb.Hide then
+                    thumb:Hide()
+                end
+            end)
+        end
+    end
+    if slider.GetRegions and slider.GetNumRegions then
+        local count = slider:GetNumRegions()
+        for ri = 1, count do
+            local r = select(ri, slider:GetRegions())
+            if r and r.IsObjectType and r:IsObjectType("Texture")
+                and not IsModernSettingsSliderTex(slider, r) then
+                pcall(function()
+                    if r.SetAtlas then
+                        r:SetAtlas(nil)
+                    end
+                    if r.SetTexture then
+                        r:SetTexture(nil)
+                    end
+                    if r.Hide then
+                        r:Hide()
+                    end
+                end)
+            end
+        end
+    end
+    if slider.GetChildren then
+        local children = { slider:GetChildren() }
+        for ci = 1, #children do
+            local ch = children[ci]
+            if ch and ch ~= slider._anSliderTrackShell then
+                StripTemplateTextures(ch)
+            end
+        end
+    end
+    if ns.UI_SuppressArtisanChrome then
+        ns.UI_SuppressArtisanChrome(slider)
+    end
+end
+
 --- Strip Blizzard template textures/atlas (DropDownToggleButton, OptionsSliderTemplate, etc.).
 ---@param frame Region|nil
 ---@param skipTex Texture|nil
@@ -905,10 +984,16 @@ function ns.UI_StyleSettingsDropDown(dropdown)
     end
 end
 
---- Update accent fill width on a Modern settings slider track.
+local SETTINGS_SLIDER_BLOCK_H = 58
+local SETTINGS_SLIDER_FRAME_H = 20
+local SETTINGS_SLIDER_INSET = 2
+local SETTINGS_SLIDER_THUMB_W = 14
+local SETTINGS_SLIDER_THUMB_H = 18
+
+--- Update accent fill width on a Modern settings slider track (inside framed trough).
 ---@param slider Slider|nil
 function ns.UI_UpdateSettingsSliderFill(slider)
-    if not slider or not slider._anSliderTrack or not slider._anSliderFill then
+    if not slider or not slider._anSliderFill then
         return
     end
     local minV, maxV = slider:GetMinMaxValues()
@@ -917,7 +1002,8 @@ function ns.UI_UpdateSettingsSliderFill(slider)
         return
     end
     local pct = (val - minV) / (maxV - minV)
-    local trackW = slider._anSliderTrack:GetWidth()
+    pct = math.max(0, math.min(1, pct))
+    local trackW = slider:GetWidth()
     if not trackW or trackW <= 0 then
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
@@ -928,15 +1014,57 @@ function ns.UI_UpdateSettingsSliderFill(slider)
         end
         return
     end
-    local fillW = math.max(4, trackW * pct)
+    local inset = slider._anSliderInset or SETTINGS_SLIDER_INSET
+    local innerW = math.max(4, trackW - inset * 2)
+    local thumbW = SETTINGS_SLIDER_THUMB_W
+    if slider.GetThumbTexture then
+        local ok, thumb = pcall(slider.GetThumbTexture, slider)
+        if ok and thumb and thumb.GetWidth then
+            local tw = thumb:GetWidth()
+            if tw and tw > 0 then
+                thumbW = tw
+            end
+        end
+    end
+    local travel = math.max(0, innerW - thumbW)
+    local fillW = travel * pct + thumbW * 0.5
+    if slider.GetThumbTexture then
+        local ok, thumb = pcall(slider.GetThumbTexture, slider)
+        if ok and thumb and thumb.GetPoint then
+            local _, _, _, xOfs = thumb:GetPoint(1)
+            if type(xOfs) == "number" and xOfs == xOfs then
+                fillW = math.max(thumbW * 0.5, xOfs + thumbW * 0.5)
+            end
+        end
+    end
+    fillW = math.max(2, math.min(innerW, fillW))
     slider._anSliderFill:ClearAllPoints()
-    slider._anSliderFill:SetPoint("TOPLEFT", slider._anSliderTrack, "TOPLEFT", 1, -1)
-    slider._anSliderFill:SetPoint("BOTTOMLEFT", slider._anSliderTrack, "BOTTOMLEFT", 1, 1)
+    slider._anSliderFill:SetPoint("TOPLEFT", slider, "TOPLEFT", inset, -inset)
+    slider._anSliderFill:SetPoint("BOTTOMLEFT", slider, "BOTTOMLEFT", inset, inset)
     slider._anSliderFill:SetWidth(fillW)
 end
 
-local SETTINGS_SLIDER_BLOCK_H = 58
-local SETTINGS_SLIDER_TRACK_H = 12
+local function HookSettingsSliderFillDragRefresh(slider)
+    if not slider or slider._anFillDragHooked or not slider.HookScript then
+        return
+    end
+    slider._anFillDragHooked = true
+    slider:HookScript("OnMouseDown", function()
+        slider._anFillDragging = true
+        slider:SetScript("OnUpdate", function()
+            if ns.UI_UpdateSettingsSliderFill then
+                ns.UI_UpdateSettingsSliderFill(slider)
+            end
+        end)
+    end)
+    slider:HookScript("OnMouseUp", function()
+        slider._anFillDragging = nil
+        slider:SetScript("OnUpdate", nil)
+        if ns.UI_UpdateSettingsSliderFill then
+            ns.UI_UpdateSettingsSliderFill(slider)
+        end
+    end)
+end
 
 --- Wrap OptionsSliderTemplate in a block: labels on top, short track row at bottom.
 ---@param slider Slider|nil
@@ -974,7 +1102,7 @@ function ns.UI_BuildSettingsSliderBlock(slider, width)
         slider:ClearAllPoints()
         slider:SetPoint("BOTTOMLEFT", block, "BOTTOMLEFT", 0, 18)
         slider:SetPoint("BOTTOMRIGHT", block, "BOTTOMRIGHT", 0, 18)
-        slider:SetHeight(SETTINGS_SLIDER_TRACK_H)
+        slider:SetHeight(SETTINGS_SLIDER_FRAME_H)
     else
         slider._anSliderBlock:SetWidth(width)
     end
@@ -1007,10 +1135,9 @@ function ns.UI_BuildSettingsSliderBlock(slider, width)
             ns.UI_UpdateSettingsSliderFill(slider)
         end)
     end
+    HookSettingsSliderFillDragRefresh(slider)
     ns.UI_UpdateSettingsSliderFill(slider)
 end
-
---- Legacy hook — track band is owned by UI_BuildSettingsSliderBlock now.
 ---@param slider Slider|nil
 ---@param trackH number|nil
 function ns.UI_LayoutSettingsSliderTrack(slider, trackH)
@@ -1019,8 +1146,8 @@ function ns.UI_LayoutSettingsSliderTrack(slider, trackH)
     end
 end
 
---- OptionsSliderTemplate rows in FrameXML settings: strip Blizzard track/thumb art and
---- apply Factory-aligned accent thumb + control-chrome track (WN CreateThemedSlider parity).
+--- OptionsSliderTemplate rows in FrameXML settings: Warband CreateThemedSlider parity —
+--- bordered track frame with thumb moving inside the trough + accent progress fill.
 ---@param slider Slider|nil
 function ns.UI_StyleSettingsSlider(slider)
     if not slider then
@@ -1031,7 +1158,6 @@ function ns.UI_StyleSettingsSlider(slider)
     end
     if not slider._anSliderStyled then
         slider._anSliderStyled = true
-        StripTemplateTextures(slider)
         if slider.HookScript then
             slider:HookScript("OnShow", function()
                 if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
@@ -1043,6 +1169,7 @@ function ns.UI_StyleSettingsSlider(slider)
             end)
         end
     end
+    StripOptionsSliderClassicChrome(slider)
     if ns.UI_BuildSettingsSliderBlock then
         ns.UI_BuildSettingsSliderBlock(slider, slider:GetWidth())
     end
@@ -1060,56 +1187,71 @@ function ns.UI_StyleSettingsSlider(slider)
             end
         end)
     end
-    if ns.UI_StripClassicBackdropEdge then
-        ns.UI_StripClassicBackdropEdge(slider)
-    end
-    if not slider.SetBackdrop then
-        Mixin(slider, BackdropTemplateMixin)
-    end
     local COL = ns.UI_COLORS or {}
-    local trackBg = (ns.UI_GetControlChromeBackdrop and ns.UI_GetControlChromeBackdrop())
+    local trackBg = (ns.UI_GetControlChromeHoverBackdrop and ns.UI_GetControlChromeHoverBackdrop())
         or COL.tabInactive or { 0.115, 0.108, 0.128, 1 }
     local ac = COL.accent or { 0.52, 0.40, 0.66, 1 }
-    if ns.UI_SuppressArtisanChrome then
-        ns.UI_SuppressArtisanChrome(slider)
+    slider:SetHeight(SETTINGS_SLIDER_FRAME_H)
+    if slider.SetBackdrop then
+        pcall(function()
+            slider:SetBackdrop(nil)
+        end)
     end
-    slider:SetBackdrop({
+    slider._anSliderInset = SETTINGS_SLIDER_INSET
+    if not slider._anSliderTrackShell then
+        local shell = CreateFrame("Frame", nil, slider, "BackdropTemplate")
+        shell:SetAllPoints()
+        shell:EnableMouse(false)
+        shell:SetFrameLevel((slider:GetFrameLevel() or 0))
+        slider._anSliderTrackShell = shell
+    end
+    local shell = slider._anSliderTrackShell
+    shell:Show()
+    if not shell.SetBackdrop then
+        Mixin(shell, BackdropTemplateMixin)
+    end
+    shell:SetBackdrop({
         bgFile = "Interface\\Buttons\\WHITE8x8",
         edgeFile = "Interface\\Buttons\\WHITE8x8",
         tile = false,
-        edgeSize = 1,
-        insets = { left = 0, right = 0, top = 0, bottom = 0 },
+        tileSize = 1,
+        edgeSize = 2,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
     })
-    slider:SetBackdropColor(0, 0, 0, 0)
-    slider:SetBackdropBorderColor(0, 0, 0, 0)
+    shell:SetBackdropColor(trackBg[1], trackBg[2], trackBg[3], trackBg[4] or 1)
+    shell:SetBackdropBorderColor(ac[1], ac[2], ac[3], 0.6)
+    shell._anMainShellBackdrop = true
+    shell._borderType = "accent"
+    shell._borderAlpha = 0.6
+    shell._bgType = "controlChromeHover"
+    if not shell._borderRegistered and ns.BORDER_REGISTRY then
+        shell._borderRegistered = true
+        table.insert(ns.BORDER_REGISTRY, shell)
+    end
+    if slider._anSliderTrack then
+        slider._anSliderTrack:Hide()
+    end
+    if slider._anSliderTrackBorder then
+        slider._anSliderTrackBorder:Hide()
+    end
     if not slider._anModernThumb then
         slider._anModernThumb = slider:CreateTexture(nil, "OVERLAY")
-        slider._anModernThumb:SetSize(16, 16)
     end
+    slider._anModernThumb:SetSize(SETTINGS_SLIDER_THUMB_W, SETTINGS_SLIDER_THUMB_H)
     slider._anModernThumb:SetColorTexture(ac[1], ac[2], ac[3], 1)
     slider:SetThumbTexture(slider._anModernThumb)
-    if not slider._anSliderTrack then
-        slider._anSliderTrack = slider:CreateTexture(nil, "BACKGROUND", nil, 0)
-        slider._anSliderTrack:SetPoint("TOPLEFT", slider, "TOPLEFT", 0, 0)
-        slider._anSliderTrack:SetPoint("BOTTOMRIGHT", slider, "BOTTOMRIGHT", 0, 0)
-    end
-    slider._anSliderTrack:SetColorTexture(trackBg[1], trackBg[2], trackBg[3], trackBg[4] or 1)
-    slider._anSliderTrack:Show()
-    if not slider._anSliderTrackBorder then
-        slider._anSliderTrackBorder = slider:CreateTexture(nil, "BORDER", nil, 1)
-        slider._anSliderTrackBorder:SetPoint("TOPLEFT", slider._anSliderTrack, "TOPLEFT", 0, 0)
-        slider._anSliderTrackBorder:SetPoint("BOTTOMRIGHT", slider._anSliderTrack, "BOTTOMRIGHT", 0, 0)
-        slider._anSliderTrackBorder:SetColorTexture(ac[1], ac[2], ac[3], 0.22)
-    end
-    slider._anSliderTrackBorder:Show()
     if not slider._anSliderFill then
-        slider._anSliderFill = slider:CreateTexture(nil, "ARTWORK", nil, 2)
-        slider._anSliderFill:SetPoint("TOPLEFT", slider._anSliderTrack, "TOPLEFT", 1, -1)
-        slider._anSliderFill:SetPoint("BOTTOMLEFT", slider._anSliderTrack, "BOTTOMLEFT", 1, 1)
-        slider._anSliderFill:SetHeight(SETTINGS_SLIDER_TRACK_H - 2)
+        slider._anSliderFill = slider:CreateTexture(nil, "ARTWORK", nil, 1)
     end
     slider._anSliderFill:SetColorTexture(ac[1], ac[2], ac[3], 0.55)
     slider._anSliderFill:Show()
+    if not slider._anFillHooked and slider.HookScript then
+        slider._anFillHooked = true
+        slider:HookScript("OnValueChanged", function()
+            ns.UI_UpdateSettingsSliderFill(slider)
+        end)
+    end
+    HookSettingsSliderFillDragRefresh(slider)
     ns.UI_UpdateSettingsSliderFill(slider)
 end
 

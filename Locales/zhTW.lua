@@ -128,6 +128,8 @@ L["CONFIG_LOOT_OVERLAY_DESC"] = "Show each pickup as a short on-screen toast wit
 L["CONFIG_LOOT_OVERLAY_POSITION"] = "Position overlay"
 L["CONFIG_LOOT_OVERLAY_POSITION_DESC"] = "Shows a sample toast on screen. Left-click drag to move; right-click to save."
 L["CONFIG_LOOT_OVERLAY_POSITION_ACTIVE"] = "Done positioning"
+L["CONFIG_LOOT_OVERLAY_SIZE"] = "Overlay size"
+L["CONFIG_LOOT_OVERLAY_SIZE_DESC"] = "Scale of loot pickup toasts (75% to 150%). Applies to active toasts immediately."
 L["LOOT_OVERLAY_EDIT_HINT"] = "Left-click drag to move — right-click to save"
 L["LOOT_OVERLAY_EDIT_COMBAT"] = "Cannot move the loot overlay during combat."
 L["SLASH_OVERLAY_MOVE"] = "Left-click drag the loot overlay preview to move. Right-click to save (Esc cancels)."
@@ -362,4 +364,5 @@ L["AH_SCAN_STARTED_PLAN"] = "開始拍賣場掃描：%d 項待刷新（%d 已追
 
 L["AH_SCAN_DONE_DETAIL"] = "拍賣場掃描用時 %.1f 秒 — 更新 %d 個價格，檢查 %d 項（%d 次商品查詢）。"
 L["AH_SCAN_DONE_FAST"] = "拍賣場掃描用時 %.1f 秒 — 更新 %d 個價格，檢查 %d 項（僅批次，無商品查詢）。"
+L["CHANGELOG_V011"] = "v0.1.1 (2026-07-06)\n\nFixed:\n- Settings sliders: accent fill follows the thumb while dragging.\n- Settings panel no longer fails to load when applying the modern scroll bar layout.\n- Loot History header buttons align vertically with the window title.\n- Loot History scroll bars align with catalog and session lists (narrower rail, cleaner frame).\n- Crafted loot catalog lists craft outputs again when session totals exist; empty Crafted tab shows a short hint.\n\nUpdated:\n- Removed AH posting suggestion from settings; Auction House posting helper is unchanged.\n- Session loot overlay scale slider in settings (75% to 150%).\n- Settings sliders use modern themed tracks without classic template borders.\n\nCurseForge: Artisan Nexus"
 L["CHANGELOG_V010"] = "v0.1.0 (2026-07-05)\n\nAdded:\n- Initial CurseForge and Wago release for WoW Midnight (12.0.1).\n- Session loot tracking for fishing and gathering with unified Loot History UI.\n- Artisan Hub: profitability, shopping list, craft queue, and recipe matcher.\n- Optional AH price sync, profession sidecar, overload hints, and minimap launcher.\n- Light and dark theme, eleven locales, and /an changelog in-game release notes.\n\nCurseForge: Artisan Nexus"

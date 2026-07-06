@@ -16,8 +16,7 @@ local ADDON_NAME, ns = ...
 
 local ArtisanNexus = ns.ArtisanNexus
 local E = ns.Constants.EVENTS
-local ApplyVisuals = ns.UI_ApplyVisuals
-local COLORS = ns.UI_COLORS
+local AceGUI = LibStub and LibStub("AceGUI-3.0", true)
 local AHPriceService
 local SavePrice
 
@@ -50,15 +49,17 @@ local STALE_TTL_SEC         = 60 * 60 * 24  -- 24 hours
 --- hammer the AH and trip Blizzard's rate limit.
 local SCAN_STEP_MAX_SEC = 0.6
 
---- Bottom-right sync bar — sits in the footer gutter between gold display and frame edge.
-local AH_SYNC_BAR_H = 22
-local AH_SYNC_BAR_INSET = 12
-local AH_SYNC_BAR_MIN_W = 160
-local AH_SYNC_BAR_MAX_W = 280
-local AH_SYNC_BAR_WIDTH_FRAC = 0.32
---- MoneyFrameBorder bottom inset (Blizzard_AuctionHouseFrame.xml).
-local AH_SYNC_FOOTER_Y = 6
-local AH_SYNC_MONEY_GAP = 10
+--- AceGUI sync button — CategoriesList footer (below category scroll / WoW Token).
+local AH_SYNC_BTN_H = 22
+local AH_SYNC_CAT_PAD_X = 8
+local AH_SYNC_CAT_PAD_BOTTOM = 10
+local AH_SYNC_CAT_SCROLLBAR_W = 28
+
+local function FormatRemaining(seconds)
+    if seconds < 60 then return string.format("%ds", math.max(1, math.floor(seconds))) end
+    if seconds < 3600 then return string.format("%dm", math.floor(seconds / 60)) end
+    return string.format("%dh", math.floor(seconds / 3600))
+end
 
 local function L(key, fallback)
     local loc = ns.L
@@ -109,72 +110,93 @@ end
 -- (GetFirstShownButton removed — sibling-button hunt was unreliable across
 -- AH tabs; the new chrome-relative anchor is independent of tab content.)
 
-local function AHSyncBarWidth(parent)
-    local pw = (parent and parent.GetWidth and parent:GetWidth()) or 800
-    local money = parent and parent.MoneyFrameBorder
-    local moneyW = (money and money.GetWidth and money:GetWidth()) or 168
-    local avail = pw - moneyW - AH_SYNC_MONEY_GAP - (AH_SYNC_BAR_INSET * 2)
-    local want = math.floor(pw * AH_SYNC_BAR_WIDTH_FRAC + 0.5)
-    return math.max(AH_SYNC_BAR_MIN_W, math.min(AH_SYNC_BAR_MAX_W, want, avail))
+local ScheduleAHSyncAnchorRefresh
+
+local function GetAHSyncWidgetFrame(widget)
+    return widget and (widget.frame or widget)
 end
 
---- Footer gutter: between MoneyFrameBorder and frame right edge (inside AH chrome).
-local function ApplyAHSyncButtonAnchor(btn, parent)
-    if not btn or not parent then
+--- CategoriesList bottom gutter (below WoW Token scroll row); full column width.
+local function ApplyAHSyncButtonAnchor(widget, parent)
+    local frame = GetAHSyncWidgetFrame(widget)
+    if not frame or not widget or not parent then
         return
     end
-    btn:ClearAllPoints()
-    btn:SetHeight(AH_SYNC_BAR_H)
-    local money = parent.MoneyFrameBorder
-    if money then
-        btn:SetPoint("BOTTOMLEFT", money, "BOTTOMRIGHT", AH_SYNC_MONEY_GAP, 0)
-        btn:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -AH_SYNC_BAR_INSET, AH_SYNC_FOOTER_Y)
+    local cat = parent.CategoriesList
+    if not cat then
+        frame:Hide()
+        return
+    end
+    if frame:GetParent() ~= cat then
+        frame:SetParent(cat)
+        frame:SetFrameStrata(cat:GetFrameStrata())
+        frame:SetFrameLevel(cat:GetFrameLevel() + 5)
+    end
+    frame:ClearAllPoints()
+    local catW = (cat.GetWidth and cat:GetWidth()) or 168
+    local btnW = math.max(100, catW - AH_SYNC_CAT_PAD_X - AH_SYNC_CAT_SCROLLBAR_W)
+    widget:SetAutoWidth(false)
+    widget:SetWidth(btnW)
+    widget:SetHeight(AH_SYNC_BTN_H)
+    frame:SetPoint("BOTTOMLEFT", cat, "BOTTOMLEFT", AH_SYNC_CAT_PAD_X, AH_SYNC_CAT_PAD_BOTTOM)
+    frame:SetPoint("BOTTOMRIGHT", cat, "BOTTOMRIGHT", -AH_SYNC_CAT_SCROLLBAR_W, AH_SYNC_CAT_PAD_BOTTOM)
+    if cat.IsShown and cat:IsShown() then
+        frame:Show()
     else
-        btn:SetSize(AHSyncBarWidth(parent), AH_SYNC_BAR_H)
-        btn:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -AH_SYNC_BAR_INSET, AH_SYNC_FOOTER_Y)
+        frame:Hide()
     end
 end
 
-local function ApplyAHButtonStyle(btn, isHover)
-    if not btn then
+local function ShowAHSyncTooltip(owner)
+    if not owner then
         return
     end
-    local active = AHPriceService and (AHPriceService._scanning or AHPriceService._paused)
-    local colors = COLORS or {}
-    local bg = (ns.UI_GetControlChromeBackdrop and ns.UI_GetControlChromeBackdrop())
-        or colors.tabInactive or { 0.12, 0.11, 0.13, 1 }
-    local border = colors.border or { 0.42, 0.38, 0.50, 0.9 }
-    if active then
-        bg = colors.surfaceHeaderChrome or colors.bgCard or bg
-        border = colors.accent or border
-    elseif isHover and ns.UI_GetControlChromeHoverBackdrop then
-        bg = ns.UI_GetControlChromeHoverBackdrop()
-        border = colors.borderLight or colors.accent or border
+    GameTooltip:SetOwner(owner, "ANCHOR_BOTTOMRIGHT")
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(L("AH_SYNC_PRICES", "AH price sync"), 1, 1, 1)
+    local stats = AHPriceService:GetCacheStats()
+    local lastAge = (stats.newest > 0) and (time() - stats.newest) or nil
+    GameTooltip:AddLine(" ")
+    if AHPriceService._scanning then
+        local pct = AHPriceService._totalItems > 0
+            and math.floor(AHPriceService._scannedItems / AHPriceService._totalItems * 100 + 0.5) or 0
+        GameTooltip:AddDoubleLine("Scanning",
+            string.format("%d/%d  (%d%%)", AHPriceService._scannedItems, AHPriceService._totalItems, pct),
+            0.7, 0.7, 0.7, 1, 1, 1)
+    elseif AHPriceService._paused then
+        GameTooltip:AddDoubleLine("Paused",
+            string.format("%d/%d", AHPriceService._scannedItems, AHPriceService._totalItems),
+            1, 0.84, 0, 1, 1, 1)
     end
-    if ApplyVisuals then
-        ApplyVisuals(btn, bg, { border[1], border[2], border[3], border[4] or 0.95 })
-    elseif btn.SetBackdrop then
-        btn:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8" })
-        btn:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
+    GameTooltip:AddDoubleLine("Cached", string.format("%d items", stats.total), 0.7, 0.7, 0.7, 1, 1, 1)
+    local plan = AHPriceService:GetScanPlan(false)
+    GameTooltip:AddDoubleLine("Tracked catalog",
+        string.format("%d items", plan.tracked), 0.7, 0.7, 0.7, 1, 1, 1)
+    if plan.freshSkipped > 0 then
+        GameTooltip:AddDoubleLine("Fresh (skipped)",
+            string.format("%d", plan.freshSkipped), 0.7, 0.7, 0.7, 1, 1, 1)
     end
-    local tc = colors.textBright or { 0.98, 0.97, 0.99, 1 }
-    if btn._idleLabel then
-        btn._idleLabel:SetTextColor(tc[1], tc[2], tc[3], tc[4] or 1)
+    GameTooltip:AddDoubleLine("Stale queue",
+        string.format("%d", plan.queued), 0.7, 0.7, 0.7, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Fresh / stale",
+        string.format("|cff44ff44%d|r / |cffd4af37%d|r", stats.fresh, stats.stale),
+        0.7, 0.7, 0.7, 1, 1, 1)
+    if lastAge then
+        GameTooltip:AddDoubleLine("Last update", FormatRemaining(lastAge) .. " ago",
+            0.7, 0.7, 0.7, 1, 1, 1)
     end
-    if btn._scanLabel then
-        btn._scanLabel:SetTextColor(tc[1], tc[2], tc[3], tc[4] or 1)
+    GameTooltip:AddLine(" ")
+    if AHPriceService._scanning then
+        GameTooltip:AddLine("|cffaaaaaaLeft-click: pause   ·   Right-click: menu|r")
+    elseif AHPriceService._paused then
+        GameTooltip:AddLine("|cffaaaaaaLeft-click: resume   ·   Right-click: menu|r")
+    else
+        GameTooltip:AddLine("|cffaaaaaaLeft-click: refresh stale   ·   Right-click: quick / full|r")
     end
-    if btn._progressTrack then
-        local track = colors.surfaceViewport or { 0.06, 0.06, 0.08, 0.85 }
-        btn._progressTrack:SetColorTexture(track[1], track[2], track[3], track[4] or 0.85)
-    end
-    if btn._progressFill then
-        local fill = colors.accent or { 0.52, 0.40, 0.66, 1 }
-        btn._progressFill:SetColorTexture(fill[1], fill[2], fill[3], active and 0.55 or 0.75)
-    end
+    GameTooltip:AddLine("|cffaaaaaaBrowse list restores when sync finishes.|r")
+    GameTooltip:Show()
 end
 
---- Batch browse often misses commodity prices; unique items with no row are treated as resolved.
 local function ItemIsCommodity(itemID)
     if not itemID or not C_AuctionHouse or not C_AuctionHouse.GetItemCommodityStatus then
         return false
@@ -245,7 +267,7 @@ AHPriceService = {
     _legacyTail = nil,
 }
 
-local function ScheduleAHSyncAnchorRefresh()
+function ScheduleAHSyncAnchorRefresh()
     local btn = AHPriceService._ahButton
     local af = _G.AuctionHouseFrame
     if not btn or not af or not af.IsShown or not af:IsShown() then
@@ -495,56 +517,33 @@ local function BuildQuickItemQueue()
     return ids
 end
 
-local function FormatRemaining(seconds)
-    if seconds < 60 then return string.format("%ds", math.max(1, math.floor(seconds))) end
-    if seconds < 3600 then return string.format("%dm", math.floor(seconds / 60)) end
-    return string.format("%dh", math.floor(seconds / 3600))
-end
-
---- Idle: wide labeled button. Scanning/paused: full-width progress bar + status text.
+--- AceGUI label: idle title or scan progress text.
 local function UpdateAHButtonText()
-    local btn = AHPriceService._ahButton
-    if not btn then
+    local widget = AHPriceService._ahButton
+    if not widget or not widget.SetText then
         return
     end
 
     local total = AHPriceService._totalItems or 0
     local done = AHPriceService._scannedItems or 0
-    local pct = (total > 0) and math.min(1, done / total) or 0
-    local pctInt = math.floor(pct * 100 + 0.5)
-    local innerW = math.max(1, btn:GetWidth() - 4)
-
-    if AHPriceService._scanning or AHPriceService._paused then
-        if btn._idleLabel then btn._idleLabel:Hide() end
-        if btn._icon then btn._icon:Hide() end
-        if btn._scanLabel then
-            btn._scanLabel:Show()
-            if AHPriceService._paused then
-                btn._scanLabel:SetText(string.format(
-                    L("AH_SYNC_PAUSED_FMT", "Paused %d / %d  (%d%%)"),
-                    done, total, pctInt))
-            else
-                btn._scanLabel:SetText(string.format(
-                    L("AH_SYNC_PROGRESS_FMT", "Syncing %d / %d  (%d%%)"),
-                    done, total, pctInt))
-            end
-        end
-        if btn._progressTrack then btn._progressTrack:Show() end
-        if btn._progressFill then
-            btn._progressFill:Show()
-            btn._progressFill:SetWidth(math.max(1, innerW * pct))
-        end
+    local pctInt = (total > 0) and math.floor(math.min(1, done / total) * 100 + 0.5) or 0
+    local text
+    if AHPriceService._paused then
+        text = string.format(
+            L("AH_SYNC_PAUSED_FMT", "Paused %d / %d  (%d%%)"),
+            done, total, pctInt)
+    elseif AHPriceService._scanning then
+        text = string.format(
+            L("AH_SYNC_PROGRESS_FMT", "Syncing %d / %d  (%d%%)"),
+            done, total, pctInt)
     else
-        if btn._idleLabel then
-            btn._idleLabel:Show()
-            btn._idleLabel:SetText(L("AH_SYNC_PRICES", "Sync AH Prices"))
-        end
-        if btn._icon then btn._icon:Show() end
-        if btn._scanLabel then btn._scanLabel:Hide() end
-        if btn._progressTrack then btn._progressTrack:Hide() end
-        if btn._progressFill then btn._progressFill:Hide() end
+        text = L("AH_SYNC_PRICES", "Sync AH Prices")
     end
-    ApplyAHButtonStyle(btn, btn._isHover == true)
+    widget:SetText(text)
+    local af = _G.AuctionHouseFrame
+    if af then
+        ApplyAHSyncButtonAnchor(widget, af)
+    end
 end
 
 local function AHIsOpen()
@@ -1194,62 +1193,28 @@ local function OnItemSearchResults(itemKey, qid)
     ScheduleScanStep()
 end
 
---- Wide bottom-right sync bar: labeled idle state, full progress bar while scanning.
+--- AceGUI Button in CategoriesList footer (Browse tab).
 local function TryCreateAHButton()
     if AHPriceService._ahButtonCreated then
         return
     end
+    if not AceGUI then
+        return
+    end
     local parent = _G.AuctionHouseFrame
-    if not parent then
+    if not parent or not parent.CategoriesList then
         return
     end
-    local btn = CreateFrame("Button", "ArtisanNexusAHSyncBtn", parent, "BackdropTemplate")
-    if not btn then
-        return
-    end
-    ApplyAHSyncButtonAnchor(btn, parent)
-    btn:SetFrameStrata("HIGH")
-    btn:SetFrameLevel(parent:GetFrameLevel() + 50)
-    btn:EnableMouse(true)
-    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-    local progressTrack = btn:CreateTexture(nil, "BACKGROUND")
-    progressTrack:SetPoint("TOPLEFT", 2, -2)
-    progressTrack:SetPoint("BOTTOMRIGHT", -2, 2)
-    progressTrack:Hide()
-    btn._progressTrack = progressTrack
+    local widget = AceGUI:Create("Button")
+    local frame = widget.frame
+    frame:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    widget:SetAutoWidth(false)
+    widget:SetText(L("AH_SYNC_PRICES", "Sync AH Prices"))
 
-    local progressFill = btn:CreateTexture(nil, "BACKGROUND", nil, 1)
-    progressFill:SetPoint("TOPLEFT", 2, -2)
-    progressFill:SetPoint("BOTTOMLEFT", 2, 2)
-    progressFill:SetWidth(1)
-    progressFill:Hide()
-    btn._progressFill = progressFill
-
-    local icon = btn:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(18, 18)
-    icon:SetPoint("LEFT", 8, 0)
-    icon:SetTexture("Interface\\Icons\\INV_Misc_Coin_02")
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    btn._icon = icon
-
-    local idleLabel = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    idleLabel:SetPoint("LEFT", icon, "RIGHT", 6, 0)
-    idleLabel:SetPoint("RIGHT", -8, 0)
-    idleLabel:SetJustifyH("CENTER")
-    idleLabel:SetText(L("AH_SYNC_PRICES", "Sync AH Prices"))
-    btn._idleLabel = idleLabel
-
-    local scanLabel = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    scanLabel:SetPoint("LEFT", 8, 0)
-    scanLabel:SetPoint("RIGHT", -8, 0)
-    scanLabel:SetJustifyH("CENTER")
-    scanLabel:Hide()
-    btn._scanLabel = scanLabel
-
-    btn:SetScript("OnClick", function(_, mouseButton)
+    widget:SetCallback("OnClick", function(_, _, mouseButton)
         if mouseButton == "RightButton" then
-            AHPriceService:ShowContextMenu(btn)
+            AHPriceService:ShowContextMenu(frame)
             return
         end
         if AHPriceService._paused then
@@ -1260,74 +1225,25 @@ local function TryCreateAHButton()
             AHPriceService:StartScan(false, true)
         end
     end)
-    btn:SetScript("OnEnter", function(self)
-        self._isHover = true
-        ApplyAHButtonStyle(self, true)
-        GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-        GameTooltip:ClearLines()
-        GameTooltip:AddLine(L("AH_SYNC_PRICES", "AH price sync"), 1, 1, 1)
-        local stats = AHPriceService:GetCacheStats()
-        local lastAge = (stats.newest > 0) and (time() - stats.newest) or nil
-        GameTooltip:AddLine(" ")
-        if AHPriceService._scanning then
-            local pct = AHPriceService._totalItems > 0
-                and math.floor(AHPriceService._scannedItems / AHPriceService._totalItems * 100 + 0.5) or 0
-            GameTooltip:AddDoubleLine("Scanning",
-                string.format("%d/%d  (%d%%)", AHPriceService._scannedItems, AHPriceService._totalItems, pct),
-                0.7, 0.7, 0.7, 1, 1, 1)
-        elseif AHPriceService._paused then
-            GameTooltip:AddDoubleLine("Paused",
-                string.format("%d/%d", AHPriceService._scannedItems, AHPriceService._totalItems),
-                1, 0.84, 0, 1, 1, 1)
-        end
-        GameTooltip:AddDoubleLine("Cached", string.format("%d items", stats.total), 0.7, 0.7, 0.7, 1, 1, 1)
-        local plan = AHPriceService:GetScanPlan(false)
-        GameTooltip:AddDoubleLine("Tracked catalog",
-            string.format("%d items", plan.tracked), 0.7, 0.7, 0.7, 1, 1, 1)
-        if plan.freshSkipped > 0 then
-            GameTooltip:AddDoubleLine("Fresh (skipped)",
-                string.format("%d", plan.freshSkipped), 0.7, 0.7, 0.7, 1, 1, 1)
-        end
-        GameTooltip:AddDoubleLine("Stale queue",
-            string.format("%d", plan.queued), 0.7, 0.7, 0.7, 1, 1, 1)
-        GameTooltip:AddDoubleLine("Fresh / stale",
-            string.format("|cff44ff44%d|r / |cffd4af37%d|r", stats.fresh, stats.stale),
-            0.7, 0.7, 0.7, 1, 1, 1)
-        if lastAge then
-            GameTooltip:AddDoubleLine("Last update", FormatRemaining(lastAge) .. " ago",
-                0.7, 0.7, 0.7, 1, 1, 1)
-        end
-        GameTooltip:AddLine(" ")
-        if AHPriceService._scanning then
-            GameTooltip:AddLine("|cffaaaaaaLeft-click: pause   ·   Right-click: menu|r")
-        elseif AHPriceService._paused then
-            GameTooltip:AddLine("|cffaaaaaaLeft-click: resume   ·   Right-click: menu|r")
-        else
-            GameTooltip:AddLine("|cffaaaaaaLeft-click: refresh stale   ·   Right-click: quick / full|r")
-        end
-        GameTooltip:AddLine("|cffaaaaaaBrowse list restores when sync finishes.|r")
-        GameTooltip:Show()
+    widget:SetCallback("OnEnter", function()
+        ShowAHSyncTooltip(frame)
     end)
-    btn:SetScript("OnLeave", function(self)
-        self._isHover = false
-        ApplyAHButtonStyle(self, false)
+    widget:SetCallback("OnLeave", function()
         GameTooltip:Hide()
     end)
 
-    if not parent.ArtisanNexusAHSyncSizeHook then
-        parent.ArtisanNexusAHSyncSizeHook = true
-        parent:HookScript("OnSizeChanged", function()
-            if AHPriceService._ahButton then
-                ApplyAHSyncButtonAnchor(AHPriceService._ahButton, parent)
-                UpdateAHButtonText()
-            end
-        end)
+    ApplyAHSyncButtonAnchor(widget, parent)
+
+    local cat = parent.CategoriesList
+    if cat and not cat.ArtisanNexusAHSyncAnchorHook then
+        cat.ArtisanNexusAHSyncAnchorHook = true
+        cat:HookScript("OnShow", ScheduleAHSyncAnchorRefresh)
+        cat:HookScript("OnHide", ScheduleAHSyncAnchorRefresh)
     end
 
-    ApplyAHButtonStyle(btn, false)
-    UpdateAHButtonText()
     AHPriceService._ahButtonCreated = true
-    AHPriceService._ahButton = btn
+    AHPriceService._ahButton = widget
+    UpdateAHButtonText()
     ScheduleAHSyncAnchorRefresh()
 end
 

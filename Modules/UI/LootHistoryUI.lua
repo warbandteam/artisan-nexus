@@ -42,7 +42,18 @@ local LOOT_BOTTOM_CLEARANCE = LOOT_GRIP_SIZE + LOOT_GRIP_INSET_Y + 1
 local LOOT_SESSION_LABEL_BAND = 26
 
 local function LootScrollReserve()
-    return (LAYOUT.SCROLLBAR_COLUMN_WIDTH or 26) + (LAYOUT.SCROLL_GAP or 2)
+    return (LAYOUT.SCROLLBAR_COLUMN_WIDTH or 22) + (LAYOUT.SCROLL_GAP or 2)
+end
+
+--- Bar column height tracks viewport panel (never anchor to scroll — scroll anchors to column).
+local function PositionLootScrollBarColumn(panel, host, barCol)
+    if not panel or not barCol then
+        return
+    end
+    barCol:ClearAllPoints()
+    barCol:SetPoint("TOP", panel, "TOP", 0, 0)
+    barCol:SetPoint("BOTTOM", panel, "BOTTOM", 0, 0)
+    barCol:SetPoint("RIGHT", host or panel, "RIGHT", 0, 0)
 end
 
 local function LootScrollAttachOpts(host, panel)
@@ -200,11 +211,13 @@ local function BuildCraftedCatalogEntries(totals)
         local id = tonumber(itemID)
         local n = tonumber(qty)
         if id and n and n > 0 then
-            entries[#entries + 1] = { itemID = id }
+            entries[#entries + 1] = { id = id }
         end
     end
     table.sort(entries, function(a, b)
-        return (totals[a.itemID] or 0) > (totals[b.itemID] or 0)
+        local qa = totals[a.id] or totals[tostring(a.id)] or 0
+        local qb = totals[b.id] or totals[tostring(b.id)] or 0
+        return qa > qb
     end)
     return entries
 end
@@ -614,6 +627,12 @@ function LootHistoryUI:LayoutLootScrollChrome()
     if self.sessionScroll and ns.UI_FinishScrollLayout then
         ns.UI_FinishScrollLayout(self.sessionScroll)
     end
+    if self.catalogScroll and self.catalogScroll._anScrollBarColumn then
+        PositionLootScrollBarColumn(self.catalogPanel, self.catalogHost, self.catalogScroll._anScrollBarColumn)
+    end
+    if self.sessionScroll and self.sessionScroll._anScrollBarColumn then
+        PositionLootScrollBarColumn(self.sessionPanel, self.sessionHost, self.sessionScroll._anScrollBarColumn)
+    end
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_ApplyClassicScrollBarLayout then
         if self.catalogScroll then
             ns.UI_ApplyClassicScrollBarLayout(self.catalogScroll)
@@ -914,6 +933,7 @@ function LootHistoryUI:Refresh()
     ClearScrollContent(self.sessionScroll, self.sessionContent)
 
     self:LayoutLootCatalogHost()
+    self:LayoutLootScrollChrome()
 
     if self.catalogHost and self.catalogHost.Show then
         self.catalogHost:Show()
@@ -1380,6 +1400,7 @@ function LootHistoryUI:Show(which)
             f:StopMovingOrSizing()
             LootHistoryUI._pauseLootFx = false
             LootHistoryUI:SaveFrameSize()
+            LootHistoryUI:Refresh()
         end,
         onClose = function()
             f:Hide()
@@ -1488,6 +1509,9 @@ function LootHistoryUI:Show(which)
         ns.UI_StyleClassicToolButton(overloadTrackerBtn)
     end
     LootHistoryUI:UpdateLootOverlayToggle()
+    if ns.UI_LayoutModernShellHeader and shell.bar then
+        ns.UI_LayoutModernShellHeader(shell.bar)
+    end
     LootHistoryUI:ApplyHeaderTitleClip()
 
     local function LootTabLabel(key)

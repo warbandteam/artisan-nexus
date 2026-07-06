@@ -7,8 +7,8 @@ local ADDON_NAME, ns = ...
 
 ---@class Constants
 local Constants = {
-    ADDON_VERSION = "0.1.0",
-    ADDON_RELEASE_DATE = "2026-07-05",
+    ADDON_VERSION = "0.1.1",
+    ADDON_RELEASE_DATE = "2026-07-06",
 
     --- Must match ## Interface in ArtisanNexus.toc (Midnight 12.0.1 retail)
     CURRENT_INTERFACE = 120001,

@@ -275,10 +275,17 @@
                                 </Anchors>
                             </Button>
 
-                            <Slider name="ArtisanNexusSettings_SessionRecentSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                            <Slider name="ArtisanNexusSettings_LootOverlayScaleSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
                                 <Size x="300" y="20"/>
                                 <Anchors>
                                     <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootOverlayPosition" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                </Anchors>
+                            </Slider>
+
+                            <Slider name="ArtisanNexusSettings_SessionRecentSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
+                                <Size x="300" y="20"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_LootOverlayScaleSlider" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
                                 </Anchors>
                             </Slider>
 
@@ -407,42 +414,10 @@
                                 </Anchors>
                             </CheckButton>
 
-                            <Frame name="ArtisanNexusSettings_PostingLabelFrame" enableMouse="true">
-                                <Size x="524" y="22"/>
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Debug" relativePoint="BOTTOMLEFT" x="0" y="-16"/>
-                                </Anchors>
-                                <Layers>
-                                    <Layer level="ARTWORK">
-                                        <FontString name="ArtisanNexusSettings_PostingLabel" inherits="GameFontHighlight" justifyH="LEFT" text="AH posting suggestion">
-                                            <Anchors>
-                                                <Anchor point="LEFT" x="8" y="0"/>
-                                            </Anchors>
-                                        </FontString>
-                                    </Layer>
-                                </Layers>
-                            </Frame>
-
-                            <CheckButton name="ArtisanNexusSettings_PostingUndercut" inherits="UICheckButtonTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingLabelFrame" relativePoint="BOTTOMLEFT" x="0" y="-8"/>
-                                </Anchors>
-                            </CheckButton>
-                            <CheckButton name="ArtisanNexusSettings_PostingAverage" inherits="UICheckButtonTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingUndercut" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
-                                </Anchors>
-                            </CheckButton>
-                            <CheckButton name="ArtisanNexusSettings_PostingMax" inherits="UICheckButtonTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingAverage" relativePoint="BOTTOMLEFT" x="0" y="-10"/>
-                                </Anchors>
-                            </CheckButton>
-
                             <Slider name="ArtisanNexusSettings_AhFreshSlider" inherits="OptionsSliderTemplate" obeyStepOnDrag="true">
                                 <Size x="300" y="20"/>
                                 <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_PostingMax" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
+                                    <Anchor point="TOPLEFT" relativeTo="ArtisanNexusSettings_Debug" relativePoint="BOTTOMLEFT" x="0" y="-14"/>
                                 </Anchors>
                             </Slider>
 

@@ -480,6 +480,9 @@ local function LootResolveCatalogRanks(entry)
     if entry and entry.id then
         return { entry.id }
     end
+    if entry and entry.itemID then
+        return { entry.itemID }
+    end
     return {}
 end
 
@@ -595,7 +598,13 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
     end
 
     local innerW = innerWOverride or content:GetWidth()
-    if not innerW or innerW < 100 then innerW = 280 end
+    if innerWOverride then
+        if not innerW or innerW < 1 then
+            innerW = 80
+        end
+    elseif not innerW or innerW < 100 then
+        innerW = 280
+    end
     --- Fixed side margins carve out the usable grid width first; the
     --- inter-card gap only governs spacing *between* cards, not the edges.
     local usableW = math.max(1, innerW - GRID_SIDE_PAD * 2)
@@ -622,6 +631,33 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
     local fmt = (L and L["LOOT_REF_TOTAL_FMT"]) or "×%d"
 
     local n = #entries
+    if n < 1 then
+        local empty = content._anCatalogEmptyFS
+        if not empty then
+            empty = content:CreateFontString(nil, "OVERLAY", CATALOG_CELL_TEXT_FONT)
+            content._anCatalogEmptyFS = empty
+        end
+        empty:ClearAllPoints()
+        empty:SetPoint("TOPLEFT", content, "TOPLEFT", GRID_SIDE_PAD, -GRID_SIDE_PAD)
+        empty:SetWidth(math.max(80, innerW - GRID_SIDE_PAD * 2))
+        local emptyMsg
+        if tabKey == "crafted" then
+            emptyMsg = (L and L["LOOT_CRAFTED_HINT"]) or "Items you crafted this login appear here."
+        else
+            emptyMsg = (L and L["LOOT_SESSION_EMPTY"]) or "No loot recorded yet."
+        end
+        empty:SetText(emptyMsg)
+        local dim = COLORS.textDim or { 0.55, 0.55, 0.58, 1 }
+        empty:SetTextColor(dim[1], dim[2], dim[3], 1)
+        empty:Show()
+        content:SetSize(innerW, math.max(32, empty:GetStringHeight() + GRID_SIDE_PAD * 2))
+        content:SetScript("OnUpdate", nil)
+        return
+    end
+    if content._anCatalogEmptyFS then
+        content._anCatalogEmptyFS:Hide()
+    end
+
     local rows = math.max(1, math.ceil(n / cols))
 
     --- Row-relative card height: each row's height matches only the ranks
@@ -637,8 +673,12 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
     for idx = 1, n do
         local entry = entries[idx]
         local ranks = resolveRanks(entry)
-        if #ranks < 1 and entry and entry.id then
-            ranks = { entry.id }
+        if #ranks < 1 and entry then
+            if entry.id then
+                ranks = { entry.id }
+            elseif entry.itemID then
+                ranks = { entry.itemID }
+            end
         end
         entryRanks[idx] = ranks
         if #ranks >= 1 then
@@ -687,7 +727,7 @@ local function PopulateCatalog(content, entries, totals, tabKey, innerWOverride)
         --- invisible placeholder frame carried no visuals and is skipped).
         if #ranks >= 1 then
             local cellFrame = PoolAcquire(cellPool, CreateCatalogCell, content, classicUi)
-            cellFrame._glowEntryId = entry and entry.id or nil
+            cellFrame._glowEntryId = entry and (entry.id or entry.itemID) or nil
             cellFrame._glowRankIds = ranks
             cellFrame:SetSize(cellW, cellH)
             if cellFrame.SetClipsChildren then
@@ -1199,6 +1239,9 @@ local function ReleaseContent(content)
         if pools.charLine then
             PoolReleaseAll(pools.charLine, nil)
         end
+    end
+    if content._anCatalogEmptyFS then
+        content._anCatalogEmptyFS:Hide()
     end
     if content._anEmptyFS then
         content._anEmptyFS:Hide()

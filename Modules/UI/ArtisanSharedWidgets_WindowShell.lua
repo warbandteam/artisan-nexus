@@ -71,6 +71,67 @@ function ns.UI_RefreshWindowHeader(headerBar)
             ns.UI_RegisterClassicShellDebug(parent, headerBar)
         end
     end
+    if ns.UI_LayoutModernShellHeader then
+        ns.UI_LayoutModernShellHeader(headerBar)
+    end
+end
+
+--- Modern shell: vertically center header utility cluster on the title strip.
+function ns.UI_LayoutModernShellHeader(headerBar)
+    if not headerBar or (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) then
+        return
+    end
+    local sl = ShellLayout()
+    local pad = sl.pad
+    local close = headerBar._anShellClose
+    if close then
+        close:ClearAllPoints()
+        close:SetPoint("RIGHT", headerBar, "RIGHT", -4, 0)
+    end
+    local rightClip = close
+    local utilGap = -2
+    local settingsBtn = headerBar._anShellSettings
+    if settingsBtn then
+        settingsBtn:ClearAllPoints()
+        settingsBtn:SetPoint("RIGHT", rightClip, "LEFT", -4, 0)
+        rightClip = settingsBtn
+    end
+    local utilities = headerBar._anShellUtilities
+    if utilities then
+        for i = 1, #utilities do
+            local btn = utilities[i]
+            if btn then
+                btn:ClearAllPoints()
+                btn:SetPoint("RIGHT", rightClip, "LEFT", utilGap, 0)
+                rightClip = btn
+            end
+        end
+    end
+    local extras = headerBar._anShellExtraRight
+    if extras then
+        for i = 1, #extras do
+            local btn = extras[i]
+            if btn and btn.ClearAllPoints then
+                btn:ClearAllPoints()
+                btn:SetPoint("RIGHT", rightClip, "LEFT", utilGap, 0)
+                rightClip = btn
+            end
+        end
+    end
+    headerBar._anShellRightClip = rightClip
+    local logo = headerBar._anShellLogo
+    local title = headerBar._anShellTitle
+    if title then
+        title:ClearAllPoints()
+        if logo then
+            title:SetPoint("LEFT", logo, "RIGHT", 8, 0)
+        else
+            title:SetPoint("LEFT", headerBar, "LEFT", pad, 0)
+        end
+        if rightClip then
+            title:SetPoint("RIGHT", rightClip, "LEFT", -8, 0)
+        end
+    end
 end
 
 --- Dialog root: disable child clip + refresh AceGUI-style title strip (classic only).
@@ -392,7 +453,7 @@ function ns.UI_CreateWindowHeader(parent, config)
     headerBar._anShellTitle = title
 
     local close = CreateFrame("Button", nil, headerBar, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", headerBar, "TOPRIGHT", -4, -4)
+    close:SetPoint("RIGHT", headerBar, "RIGHT", -4, 0)
     close:SetScript("OnClick", config.onClose or function()
         parent:Hide()
     end)
@@ -476,6 +537,8 @@ function ns.UI_CreateWindowHeader(parent, config)
 
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_LayoutClassicShellHeader then
         ns.UI_LayoutClassicShellHeader(headerBar)
+    elseif ns.UI_LayoutModernShellHeader then
+        ns.UI_LayoutModernShellHeader(headerBar)
     end
 
     return {

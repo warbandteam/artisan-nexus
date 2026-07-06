@@ -587,6 +587,9 @@ function Utilities.ResolveCatalogEntryRanks(entry)
     if entry.id then
         return { entry.id }
     end
+    if entry.itemID then
+        return { entry.itemID }
+    end
     return {}
 end
 

@@ -10,26 +10,44 @@ local E = ns.Constants and ns.Constants.EVENTS
 local L = ns.L
 local COLORS = ns.UI_COLORS
 
-local TOAST_SCALE = 1.15
+local OVERLAY_SCALE_DEFAULT = 1.15
+local OVERLAY_SCALE_MIN = 0.75
+local OVERLAY_SCALE_MAX = 1.5
 
-local function Scaled(v)
-    return math.floor(v * TOAST_SCALE + 0.5)
+local OVERLAY_DIM_BASE = {
+    toastW = 340,
+    toastH = 38,
+    toastGap = 6,
+    iconSz = 26,
+    toastPad = 6,
+    toastIconGap = 6,
+    toastColGap = 6,
+    toastQtyW = 34,
+    toastPriceW = 102,
+    toastCoinH = 13,
+    slideOffset = 20,
+}
+
+local function GetOverlayScale()
+    local p = ns.db and ns.db.profile
+    local n = p and tonumber(p.sessionLootOverlayScale)
+    if not n or n ~= n then
+        return OVERLAY_SCALE_DEFAULT
+    end
+    return math.max(OVERLAY_SCALE_MIN, math.min(OVERLAY_SCALE_MAX, n))
 end
 
-local TOAST_W = Scaled(340)
-local TOAST_H = Scaled(38)
-local TOAST_GAP = Scaled(6)
-local ICON_SZ = Scaled(26)
-local TOAST_PAD = Scaled(6)
-local TOAST_ICON_GAP = Scaled(6)
-local TOAST_COL_GAP = Scaled(6)
-local TOAST_QTY_W = Scaled(34)
-local TOAST_PRICE_W = Scaled(102)
-local TOAST_COIN_H = Scaled(13)
+local function OverlayDim(key)
+    local base = OVERLAY_DIM_BASE[key]
+    if not base then
+        return 0
+    end
+    return math.floor(base * GetOverlayScale() + 0.5)
+end
+
 local HOLD_SEC_DEFAULT = 4.0
 local FADE_SEC = 0.85
 local SLIDE_IN_SEC = 0.22
-local SLIDE_OFFSET = Scaled(20)
 local PULSE_SEC = 0.55
 local STACK_MAX_DEFAULT = 3
 local STACK_MAX_LIMIT = 6
@@ -132,7 +150,7 @@ local function EnsureEditHint(self)
     local hint = anchor:CreateFontString(nil, "OVERLAY", ToastFont())
     hint:SetPoint("BOTTOM", anchor, "TOP", 0, 6)
     hint:SetJustifyH("CENTER")
-    hint:SetWidth(TOAST_W + 40)
+    hint:SetWidth(OverlayDim("toastW") + 40)
     if hint.SetWordWrap then
         hint:SetWordWrap(true)
     end
@@ -240,13 +258,14 @@ LayoutToastRow = function(row)
     if not row then
         return
     end
-    row:SetSize(TOAST_W, TOAST_H)
+    row:SetSize(OverlayDim("toastW"), OverlayDim("toastH"))
     local toastFont = ToastFont()
     local ic = row._icon
     if ic then
-        ic:SetSize(ICON_SZ, ICON_SZ)
+        local iconSz = OverlayDim("iconSz")
+        ic:SetSize(iconSz, iconSz)
         ic:ClearAllPoints()
-        ic:SetPoint("LEFT", row, "LEFT", TOAST_PAD, 0)
+        ic:SetPoint("LEFT", row, "LEFT", OverlayDim("toastPad"), 0)
     end
     local textFields = { row._name, row._qty, row._price }
     for i = 1, 3 do
@@ -262,9 +281,9 @@ LayoutToastRow = function(row)
     local qty = row._qty
     local name = row._name
     if price then
-        price:SetWidth(TOAST_PRICE_W)
+        price:SetWidth(OverlayDim("toastPriceW"))
         price:ClearAllPoints()
-        price:SetPoint("RIGHT", row, "RIGHT", -TOAST_PAD, 0)
+        price:SetPoint("RIGHT", row, "RIGHT", -OverlayDim("toastPad"), 0)
         if price.SetJustifyH then
             price:SetJustifyH("RIGHT")
         end
@@ -273,22 +292,22 @@ LayoutToastRow = function(row)
         end
     end
     if qty and price then
-        qty:SetWidth(TOAST_QTY_W)
+        qty:SetWidth(OverlayDim("toastQtyW"))
         qty:ClearAllPoints()
-        qty:SetPoint("RIGHT", price, "LEFT", -TOAST_COL_GAP, 0)
+        qty:SetPoint("RIGHT", price, "LEFT", -OverlayDim("toastColGap"), 0)
         if qty.SetJustifyH then
             qty:SetJustifyH("RIGHT")
         end
     end
     if name then
         name:ClearAllPoints()
-        name:SetPoint("LEFT", ic or row, "RIGHT", TOAST_ICON_GAP, 0)
+        name:SetPoint("LEFT", ic or row, "RIGHT", OverlayDim("toastIconGap"), 0)
         if qty then
-            name:SetPoint("RIGHT", qty, "LEFT", -TOAST_COL_GAP, 0)
+            name:SetPoint("RIGHT", qty, "LEFT", -OverlayDim("toastColGap"), 0)
         elseif price then
-            name:SetPoint("RIGHT", price, "LEFT", -TOAST_COL_GAP, 0)
+            name:SetPoint("RIGHT", price, "LEFT", -OverlayDim("toastColGap"), 0)
         else
-            name:SetPoint("RIGHT", row, "RIGHT", -TOAST_PAD, 0)
+            name:SetPoint("RIGHT", row, "RIGHT", -OverlayDim("toastPad"), 0)
         end
         if name.SetJustifyH then
             name:SetJustifyH("LEFT")
@@ -360,7 +379,7 @@ AcquireToast = function(parent)
     local iconFrame
     if createIcon then
         local iconBr = COLORS.lootCellBorder
-        iconFrame = createIcon(row, nil, ICON_SZ, false, iconBr, classic and true or false)
+        iconFrame = createIcon(row, nil, OverlayDim("iconSz"), false, iconBr, classic and true or false)
         if iconFrame and ns.UI_StyleLootIconFrame then
             ns.UI_StyleLootIconFrame(iconFrame, iconBr)
         end
@@ -434,7 +453,7 @@ PaintToast = function(row, event)
         end
     end
     if totalCopper and totalCopper > 0 and formatCopper then
-        priceStr:SetText(formatCopper(totalCopper, TOAST_COIN_H) or "")
+        priceStr:SetText(formatCopper(totalCopper, OverlayDim("toastCoinH")) or "")
         local pr, pg, pb = GetPriceColor()
         priceStr:SetTextColor(pr, pg, pb, 1)
         priceStr:Show()
@@ -492,7 +511,7 @@ function SessionLootOverlayUI:EnsureAnchor()
         return
     end
     local anchor = CreateFrame("Frame", "ArtisanNexusSessionLootOverlayAnchor", UIParent)
-    anchor:SetSize(TOAST_W, TOAST_H)
+    anchor:SetSize(OverlayDim("toastW"), OverlayDim("toastH"))
     anchor:SetFrameStrata("HIGH")
     anchor:SetFrameLevel(30)
     anchor:EnableMouse(false)
@@ -618,11 +637,13 @@ function SessionLootOverlayUI:LayoutStack()
     local n = #active
     if n < 1 then
         anchor:Hide()
-        anchor:SetHeight(TOAST_H)
+        anchor:SetHeight(OverlayDim("toastH"))
         return
     end
-    local h = n * TOAST_H + math.max(0, n - 1) * TOAST_GAP
-    anchor:SetSize(TOAST_W, h)
+    local toastH = OverlayDim("toastH")
+    local toastGap = OverlayDim("toastGap")
+    local h = n * toastH + math.max(0, n - 1) * toastGap
+    anchor:SetSize(OverlayDim("toastW"), h)
     local y = 0
     for i = 1, n do
         local entry = active[i]
@@ -632,7 +653,7 @@ function SessionLootOverlayUI:LayoutStack()
             row:ClearAllPoints()
             row:SetPoint("TOPRIGHT", anchor, "TOPRIGHT", -slideX, -y)
             row:Show()
-            y = y + TOAST_H + TOAST_GAP
+            y = y + toastH + toastGap
         end
     end
     anchor:Show()
@@ -657,7 +678,7 @@ function SessionLootOverlayUI:StartToastFade(entry)
     local holdSec = GetHoldSec()
     local fadeSec = FADE_SEC
     entry.born = entry.born or GetTime()
-    entry.slideX = SLIDE_OFFSET
+    entry.slideX = OverlayDim("slideOffset")
     row:SetAlpha(0)
 
     row:SetScript("OnUpdate", function()
@@ -666,7 +687,7 @@ function SessionLootOverlayUI:StartToastFade(entry)
 
         if age < SLIDE_IN_SEC then
             local ease = EaseOutQuad(age / SLIDE_IN_SEC)
-            entry.slideX = SLIDE_OFFSET * (1 - ease)
+            entry.slideX = OverlayDim("slideOffset") * (1 - ease)
             alphaMul = ease
             SessionLootOverlayUI:LayoutStack()
         elseif not entry._slideDone then
@@ -907,6 +928,29 @@ end
 function SessionLootOverlayUI:ApplySettingsAnchor()
     EnsureInitialized()
     self:ApplyAnchor()
+    self:LayoutStack()
+end
+
+--- Settings overlay size slider — relayout pooled + active toasts.
+function SessionLootOverlayUI:ApplySettingsScale()
+    EnsureInitialized()
+    if self._editHint then
+        self._editHint:SetWidth(OverlayDim("toastW") + 40)
+    end
+    local pool = self._pool
+    for i = 1, #pool do
+        LayoutToastRow(pool[i])
+    end
+    for i = 1, #self._active do
+        local entry = self._active[i]
+        local row = entry and entry.row
+        if row then
+            LayoutToastRow(row)
+            if row._anLastEvent then
+                PaintToast(row, row._anLastEvent)
+            end
+        end
+    end
     self:LayoutStack()
 end
 

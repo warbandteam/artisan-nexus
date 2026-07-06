@@ -655,23 +655,15 @@ local function InstallScrollBarColumnChrome(container)
         local track = container:CreateTexture(nil, "BACKGROUND", nil, -2)
         track:SetAllPoints()
         container._anTrackBg = track
-        local pixelScale = GetPixelScale(container)
-        ApplyAccentBorders(container, pixelScale)
         RegisterScrollChrome(container)
     end
     container._anTrackBg:Show()
     ApplyScrollChromeBackdrop(container._anTrackBg)
     if container.BorderLeft then
-        container.BorderLeft:Show()
-        container.BorderRight:Show()
-        container.BorderTop:Show()
-        container.BorderBottom:Show()
-        local C = GetColors()
-        local ac = C.accent or { 0.44, 0.32, 0.58, 1 }
-        container.BorderLeft:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
-        container.BorderRight:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
-        container.BorderTop:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
-        container.BorderBottom:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
+        container.BorderLeft:Hide()
+        container.BorderRight:Hide()
+        container.BorderTop:Hide()
+        container.BorderBottom:Hide()
     end
     container._anColumnChromeInstalled = true
 end
@@ -691,13 +683,11 @@ function ns.UI_RefreshScrollBarColumns()
             if col._anTrackBg then
                 ApplyScrollChromeBackdrop(col._anTrackBg)
             end
-            if col.BorderLeft then
-                local C = GetColors()
-                local ac = C.accent or { 0.44, 0.32, 0.58, 1 }
-                col.BorderLeft:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
-                col.BorderRight:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
-                col.BorderTop:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
-                col.BorderBottom:SetColorTexture(ac[1], ac[2], ac[3], 0.6)
+            if col.BorderLeft and col.BorderLeft.Hide then
+                col.BorderLeft:Hide()
+                col.BorderRight:Hide()
+                col.BorderTop:Hide()
+                col.BorderBottom:Hide()
             end
         end
     end
@@ -957,6 +947,19 @@ function ns.UI_AttachThemedScroll(parent, opts)
     local content = CreateFrame("Frame", nil, scroll)
     content:SetSize(1, 1)
     scroll:SetScrollChild(content)
+    if ns.UI_EnableStandardScrollWheel then
+        ns.UI_EnableStandardScrollWheel(scroll)
+    end
+    if not scroll._anNativeScrollHooked and scroll.HookScript then
+        scroll._anNativeScrollHooked = true
+        scroll:HookScript("OnScrollRangeChanged", function(sf)
+            if ns.UI_FinishScrollLayout then
+                ns.UI_FinishScrollLayout(sf)
+            elseif ns.UI_RefreshNativeScrollFrame then
+                ns.UI_RefreshNativeScrollFrame(sf)
+            end
+        end)
+    end
 
     return scroll, content, barCol
 end

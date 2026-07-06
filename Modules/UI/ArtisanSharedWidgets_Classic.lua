@@ -411,7 +411,7 @@ local function ClassicScrollColumnWidth(col)
     return colW
 end
 
-local RAIL_W = 24
+local RAIL_W = 20
 local RAIL_TOP_Y = 18
 local RAIL_BOT_Y = -16
 
@@ -607,9 +607,9 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
         if chainFrom then
             widget:SetPoint("RIGHT", chainFrom, "LEFT", -(chainGap or iconGap), 0)
         else
-            widget:SetPoint("RIGHT", headerBar, "TOPRIGHT", -utilityRight, 0)
+            widget:SetPoint("RIGHT", headerBar, "RIGHT", -utilityRight, 0)
         end
-        widget:SetPoint("TOP", titleCenter, "TOP", 0, titleStripCenterY)
+        widget:SetPoint("CENTER", titleCenter, "CENTER", 0, 0)
     end
 
     if headerBar._anShellLogo then
@@ -619,7 +619,7 @@ function ns.UI_LayoutClassicShellHeader(headerBar)
         -- logo sits close to the frame corner, over the decorative wing cap —
         -- matching default WoW dialog headers (icon overlapping the left cap).
         headerBar._anShellLogo:SetPoint("LEFT", headerBar, "LEFT", titleLeftPad, 0)
-        headerBar._anShellLogo:SetPoint("TOP", titleCenter, "TOP", 0, logoCenterY)
+        headerBar._anShellLogo:SetPoint("CENTER", titleCenter, "CENTER", 0, 0)
         headerBar._anShellLogo:Show()
     end
 

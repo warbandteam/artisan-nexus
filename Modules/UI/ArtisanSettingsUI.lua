@@ -31,6 +31,26 @@ local AH_FRESH_DEFAULT_SEC = 60 * 60 * 6
 local SETTINGS_FOOTER_RESERVE = 38
 local SETTINGS_SCROLL_TOP_MODERN = 54
 
+--- Bar column band on shell — never anchor to `scroll` (scroll's right edge anchors to column).
+local function PositionSettingsScrollBarColumn(barCol, shell, opts)
+    if not barCol or not shell then
+        return
+    end
+    opts = opts or {}
+    local topFrame = opts.topFrame or shell
+    local topPoint = opts.topPoint or "TOP"
+    local topY = opts.topY or 0
+    local bottomFrame = opts.bottomFrame or shell
+    local bottomPoint = opts.bottomPoint or "BOTTOM"
+    local bottomY = opts.bottomY or 0
+    local rightInset = opts.rightInset or 0
+
+    barCol:ClearAllPoints()
+    barCol:SetPoint("TOP", topFrame, topPoint, 0, topY)
+    barCol:SetPoint("BOTTOM", bottomFrame, bottomPoint, 0, bottomY)
+    barCol:SetPoint("RIGHT", shell, "RIGHT", -rightInset, 0)
+end
+
 local function ReapplyModernSettingsWidgetChrome()
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         return
@@ -208,15 +228,6 @@ end
 
 function ArtisanSettingsUI:RefreshOverlayPositionButton()
     RefreshOverlayPositionButtonLabel()
-end
-
-local function SetPostingStrategy(strat)
-    local p = ArtisanNexus.db.profile
-    p.posting = p.posting or {}
-    p.posting.strategy = strat
-    if ns.PostingHelperService and ns.PostingHelperService.SetConfig then
-        ns.PostingHelperService:SetConfig({ strategy = strat })
-    end
 end
 
 local function SetCraftBriefingPriceMode(mode)
@@ -552,7 +563,6 @@ function ArtisanSettingsUI:ApplyLocalizedStaticText()
 
     T(_G.ArtisanNexusSettings_HeaderTitle, "CONFIG_HEADER", "Artisan Nexus")
     T(_G.ArtisanNexusSettings_FooterHint, "SETTINGS_FOOTER_HINT", "/an config")
-    T(_G.ArtisanNexusSettings_PostingLabel, "CONFIG_POSTING_STRATEGY", "AH posting suggestion")
 
     CheckText(_G.ArtisanNexusSettings_Minimap, (L and L["CONFIG_MINIMAP_BUTTON"]) or "")
     CheckText(_G.ArtisanNexusSettings_LoginChat, (L and L["CONFIG_SHOW_LOGIN_CHAT"]) or "")
@@ -581,10 +591,6 @@ function ArtisanSettingsUI:ApplyLocalizedStaticText()
     CheckText(_G.ArtisanNexusSettings_LootOverlay, (L and L["CONFIG_LOOT_OVERLAY"]) or "")
 
     CheckText(_G.ArtisanNexusSettings_Debug, (L and L["CONFIG_DEBUG"]) or "")
-
-    CheckText(_G.ArtisanNexusSettings_PostingUndercut, (L and L["CONFIG_POSTING_UNDERCUT"]) or "")
-    CheckText(_G.ArtisanNexusSettings_PostingAverage, (L and L["CONFIG_POSTING_AVERAGE"]) or "")
-    CheckText(_G.ArtisanNexusSettings_PostingMax, (L and L["CONFIG_POSTING_MAX"]) or "")
 
     CheckText(_G.ArtisanNexusSettings_CraftBriefing, (L and L["CONFIG_CRAFT_BRIEFING"]) or "Craft briefing after AH sync")
     CheckText(_G.ArtisanNexusSettings_CraftBriefingChat, (L and L["CONFIG_CRAFT_BRIEFING_CHAT"]) or "")
@@ -621,6 +627,10 @@ function ArtisanSettingsUI:ApplyLocalizedStaticText()
     local sRecent = _G.ArtisanNexusSettings_SessionRecentSlider
     if sRecent and sRecent.Text then
         sRecent.Text:SetText((L and L["CONFIG_SESSION_LOOT_MAX_RECENT"]) or "")
+    end
+    local sOverlayScale = _G.ArtisanNexusSettings_LootOverlayScaleSlider
+    if sOverlayScale and sOverlayScale.Text then
+        sOverlayScale.Text:SetText((L and L["CONFIG_LOOT_OVERLAY_SIZE"]) or "")
     end
     local sOverall = _G.ArtisanNexusSettings_SessionOverallSlider
     if sOverall and sOverall.Text then
@@ -678,7 +688,6 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
             end)
         end
     end
-    StyleRadioCard(_G.ArtisanNexusSettings_PostingLabelFrame)
     StyleRadioCard(_G.ArtisanNexusSettings_CraftBriefingPriceFrame)
     ClearInlineRowFrame(_G.ArtisanNexusSettings_UiModeFrame)
     ClearInlineRowFrame(_G.ArtisanNexusSettings_AccentFrame)
@@ -702,7 +711,6 @@ function ArtisanSettingsUI:ApplyXmlThemedChrome()
     end
     tintInlineLabel(_G.ArtisanNexusSettings_UiModeLabel)
     tintInlineLabel(_G.ArtisanNexusSettings_AccentLabel)
-    tintInlineLabel(_G.ArtisanNexusSettings_PostingLabel)
     tintInlineLabel(_G.ArtisanNexusSettings_CraftBriefingPriceLabel)
 
     local function tintSliderFonts(sl)
@@ -939,6 +947,14 @@ function ArtisanSettingsUI:InstallSettingsScroll()
         if scroll.ScrollBar and barCol then
             Factory:PositionScrollBarInContainer(scroll.ScrollBar, barCol, 0, scroll)
         end
+        PositionSettingsScrollBarColumn(barCol, f, {
+            topFrame = header,
+            topPoint = "BOTTOM",
+            topY = -8,
+            bottomFrame = f,
+            bottomPoint = "BOTTOM",
+            bottomY = SETTINGS_FOOTER_RESERVE,
+        })
         if ns.UI_FinishScrollLayout then
             ns.UI_FinishScrollLayout(scroll)
         end
@@ -955,6 +971,14 @@ function ArtisanSettingsUI:InstallSettingsScroll()
     elseif Factory.EnsureScrollBarColumnChrome then
         Factory:EnsureScrollBarColumnChrome(barCol)
     end
+    PositionSettingsScrollBarColumn(barCol, f, {
+        topFrame = header,
+        topPoint = "BOTTOM",
+        topY = -8,
+        bottomFrame = f,
+        bottomPoint = "BOTTOM",
+        bottomY = SETTINGS_FOOTER_RESERVE,
+    })
     scroll:ClearAllPoints()
     scroll:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 4, -8)
     scroll:SetPoint("BOTTOMRIGHT", barCol, "BOTTOMLEFT", -2, 0)
@@ -995,14 +1019,6 @@ function ArtisanSettingsUI:ApplyClassicSettingsScroll(scroll, f, header)
         if Factory and Factory.EnsureScrollBarColumnChrome then
             Factory:EnsureScrollBarColumnChrome(col)
         end
-        --- Column insets resolve at creation; a Modern-created column pokes
-        --- into the classic title strip / dialog border unless re-anchored.
-        col:ClearAllPoints()
-        col:SetPoint("TOPRIGHT", f, "TOPRIGHT", -classicInset, -scrollTopInset)
-        col:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -classicInset, footerReserve)
-    end
-    if col and col.Show then
-        col:Show()
     end
     scroll._anExternalBarColumn = col ~= nil
 
@@ -1011,6 +1027,18 @@ function ArtisanSettingsUI:ApplyClassicSettingsScroll(scroll, f, header)
     end
     scroll.UpdateScrollBarVisibility = nil
 
+    if col and col.Show then
+        PositionSettingsScrollBarColumn(col, f, {
+            topFrame = f,
+            topPoint = "TOP",
+            topY = -scrollTopInset,
+            bottomFrame = f,
+            bottomPoint = "BOTTOM",
+            bottomY = footerReserve,
+            rightInset = classicInset,
+        })
+        col:Show()
+    end
     scroll:ClearAllPoints()
     scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -scrollTopInset)
     scroll:SetClipsChildren(true)
@@ -1080,10 +1108,15 @@ function ArtisanSettingsUI:SyncScrollSkin()
     end
     local col = scroll._anScrollBarColumn
     if col then
-        col:ClearAllPoints()
-        col:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, -SETTINGS_SCROLL_TOP_MODERN)
-        col:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, SETTINGS_FOOTER_RESERVE)
         col:Show()
+        PositionSettingsScrollBarColumn(col, f, {
+            topFrame = header,
+            topPoint = "BOTTOM",
+            topY = -8,
+            bottomFrame = f,
+            bottomPoint = "BOTTOM",
+            bottomY = SETTINGS_FOOTER_RESERVE,
+        })
     end
     scroll:ClearAllPoints()
     local tl = scroll._anScrollAnchorTL
@@ -1225,6 +1258,7 @@ function ArtisanSettingsUI:RefreshThemeChrome()
     end
     tintSliderFonts(_G.ArtisanNexusSettings_BagSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_AhFreshSlider)
+    tintSliderFonts(_G.ArtisanNexusSettings_LootOverlayScaleSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_SessionRecentSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_SessionOverallSlider)
     tintSliderFonts(_G.ArtisanNexusSettings_CraftBriefingTopSlider)
@@ -1309,6 +1343,28 @@ function ArtisanSettingsUI:WireControls()
             end
         end)
         RefreshOverlayPositionButtonLabel()
+    end
+
+    local overlayScale = _G.ArtisanNexusSettings_LootOverlayScaleSlider
+    if overlayScale then
+        local SCALE_MIN_PCT = 75
+        local SCALE_MAX_PCT = 150
+        local SCALE_STEP = 5
+        overlayScale:SetMinMaxValues(SCALE_MIN_PCT, SCALE_MAX_PCT)
+        overlayScale:SetValueStep(SCALE_STEP)
+        overlayScale.Low:SetText("75%")
+        overlayScale.High:SetText("150%")
+        overlayScale:SetScript("OnValueChanged", function(self, value)
+            value = max(SCALE_MIN_PCT, min(SCALE_MAX_PCT, floor(value / SCALE_STEP + 0.5) * SCALE_STEP))
+            self:SetValue(value)
+            ArtisanNexus.db.profile.sessionLootOverlayScale = value / 100
+            if self.Value then
+                self.Value:SetText(tostring(value) .. "%")
+            end
+            if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ApplySettingsScale then
+                ns.SessionLootOverlayUI:ApplySettingsScale()
+            end
+        end)
     end
 
     local sessRecent = _G.ArtisanNexusSettings_SessionRecentSlider
@@ -1444,17 +1500,6 @@ function ArtisanSettingsUI:WireControls()
         end
     end)
 
-    local function bindPosting(btn, strat)
-        if not btn then return end
-        btn:SetScript("OnClick", function()
-            SetPostingStrategy(strat)
-            ArtisanSettingsUI:RefreshPostingRadio()
-        end)
-    end
-    bindPosting(_G.ArtisanNexusSettings_PostingUndercut, "undercut")
-    bindPosting(_G.ArtisanNexusSettings_PostingAverage, "average")
-    bindPosting(_G.ArtisanNexusSettings_PostingMax, "max")
-
     local function bindBriefingPrice(btn, mode)
         if not btn then return end
         btn:SetScript("OnClick", function()
@@ -1582,6 +1627,10 @@ function ArtisanSettingsUI:WireControls()
         HookTooltip(_G.ArtisanNexusSettings_LootOverlayPosition, (L and L["CONFIG_LOOT_OVERLAY_POSITION"]) or "",
             (L and L["CONFIG_LOOT_OVERLAY_POSITION_DESC"]) or "")
     end
+    if _G.ArtisanNexusSettings_LootOverlayScaleSlider then
+        HookTooltip(_G.ArtisanNexusSettings_LootOverlayScaleSlider, (L and L["CONFIG_LOOT_OVERLAY_SIZE"]) or "",
+            (L and L["CONFIG_LOOT_OVERLAY_SIZE_DESC"]) or "")
+    end
     if _G.ArtisanNexusSettings_SessionRecentSlider then
         HookTooltip(_G.ArtisanNexusSettings_SessionRecentSlider, (L and L["CONFIG_SESSION_LOOT_MAX_RECENT"]) or "",
             (L and L["CONFIG_SESSION_LOOT_MAX_RECENT_DESC"]) or "")
@@ -1591,10 +1640,6 @@ function ArtisanSettingsUI:WireControls()
             (L and L["CONFIG_SESSION_LOOT_OVERALL_CAP_DESC"]) or "")
     end
     HookTooltip(_G.ArtisanNexusSettings_Debug, (L and L["CONFIG_DEBUG"]) or "", (L and L["CONFIG_DEBUG_DESC"]) or "")
-    HookTooltip(_G.ArtisanNexusSettings_PostingLabelFrame, (L and L["CONFIG_POSTING_STRATEGY"]) or "", (L and L["CONFIG_POSTING_STRATEGY_DESC"]) or "")
-    HookTooltip(_G.ArtisanNexusSettings_PostingUndercut, (L and L["CONFIG_POSTING_UNDERCUT"]) or "", (L and L["CONFIG_POSTING_UNDERCUT_DESC"]) or "")
-    HookTooltip(_G.ArtisanNexusSettings_PostingAverage, (L and L["CONFIG_POSTING_AVERAGE"]) or "", (L and L["CONFIG_POSTING_AVERAGE_DESC"]) or "")
-    HookTooltip(_G.ArtisanNexusSettings_PostingMax, (L and L["CONFIG_POSTING_MAX"]) or "", (L and L["CONFIG_POSTING_MAX_DESC"]) or "")
     HookTooltip(ah, (L and L["CONFIG_AH_FRESHNESS_HOURS"]) or "", (L and L["CONFIG_AH_FRESHNESS_HOURS_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_ResetSession, (L and L["CONFIG_RESET_ALL_SESSION"]) or "", (L and L["CONFIG_RESET_ALL_SESSION_DESC"]) or "")
     HookTooltip(_G.ArtisanNexusSettings_ResetOverall, (L and L["CONFIG_RESET_ALL_OVERALL"]) or "", (L and L["CONFIG_RESET_ALL_OVERALL_DESC"]) or "")
@@ -1625,18 +1670,6 @@ function ArtisanSettingsUI:RefreshCraftBriefingPriceRadio()
     local a = _G.ArtisanNexusSettings_CraftBriefingPriceAvg
     if s then s:SetChecked(mode ~= "avg") end
     if a then a:SetChecked(mode == "avg") end
-    self:SyncThemedToggleDots()
-end
-
-function ArtisanSettingsUI:RefreshPostingRadio()
-    local p = ArtisanNexus.db.profile.posting or {}
-    local strat = p.strategy or "undercut"
-    local u = _G.ArtisanNexusSettings_PostingUndercut
-    local a = _G.ArtisanNexusSettings_PostingAverage
-    local m = _G.ArtisanNexusSettings_PostingMax
-    if u then u:SetChecked(strat == "undercut") end
-    if a then a:SetChecked(strat == "average") end
-    if m then m:SetChecked(strat == "max") end
     self:SyncThemedToggleDots()
 end
 
@@ -1694,6 +1727,19 @@ function ArtisanSettingsUI:RefreshControls()
 
     do
         local SLS = ns.SessionLootService
+        local oScale = _G.ArtisanNexusSettings_LootOverlayScaleSlider
+        if oScale then
+            local scale = tonumber(p.sessionLootOverlayScale)
+            if not scale or scale ~= scale then
+                scale = 1.15
+            end
+            scale = max(0.75, min(1.5, scale))
+            local pct = floor(scale * 100 + 0.5)
+            oScale:SetValue(pct)
+            if oScale.Value then
+                oScale.Value:SetText(tostring(pct) .. "%")
+            end
+        end
         local sr = _G.ArtisanNexusSettings_SessionRecentSlider
         if sr and SLS and SLS.GetMaxRecentLoot then
             local eff = SLS:GetMaxRecentLoot()
@@ -1712,7 +1758,6 @@ function ArtisanSettingsUI:RefreshControls()
         end
     end
 
-    self:RefreshPostingRadio()
     self:RefreshCraftBriefingPriceRadio()
 
     local pBrief = p.craftBriefingEnabled ~= false
@@ -1777,9 +1822,12 @@ function ArtisanSettingsUI:RefreshControls()
     end
     _G.ArtisanNexusSettings_LootAuto:SetEnabled(not (p.lootHistoryEnabled == false) and (p.enabled ~= false))
     _G.ArtisanNexusSettings_OverloadHud:SetEnabled(p.overloadNodeIndicatorEnabled ~= false and (p.enabled ~= false))
-    local overlayPosOn = p.enabled ~= false
+    local overlayExtrasOn = p.enabled ~= false and p.sessionLootOverlayEnabled == true
     if _G.ArtisanNexusSettings_LootOverlayPosition then
-        _G.ArtisanNexusSettings_LootOverlayPosition:SetEnabled(overlayPosOn)
+        _G.ArtisanNexusSettings_LootOverlayPosition:SetEnabled(overlayExtrasOn)
+    end
+    if _G.ArtisanNexusSettings_LootOverlayScaleSlider then
+        _G.ArtisanNexusSettings_LootOverlayScaleSlider:SetEnabled(overlayExtrasOn)
     end
 
     local addonOn = p.enabled ~= false
@@ -1793,7 +1841,6 @@ function ArtisanSettingsUI:RefreshControls()
         "ArtisanNexusSettings_LootHistory", "ArtisanNexusSettings_LootAuto", "ArtisanNexusSettings_LootOverlay",
         "ArtisanNexusSettings_SessionRecentSlider", "ArtisanNexusSettings_SessionOverallSlider",
         "ArtisanNexusSettings_Debug",
-        "ArtisanNexusSettings_PostingUndercut", "ArtisanNexusSettings_PostingAverage", "ArtisanNexusSettings_PostingMax",
         "ArtisanNexusSettings_ResetSession", "ArtisanNexusSettings_ResetOverall",
     }
     for i = 1, #names do

@@ -25,7 +25,7 @@ local LAYOUT = {
     TITLE_GAP = 10,
     SECTION_GAP = 20,
     SLIDER_BLOCK_H = 58,
-    SLIDER_TRACK_H = 12,
+    SLIDER_TRACK_H = 20,
     LABEL_H = 24,
     INLINE_ROW_H = 36,
     LABEL_COL_W = 152,
@@ -39,6 +39,7 @@ ArtisanSettingsUI.SETTINGS_LAYOUT = LAYOUT
 ArtisanSettingsUI.SETTINGS_SLIDER_NAMES = {
     "ArtisanNexusSettings_BagSlider",
     "ArtisanNexusSettings_AhFreshSlider",
+    "ArtisanNexusSettings_LootOverlayScaleSlider",
     "ArtisanNexusSettings_SessionRecentSlider",
     "ArtisanNexusSettings_SessionOverallSlider",
     "ArtisanNexusSettings_CraftBriefingTopSlider",
@@ -60,9 +61,6 @@ ArtisanSettingsUI.SETTINGS_CHECKBOX_NAMES = {
     "ArtisanNexusSettings_LootAuto",
     "ArtisanNexusSettings_LootOverlay",
     "ArtisanNexusSettings_Debug",
-    "ArtisanNexusSettings_PostingUndercut",
-    "ArtisanNexusSettings_PostingAverage",
-    "ArtisanNexusSettings_PostingMax",
     "ArtisanNexusSettings_CraftBriefing",
     "ArtisanNexusSettings_CraftBriefingChat",
     "ArtisanNexusSettings_CraftBriefingOwned",
@@ -118,6 +116,7 @@ ArtisanSettingsUI.SETTINGS_GRID_SECTIONS = {
             "ArtisanNexusSettings_LootOverlay",
         },
         sliders = {
+            "ArtisanNexusSettings_LootOverlayScaleSlider",
             "ArtisanNexusSettings_SessionRecentSlider",
             "ArtisanNexusSettings_SessionOverallSlider",
         },
@@ -149,13 +148,6 @@ ArtisanSettingsUI.SETTINGS_GRID_SECTIONS = {
         title = "ArtisanNexusSettings_TitleAdvanced",
         cols = 1,
         checks = { "ArtisanNexusSettings_Debug" },
-        labelFrames = { "ArtisanNexusSettings_PostingLabelFrame" },
-        tailChecks = {
-            "ArtisanNexusSettings_PostingUndercut",
-            "ArtisanNexusSettings_PostingAverage",
-            "ArtisanNexusSettings_PostingMax",
-        },
-        tailCols = 2,
         sliders = { "ArtisanNexusSettings_AhFreshSlider" },
         resetButtons = {
             "ArtisanNexusSettings_ResetSession",
@@ -305,7 +297,6 @@ function ArtisanSettingsUI:ApplySettingsTypography()
     ApplyFontRole(_G.ArtisanNexusSettings_FooterHint, "GameFontHighlightSmall", "dim")
     ApplyFontRole(_G.ArtisanNexusSettings_UiModeLabel, "GameFontHighlight", "normal")
     ApplyFontRole(_G.ArtisanNexusSettings_AccentLabel, "GameFontHighlight", "normal")
-    ApplyFontRole(_G.ArtisanNexusSettings_PostingLabel, "GameFontHighlight", "normal")
     ApplyFontRole(_G.ArtisanNexusSettings_CraftBriefingPriceLabel, "GameFontHighlight", "normal")
     local sliders = self.SETTINGS_SLIDER_NAMES
     for i = 1, #sliders do
