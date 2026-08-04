@@ -628,6 +628,55 @@ function ns.UI_PlaceCraftWindowDefault(frame, offsetX, offsetY)
     frame:SetPoint("CENTER", UIParent, "CENTER", offsetX or 0, offsetY or 0)
 end
 
+--- Persist a window's current anchor to `ns.db.profile[frame._anPosKey]`.
+--- Schema: { point, relativePoint, relativeTo, x, y } (matches lootHistoryFrame).
+--- Call from the window's OnDragStop after StopMovingOrSizing().
+---@param frame Frame frame carrying `_anPosKey`
+function ns.UI_SaveWindowPosition(frame)
+    local key = frame and frame._anPosKey
+    if not key or not ns.db or not ns.db.profile then
+        return
+    end
+    local point, relTo, relPoint, x, y = frame:GetPoint(1)
+    if not point then
+        return
+    end
+    ns.db.profile[key] = ns.db.profile[key] or {}
+    local t = ns.db.profile[key]
+    t.point = point
+    t.relativePoint = relPoint or point
+    t.x = math.floor((tonumber(x) or 0) + 0.5)
+    t.y = math.floor((tonumber(y) or 0) + 0.5)
+    local nm = relTo and relTo.GetName and relTo:GetName()
+    t.relativeTo = (nm and nm ~= "") and nm or "UIParent"
+end
+
+--- Restore a window to its last saved anchor. Returns false when nothing is
+--- stored yet (caller then falls back to the default/centered placement).
+---@param frame Frame frame carrying `_anPosKey`
+---@return boolean restored
+function ns.UI_RestoreWindowPosition(frame)
+    local key = frame and frame._anPosKey
+    if not key or not ns.db or not ns.db.profile then
+        return false
+    end
+    local t = ns.db.profile[key]
+    if not t or not t.point or t.x == nil or t.y == nil then
+        return false
+    end
+    local relTo = UIParent
+    local rn = t.relativeTo
+    if rn and rn ~= "" and rn ~= "UIParent" then
+        local rf = _G[rn]
+        if rf and rf.IsShown then
+            relTo = rf
+        end
+    end
+    frame:ClearAllPoints()
+    frame:SetPoint(t.point, relTo, t.relativePoint or t.point, tonumber(t.x) or 0, tonumber(t.y) or 0)
+    return true
+end
+
 --- True when `a` and `b` occupy the same screen region (any axis overlap).
 local function CraftWindowFramesOverlap(a, b)
     if not a or not b then
@@ -709,11 +758,16 @@ function ns.UI_PresentCraftWindow(frame, keep, opts)
         if ns.UI_CloseSiblingCraftWindows then
             ns.UI_CloseSiblingCraftWindows(keep)
         end
-        if ns.UI_PlaceCraftWindowDefault then
-            ns.UI_PlaceCraftWindowDefault(frame)
-        else
-            frame:ClearAllPoints()
-            frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        --- Keep the window where the user last dropped it; only center on first
+        --- open (no saved anchor yet).
+        local restored = ns.UI_RestoreWindowPosition and ns.UI_RestoreWindowPosition(frame)
+        if not restored then
+            if ns.UI_PlaceCraftWindowDefault then
+                ns.UI_PlaceCraftWindowDefault(frame)
+            else
+                frame:ClearAllPoints()
+                frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            end
         end
     end
 

@@ -72,6 +72,30 @@ local defaults = {
         lootHistoryAutoOpen = false,
         --- Last Session loot tab (fishing / herb / mine / …); restored on reload + auto-open.
         lootHistoryActiveTab = nil,
+        --- Artisan Hub window anchor (nil = first open centered; else last-left position).
+        hubFrame = {
+            point = nil,
+            relativePoint = nil,
+            relativeTo = nil,
+            x = nil,
+            y = nil,
+        },
+        --- Recipes (matcher) window anchor (nil = first open centered; else last-left position).
+        recipeMatcherFrame = {
+            point = nil,
+            relativePoint = nil,
+            relativeTo = nil,
+            x = nil,
+            y = nil,
+        },
+        --- Settings window anchor (nil = first open centered; else last-left position).
+        settingsFrame = {
+            point = nil,
+            relativePoint = nil,
+            relativeTo = nil,
+            x = nil,
+            y = nil,
+        },
         --- Artisan Hub (/an hub): profit | shop | queue; restored when reopening the hub.
         hubActiveTab = nil,
         --- When true, Profitability tab lists only recipes craftable from current session loot (not bags).

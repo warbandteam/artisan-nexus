@@ -491,6 +491,7 @@ function RecipeMatcherUI:Init()
     f:EnableMouse(true)
     f:SetClampedToScreen(true)
     f:Hide()
+    f._anPosKey = "recipeMatcherFrame"
     --- Init re-runs after every ResetForUiMode; a duplicate UISpecialFrames
     --- entry would make one Esc press run the hide handler twice.
     local alreadySpecial = false
@@ -513,6 +514,12 @@ function RecipeMatcherUI:Init()
     local shell = ns.UI_CreateWindowHeader(f, {
         title = (L and L["RECIPE_MATCHER_TITLE"]) or "Recipes",
         dragFrame = f,
+        onDragStop = function()
+            f:StopMovingOrSizing()
+            if ns.UI_SaveWindowPosition then
+                ns.UI_SaveWindowPosition(f)
+            end
+        end,
         showSettings = true,
         settingsTooltip = {
             title = (L and L["LOOT_SETTINGS_TOOLTIP"]) or "Artisan Nexus settings",

@@ -15,16 +15,19 @@ local OVERLAY_SCALE_MIN = 0.75
 local OVERLAY_SCALE_MAX = 1.5
 
 local OVERLAY_DIM_BASE = {
-    toastW = 340,
+    toastW = 396,
     toastH = 38,
     toastGap = 6,
     iconSz = 26,
     toastPad = 6,
     toastIconGap = 6,
     toastColGap = 6,
-    toastQtyW = 34,
-    toastPriceW = 102,
+    toastQtyW = 32,
+    toastPriceW = 96,
     toastCoinH = 13,
+    rankSz = 18,
+    rankGap = 4,
+    panelPad = 5,
     slideOffset = 20,
 }
 
@@ -76,6 +79,34 @@ local function ToastFont()
     end
     local fonts = ns.UI_FONTS or {}
     return fonts.WINDOW_EMPHASIS or fonts.WINDOW_BODY or "GameFontNormalLarge"
+end
+
+--- Resolve the toast font object plus its base metrics so text can scale with the
+--- overlay size slider (font object alone stays a fixed size).
+---@return string|table fontRef, string|nil file, number|nil size, string|nil flags
+local function ToastFontSpec()
+    local ref = ToastFont()
+    local obj = ref
+    if type(ref) == "string" then
+        obj = _G[ref]
+    end
+    if obj and obj.GetFont then
+        local file, size, flags = obj:GetFont()
+        return ref, file, size, flags
+    end
+    return ref, nil, nil, nil
+end
+
+--- Catalog rows (fishing / gathering by category) give the authoritative reagent
+--- tier for the quality badge; crafted / unknown tabs have none.
+local function ResolveOverlayCatalogEntries(tabKey)
+    if tabKey == "fishing" then
+        return ns.GetFishingCatalogEntries and ns.GetFishingCatalogEntries() or nil
+    end
+    if not tabKey or tabKey == "crafted" then
+        return nil
+    end
+    return ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(tabKey) or nil
 end
 
 local function SaveAnchorConfigFromFrame(frame)
@@ -259,7 +290,8 @@ LayoutToastRow = function(row)
         return
     end
     row:SetSize(OverlayDim("toastW"), OverlayDim("toastH"))
-    local toastFont = ToastFont()
+    local toastFont, fontFile, fontSize, fontFlags = ToastFontSpec()
+    local scale = GetOverlayScale()
     local ic = row._icon
     if ic then
         local iconSz = OverlayDim("iconSz")
@@ -267,11 +299,21 @@ LayoutToastRow = function(row)
         ic:ClearAllPoints()
         ic:SetPoint("LEFT", row, "LEFT", OverlayDim("toastPad"), 0)
     end
+    local rank = row._rank
+    if rank then
+        local rsz = OverlayDim("rankSz")
+        rank:SetSize(rsz, rsz)
+        rank:ClearAllPoints()
+        rank:SetPoint("LEFT", ic or row, "RIGHT", OverlayDim("toastIconGap"), 0)
+    end
     local textFields = { row._name, row._qty, row._price }
     for i = 1, 3 do
         local fs = textFields[i]
         if fs and fs.SetFontObject then
             fs:SetFontObject(toastFont)
+        end
+        if fs and fontFile and fs.SetFont then
+            fs:SetFont(fontFile, math.max(8, math.floor(fontSize * scale + 0.5)), fontFlags)
         end
         if fs and fs.SetWordWrap then
             fs:SetWordWrap(false)
@@ -353,6 +395,9 @@ AcquireToast = function(parent)
         if row._accent then
             row._accent:Hide()
         end
+        if row._rank then
+            row._rank:Hide()
+        end
         LayoutToastRow(row)
         return row
     end
@@ -383,8 +428,16 @@ AcquireToast = function(parent)
         if iconFrame and ns.UI_StyleLootIconFrame then
             ns.UI_StyleLootIconFrame(iconFrame, iconBr)
         end
+        if iconFrame and iconFrame.EnableMouse then
+            --- Keep clicks falling through to the anchor panel (right-click dismiss).
+            iconFrame:EnableMouse(false)
+        end
     end
     row._icon = iconFrame
+
+    local rankTex = row:CreateTexture(nil, "ARTWORK")
+    rankTex:Hide()
+    row._rank = rankTex
 
     local priceStr = row:CreateFontString(nil, "OVERLAY", toastFont)
     priceStr:SetJustifyH("RIGHT")
@@ -469,7 +522,34 @@ PaintToast = function(row, event)
     row._anItemGen = (row._anItemGen or 0) + 1
     local itemGen = row._anItemGen
     local nameStr = row._name
+    local rankTex = row._rank
     local getQuality = ns.GetQualityRGB
+    local tabKey = event.tabKey or event.cat
+
+    local function ApplyRank()
+        if not nameStr then
+            return
+        end
+        local shown = false
+        if rankTex and ns.SetProfessionRankAtlasForItem then
+            local tierFb
+            local entries = ResolveOverlayCatalogEntries(tabKey)
+            if entries and ns.GetCatalogRankIndexForItem then
+                tierFb = ns.GetCatalogRankIndexForItem(itemID, entries)
+            end
+            local rsz = OverlayDim("rankSz")
+            shown = ns.SetProfessionRankAtlasForItem(rankTex, itemID, rsz, rsz, tierFb) and true or false
+        end
+        row._rankShown = shown
+        if rankTex and not shown then
+            rankTex:Hide()
+        end
+        if shown and rankTex then
+            nameStr:SetPoint("LEFT", rankTex, "RIGHT", OverlayDim("rankGap"), 0)
+        else
+            nameStr:SetPoint("LEFT", row._icon or row, "RIGHT", OverlayDim("toastIconGap"), 0)
+        end
+    end
 
     local function ApplyName()
         local nm = GetItemInfo(itemID)
@@ -485,11 +565,13 @@ PaintToast = function(row, event)
         end
     end
     ApplyName()
+    ApplyRank()
     if not GetItemInfo(itemID) and Item and Item.CreateFromItemID then
         local item = Item:CreateFromItemID(itemID)
         item:ContinueOnItemLoad(function()
             if row._anItemGen == itemGen then
                 ApplyName()
+                ApplyRank()
             end
         end)
     end
@@ -505,17 +587,52 @@ function SessionLootOverlayUI:ApplyAnchor()
     anchor:SetPoint(point, UIParent, relPoint, x, y)
 end
 
+--- Themed border/backdrop around the whole overlay group (toasts sit inside with padding).
+function SessionLootOverlayUI:StyleAnchorPanel()
+    local anchor = self.anchor
+    if not anchor then
+        return
+    end
+    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
+    if classic and ns.UI_ApplyClassicInsetPanel then
+        ns.UI_ApplyClassicInsetPanel(anchor)
+    elseif ns.UI_ApplyVisuals and COLORS then
+        local bg = COLORS.bgCard or COLORS.lootCellBg or COLORS.surfaceRowEven
+        local bd = COLORS.border or COLORS.lootCellBorder
+        ns.UI_ApplyVisuals(anchor, bg, bd)
+    end
+end
+
+--- Normal (non-edit) mouse wiring: right-click anywhere on the panel dismisses toasts.
+function SessionLootOverlayUI:ApplyOverlayMouse()
+    local anchor = self.anchor
+    if not anchor then
+        return
+    end
+    anchor:EnableMouse(true)
+    anchor:RegisterForDrag()
+    anchor:SetScript("OnDragStart", nil)
+    anchor:SetScript("OnDragStop", nil)
+    anchor:SetScript("OnMouseUp", function(_, button)
+        if button == "RightButton" and not SessionLootOverlayUI._positionEdit then
+            SessionLootOverlayUI:ClearToasts()
+        end
+    end)
+end
+
 function SessionLootOverlayUI:EnsureAnchor()
     if self.anchor then
         self:ApplyAnchor()
         return
     end
+    local pad = OverlayDim("panelPad")
     local anchor = CreateFrame("Frame", "ArtisanNexusSessionLootOverlayAnchor", UIParent)
-    anchor:SetSize(OverlayDim("toastW"), OverlayDim("toastH"))
+    anchor:SetSize(OverlayDim("toastW") + pad * 2, OverlayDim("toastH") + pad * 2)
     anchor:SetFrameStrata("HIGH")
     anchor:SetFrameLevel(30)
-    anchor:EnableMouse(false)
     self.anchor = anchor
+    self:StyleAnchorPanel()
+    self:ApplyOverlayMouse()
     self:ApplyAnchor()
 end
 
@@ -582,13 +699,9 @@ function SessionLootOverlayUI:EndPositionEdit(save)
     end
     if anchor then
         anchor:SetMovable(false)
-        anchor:EnableMouse(false)
-        anchor:RegisterForDrag()
-        anchor:SetScript("OnDragStart", nil)
-        anchor:SetScript("OnDragStop", nil)
-        anchor:SetScript("OnMouseUp", nil)
         anchor:SetFrameStrata("HIGH")
         anchor:SetFrameLevel(30)
+        self:ApplyOverlayMouse()
     end
     ClearEditPreview(self)
     SetEditHintVisible(self, false)
@@ -635,23 +748,24 @@ function SessionLootOverlayUI:LayoutStack()
     end
     local active = self._active
     local n = #active
+    local pad = OverlayDim("panelPad")
     if n < 1 then
         anchor:Hide()
-        anchor:SetHeight(OverlayDim("toastH"))
+        anchor:SetHeight(OverlayDim("toastH") + pad * 2)
         return
     end
     local toastH = OverlayDim("toastH")
     local toastGap = OverlayDim("toastGap")
     local h = n * toastH + math.max(0, n - 1) * toastGap
-    anchor:SetSize(OverlayDim("toastW"), h)
-    local y = 0
+    anchor:SetSize(OverlayDim("toastW") + pad * 2, h + pad * 2)
+    local y = pad
     for i = 1, n do
         local entry = active[i]
         local row = entry and entry.row
         if row then
             local slideX = (entry and entry.slideX) or 0
             row:ClearAllPoints()
-            row:SetPoint("TOPRIGHT", anchor, "TOPRIGHT", -slideX, -y)
+            row:SetPoint("TOPRIGHT", anchor, "TOPRIGHT", -(pad + slideX), -y)
             row:Show()
             y = y + toastH + toastGap
         end
@@ -800,6 +914,7 @@ end
 
 function SessionLootOverlayUI:RefreshTheme()
     COLORS = ns.UI_COLORS
+    self:StyleAnchorPanel()
     for i = 1, #self._active do
         local entry = self._active[i]
         local row = entry and entry.row

@@ -593,12 +593,19 @@ local function BuildChrome()
     f:SetMovable(true)
     f:EnableMouse(true)
     f:Hide()
+    f._anPosKey = "hubFrame"
     ns.UI_ApplyMainWindowChrome(f)
     tinsert(UISpecialFrames, "ArtisanNexusHub")
 
     local shell = ns.UI_CreateWindowHeader(f, {
         title = (L and L["HUB_WINDOW_TITLE"]) or "Artisan Hub",
         dragFrame = f,
+        onDragStop = function()
+            f:StopMovingOrSizing()
+            if ns.UI_SaveWindowPosition then
+                ns.UI_SaveWindowPosition(f)
+            end
+        end,
         showSettings = true,
         settingsTooltip = {
             title = (L and L["LOOT_SETTINGS_TOOLTIP"]) or "Artisan Nexus settings",

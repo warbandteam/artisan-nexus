@@ -806,6 +806,7 @@ end
 function ArtisanSettingsUI:ApplyChrome()
     local f = self:GetRoot()
     if not f then return end
+    f._anPosKey = "settingsFrame"
 
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         if ns.UI_ApplyClassicDialogBackdrop then
@@ -843,6 +844,9 @@ function ArtisanSettingsUI:ApplyChrome()
         end)
         header:SetScript("OnDragStop", function()
             f:StopMovingOrSizing()
+            if ns.UI_SaveWindowPosition then
+                ns.UI_SaveWindowPosition(f)
+            end
         end)
         if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
             if ns.UI_SuppressArtisanChrome then
@@ -1906,6 +1910,12 @@ function ArtisanSettingsUI:ShowPanel()
         ns.UI_FinishScrollLayout(scroll)
     end
     self:ApplySettingsHeaderClip()
+    --- XML anchors this frame at CENTER on load; restore the last-left position
+    --- so it reopens where the user dropped it.
+    fr._anPosKey = "settingsFrame"
+    if ns.UI_RestoreWindowPosition then
+        ns.UI_RestoreWindowPosition(fr)
+    end
     fr:Show()
     fr:Raise()
     if C_Timer and C_Timer.After then

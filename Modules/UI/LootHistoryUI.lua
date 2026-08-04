@@ -412,10 +412,11 @@ function LootHistoryUI:SaveFrameSize()
     local t = ns.db.profile.lootHistoryFrame
     t.width = self.main:GetWidth()
     t.height = self.main:GetHeight()
-    local point, rel, relTo, x, y = self.main:GetPoint(1)
+    --- GetPoint returns point, relativeTo (frame), relativePoint (string), x, y.
+    local point, relTo, relPoint, x, y = self.main:GetPoint(1)
     if point then
         t.point = point
-        t.relativePoint = rel or point
+        t.relativePoint = relPoint or point
         t.x = math.floor((tonumber(x) or 0) + 0.5)
         t.y = math.floor((tonumber(y) or 0) + 0.5)
         if relTo and relTo.GetName then
@@ -1358,6 +1359,7 @@ function LootHistoryUI:Show(which)
     end
 
     local f = CreateFrame("Frame", "ArtisanNexusLootHistoryFrame", UIParent, "BackdropTemplate")
+    f._anPosKey = "lootHistoryFrame"
     f:SetSize(LAYOUT.WINDOW_WIDTH, LAYOUT.WINDOW_HEIGHT)
     LootHistoryUI:ApplySavedFrameSize(f)
     f:SetFrameStrata("DIALOG")
