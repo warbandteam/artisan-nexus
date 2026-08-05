@@ -2,7 +2,7 @@
 ## Title: Artisan Nexus
 ## Notes: Professions QoL for WoW Midnight — session loot (fishing & gathering), AH prices, overload hints, craft queue, minimap launcher.
 ## Author: Artisan Nexus
-## Version: 0.3.0
+## Version: 0.2.0
 ## IconTexture: Interface\AddOns\ArtisanNexus\Media\anlogo.tga
 ## SavedVariables: ArtisanNexusDB
 ## OptionalDeps: Ace3, LibSharedMedia-3.0
