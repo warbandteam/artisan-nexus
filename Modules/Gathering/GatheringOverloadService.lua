@@ -611,7 +611,12 @@ function ScanTooltip()
 
     local cat, modifier
     local reg = ns.GatheringNodeOverloadRegistry and ns.GatheringNodeOverloadRegistry.Resolve
-    local regCat, regMod = reg and reg(lines)
+    --- `reg and reg(lines)` would truncate the multi-return; call separately so
+    --- regMod (the registry's authoritative modifier) survives.
+    local regCat, regMod
+    if reg then
+        regCat, regMod = reg(lines)
+    end
     if regCat then
         cat = regCat
         if regMod ~= nil then

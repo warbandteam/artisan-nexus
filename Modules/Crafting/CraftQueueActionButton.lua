@@ -99,6 +99,12 @@ local function Refresh()
     if not button then
         return
     end
+    if InCombatLockdown() then
+        -- Secure button: Show/Hide and attribute writes are protected in
+        -- combat; defer everything to the next out-of-combat refresh. The
+        -- button stays shown, so its OnUpdate keeps ticking and self-heals.
+        return
+    end
     local db = GetDB()
     if db and db.hidden then
         button:Hide()
@@ -114,9 +120,6 @@ local function Refresh()
         return
     end
     button:Show()
-    if InCombatLockdown() then
-        return
-    end
     if sid ~= currentSpellID then
         currentSpellID = sid
         button:SetAttribute("spell", sid)
@@ -204,7 +207,9 @@ function CraftQueueActionButton:Show()
 end
 
 function CraftQueueActionButton:Hide()
-    if button then
+    -- Protected frame: never Hide() while in combat lockdown; the next
+    -- out-of-combat Refresh (TradeOpen() false) hides it.
+    if button and not InCombatLockdown() then
         button:Hide()
     end
 end

@@ -149,14 +149,15 @@ end
 
 local function Refresh()
     if not button then return end
+    if InCombatLockdown() then
+        -- Secure button: Show/Hide and attribute writes are protected in combat;
+        -- defer everything (including the db.hidden Hide) to the next
+        -- out-of-combat refresh. The button stays shown, so OnUpdate self-heals.
+        return
+    end
     local db = GetDB()
     if db and db.hidden then
         button:Hide()
-        return
-    end
-    if InCombatLockdown() then
-        -- Secure button: Show/Hide and attribute writes are protected in combat;
-        -- defer everything to the next out-of-combat refresh.
         return
     end
 
@@ -304,7 +305,9 @@ end
 function GatheringOverloadActionButton:Hide()
     local db = GetDB()
     if db then db.hidden = true end
-    if button then button:Hide() end
+    -- Protected frame: defer the actual Hide() out of combat; Refresh honors
+    -- db.hidden on the next out-of-combat tick.
+    if button and not InCombatLockdown() then button:Hide() end
 end
 
 function GatheringOverloadActionButton:Toggle()

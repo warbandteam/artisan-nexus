@@ -49,7 +49,12 @@ function Utilities:TouchCharRegistry()
     if type(realm) == "string" and realm ~= "" and not (issecretvalue and issecretvalue(realm)) then
         rec.realm = realm
     end
-    local _, classFile = UnitClass and UnitClass("player")
+    --- `X and f()` truncates to one value; call outside the `and` to keep the
+    --- second return (classFilename, e.g. "MAGE").
+    local classFile
+    if UnitClass then
+        _, classFile = UnitClass("player")
+    end
     if classFile and not (issecretvalue and issecretvalue(classFile)) then
         rec.class = classFile
     end
