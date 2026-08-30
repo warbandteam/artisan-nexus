@@ -290,9 +290,11 @@ function GatheringOverloadActionButton:Init()
     EnsureButton()
     Refresh()
 
-    -- Binding UI label
+    -- Binding UI label (Key Bindings > Artisan Nexus)
+    local L = ns.L
     _G.BINDING_HEADER_ARTISANNEXUS = _G.BINDING_HEADER_ARTISANNEXUS or "Artisan Nexus"
-    _G["BINDING_NAME_CLICK " .. BUTTON_NAME .. ":LeftButton"] = "Cast Next Overload"
+    _G["BINDING_NAME_CLICK " .. BUTTON_NAME .. ":LeftButton"] =
+        (L and L["BINDING_OVERLOAD_CAST"]) or "Cast Next Overload"
 end
 
 function GatheringOverloadActionButton:Show()

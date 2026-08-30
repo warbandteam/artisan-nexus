@@ -7,11 +7,12 @@ local ADDON_NAME, ns = ...
 
 ---@class Constants
 local Constants = {
-    ADDON_VERSION = "0.2.0",
-    ADDON_RELEASE_DATE = "2026-08-06",
+    ADDON_VERSION = "0.3.0",
+    ADDON_RELEASE_DATE = "2026-08-29",
 
-    --- Must match ## Interface in ArtisanNexus.toc (Midnight 12.0.1 retail)
-    CURRENT_INTERFACE = 120001,
+    --- Must match ## Interface in ArtisanNexus.toc (Midnight 12.1.0 retail).
+    --- Confirmed against the installed client: .build.info = 12.1.0.69497.
+    CURRENT_INTERFACE = 120100,
     CURRENT_EXPANSION_NAME = "Midnight",
 
     DB_VERSION = 1,

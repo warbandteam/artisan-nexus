@@ -58,7 +58,10 @@
                     </Layer>
                 </Layers>
                 <Frames>
-                    <Button name="ArtisanNexusSettings_Close" inherits="UIPanelCloseButton">
+                    <!-- Plain button: glyph, hover and theming come from
+                         ns.UI_AdoptShellGlyphButton so this matches every other window. -->
+                    <Button name="ArtisanNexusSettings_Close" inherits="BackdropTemplate">
+                        <Size x="22" y="22"/>
                         <Anchors>
                             <Anchor point="RIGHT" x="-6" y="0"/>
                         </Anchors>

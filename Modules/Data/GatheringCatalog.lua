@@ -6,10 +6,14 @@
     tab grids. `GetGatheringCategoryForItemId` returns a primary tab (mine for motes) for DB reset
     ownership; `ItemListedInGatheringTab` is used for session routing and per-tab Overall totals.
 
-    Maintenance (12.0.x): IDs follow beta/PTR builds and in-game verification. When Blizzard adds
-    new rank tiers or mats, append `ranks` (and optionally a new row). Mining “Dazzling Thorium”
-    ships as a single rank until a second item ID is confirmed. Leather rows use documented two-ID
-    pairs where Silver/Gold splits exist; add missing IDs in the same column format.
+    Maintenance (12.1.0): IDs verified against wago.tools DB2 (Item, ItemSparse) build
+    12.1.0.69497 on 2026-08-29. When Blizzard adds new rank tiers or mats, append `ranks`
+    (and optionally a new row). Mining “Dazzling Thorium” ships as a single rank until a
+    second item ID is confirmed. Leather rows use documented two-ID pairs where Silver/Gold
+    splits exist; add missing IDs in the same column format.
+
+    12.1 “Coiled Isle” added no new herb or ore items — the Cursed nodes drop the existing
+    herbs/ores plus Cursebound Globe, so only the `others` tab grew.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -55,11 +59,33 @@ local BY_CAT = {
         { note = "Dawn Crystal", ranks = { 243605, 243606 } },
     },
     --- Shared drops that can come from more than one gathering source.
+    --- 12.1 adds the Coiled Isle drops: the two universal reagents (Venom Clot /
+    --- Cursebound Globe) and the butchered / foraged cooking mats, none of which
+    --- belong to a single profession tab.
     others = {
         { note = "Mote of Light", ranks = { 236949 } },
         { note = "Mote of Primal Energy", ranks = { 236950 } },
         { note = "Mote of Wild Magic", ranks = { 236951 } },
         { note = "Mote of Pure Void", ranks = { 236952 } },
+
+        --- 12.1 universal reagents — Venom Clot feeds 20 recipes, Cursebound Globe 13.
+        --- Cursebound Globe also drops from the new Cursed herb / deposit nodes.
+        { note = "Neutralized Venom Clot", ranks = { 274777 } },
+        { note = "Cursebound Globe", ranks = { 274781 } },
+
+        --- 12.1 butchered cooking mats (Trade Goods / Cooking) — feed "Practically Pork".
+        { note = "Gamey Flank", ranks = { 275280 } },
+        { note = "Folded Wing", ranks = { 275281 } },
+        { note = "Smooth Loin", ranks = { 275282 } },
+        { note = "Amphibious Scrap", ranks = { 275283 } },
+        { note = "Slobbery Tongue", ranks = { 275284 } },
+
+        --- 12.1 foraged cooking mats (Trade Goods / Cooking) — feed "Plant Protein".
+        { note = "Malleable Root", ranks = { 275285 } },
+        { note = "Leafy Appendage", ranks = { 275286 } },
+        { note = "Cellular Slab", ranks = { 275287 } },
+        { note = "Photosynthesized Scrap", ranks = { 275288 } },
+        { note = "Winged Stalk", ranks = { 275289 } },
     },
 }
 

@@ -1,6 +1,8 @@
 --[[
     Fishing spell IDs for cast/channel detection (Retail / Midnight).
     Passive rank-unlock spells that never fire UNIT_SPELLCAST_* are NOT listed.
+    Every ID below exists in DB2 SpellName build 12.1.0.69497 (audited 2026-08-29);
+    271991 was removed because no such spell exists in Spell.db2 or SpellName.db2.
     Source: warcraft.wiki.gg + in-game verification; cross-check with Warband TryCounterService when updating.
 ]]
 
@@ -32,7 +34,6 @@ local FISHING_CAST_SPELL_PRIORITY = {
     --- Canonical retail "Fishing" line cast — prefer before alternate spellbook IDs (e.g. 271616)
     --- that may not execute correctly via SecureActionButton `spell` from programmatic :Click().
     131474,
-    271991,
     271616,
     110412,
     7620,
@@ -45,7 +46,6 @@ local FISHING_SPELLS = {
     [131474] = true,
     [110412] = true,
     [271616] = true,
-    [271991] = true,
     [384481] = true,
     [389234] = true,
     [463743] = true,

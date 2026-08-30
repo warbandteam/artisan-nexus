@@ -364,7 +364,7 @@ function ns.UI_RegisterClassicShellDebug(parent, headerBar)
         ns.UI_RegisterDebugElement(headerBar._anShellClose, {
             id = "shell.close",
             label = "shell.close",
-            note = "UIPanelCloseButton",
+            note = "shell glyph close (addon-drawn)",
         })
     end
     if headerBar._anShellSettings then

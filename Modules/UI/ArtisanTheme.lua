@@ -97,6 +97,8 @@ local LAYOUT = {
     SHELL_PAD = 12,
     SHELL_HEADER_HEIGHT = 44,
     SHELL_HEADER_HEIGHT_CLASSIC = 36,
+    --- Shell header control glyph buttons (close / settings); classic uses CLASSIC_SHELL_TITLE_CONTROL_SIZE.
+    SHELL_CONTROL_SIZE = 22,
     CLASSIC_DIALOG_INSET = 8,
     CLASSIC_DIALOG_INSET_LEFT = 11,
     CLASSIC_DIALOG_INSET_RIGHT = 12,
@@ -148,8 +150,11 @@ local LAYOUT = {
     MATCHER_TITLEBAR_HEIGHT = 52,
     MATCHER_LIST_EDGE_PAD = 4,
     MATCHER_PANE_GAP = 6,
-    OVERLOAD_ROW_HEIGHT = 32,
-    OVERLOAD_ICON_SIZE = 22,
+    --- The tracker is a compact HUD, so it runs a shorter header than the
+    --- shared SHELL_HEADER_HEIGHT full windows use.
+    OVERLOAD_HEADER_HEIGHT = 32,
+    OVERLOAD_ROW_HEIGHT = 28,
+    OVERLOAD_ICON_SIZE = 20,
     OVERLOAD_TRACKER_WIDTH = 248,
     OVERLOAD_BODY_PAD = 6,
     OVERLOAD_BODY_GAP = 6,

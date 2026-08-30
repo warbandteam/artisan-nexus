@@ -3,4 +3,7 @@
 	<!-- Loaded automatically from the addon root (see ArtisanNexus.toc comment). Secure button: GatheringOverloadActionButton.lua -->
 	<Binding name="CLICK ArtisanNexusOverloadActionButton:LeftButton" category="ADDONS">
 	</Binding>
+	<!-- Secure button: Modules/Crafting/CraftQueueActionButton.lua -->
+	<Binding name="CLICK ArtisanNexusCraftQueueActionButton:LeftButton" category="ADDONS">
+	</Binding>
 </Bindings>

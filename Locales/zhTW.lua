@@ -197,6 +197,9 @@ L["OVERLOAD_NODE_FMT"] = "節點：%s"
 L["OVERLOAD_MODIFIER_WILD"] = "狂野"
 L["OVERLOAD_MODIFIER_INFUSED"] = "灌注"
 L["OVERLOAD_MODIFIER_EMPOWERED"] = "強能"
+L["OVERLOAD_MODIFIER_CURSED"] = "詛咒"
+L["BINDING_OVERLOAD_CAST"] = "施放下一個過載"
+L["BINDING_CRAFT_QUEUE_CAST"] = "製作佇列中的下一個"
 L["OVERLOAD_GATHERING"] = "採集"
 
 L["HUB_QUEUE_EMPTY_HINT"] = "佇列為空 — 在「收益」分頁左鍵點擊配方以新增。"
@@ -364,4 +367,4 @@ L["AH_SCAN_STARTED_PLAN"] = "開始拍賣場掃描：%d 項待刷新（%d 已追
 
 L["AH_SCAN_DONE_DETAIL"] = "拍賣場掃描用時 %.1f 秒 — 更新 %d 個價格，檢查 %d 項（%d 次商品查詢）。"
 L["AH_SCAN_DONE_FAST"] = "拍賣場掃描用時 %.1f 秒 — 更新 %d 個價格，檢查 %d 項（僅批次，無商品查詢）。"
-L["CHANGELOG_V020"] = "v0.2.0 (2026-08-06)\n\nAdded:\n- Loot History, Artisan Hub, Recipes, and Settings windows reopen at the position you last left them instead of recentering every time.\n- Session loot overlay shows a reagent quality badge on each pickup.\n\nFixed:\n- Session loot overlay text now scales with the overlay size slider.\n- Character class color and name are recorded correctly again.\n- Overloaded node hints use the correct catalog modifier instead of always guessing from the tooltip.\n- Craft queue and overload action buttons no longer throw action-blocked errors during combat.\n\nUpdated:\n- Auction House sync button is now a compact icon with an inline progress bar and pause overlay.\n- Session loot overlay toasts are slightly wider so names and prices fit.\n\nCurseForge: Artisan Nexus"
+L["CHANGELOG_V030"] = "v0.3.0 (2026-08-29)\n\nAdded:\n- WoW 12.1 “Coiled Isle” content: 81 recipes across every profession, 14 fish, and 12 materials.\n- Cursed herb and deposit nodes are recognised, along with their overload cast.\n- The craft queue button can be bound to a key (Key Bindings > Artisan Nexus).\n\nFixed:\n- Gathering loot no longer lands on the wrong tab. Fifteen spell IDs pointed at unrelated spells such as “Draenor Scribe” and “Khaz Algar Enchanting”.\n- Empowered node overloads are detected again; the three IDs used for them belonged to other spells.\n- Category detection by spell icon works at all. None of its four icons matched a real gathering spell.\n- The Overload Tracker drew the Classic ornate title frame even on the Modern skin.\n- The Overload Tracker's title bar, body and rows were three different widths; they now share one edge.\n- “Evercore Stitchwraps” was misspelled, and “Coiled Stargorger Lure” never appeared because its name was blank.\n\nUpdated:\n- Interface target raised to 12.1.\n- The Overload Tracker is shorter and tighter, without changing any other window.\n- Window close buttons are drawn by the addon on the Modern skin; the Classic skin keeps native Blizzard controls.\n- Gathering spell tables rebuilt from game data: every expansion is covered now, 43 IDs to 501.\n- Key binding names come from the language files instead of fixed English.\n\nCurseForge: Artisan Nexus"

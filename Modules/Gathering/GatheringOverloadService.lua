@@ -30,6 +30,9 @@ local OVERLOAD_KEYWORDS = {
     "overload infused deposit",
     "overload empowered herb",
     "overload empowered deposit",
+    --- 12.1 Coiled Isle cursed nodes.
+    "overload cursed herb",
+    "overload cursed deposits",
 }
 
 -- Midnight overload spells by gathering category + node modifier.
@@ -37,15 +40,21 @@ local OVERLOAD_SPELLS = {
     herb = {
         infused = { 1223014 }, -- Overload Infused Herb
         wild = { 1225150 }, -- Overload Wild Herb
-        empowered = { 423395, 423443 }, -- legacy/alt empowered herb IDs
+        cursed = { 1301657 }, -- 12.1 Overload Cursed Herb
+        -- 423395 is the only real "Overload Empowered Herb"; 423443 used to sit here but
+        -- DB2 12.1.0.69497 resolves it to "Torch Area Trigger" — removed, it never matched.
+        empowered = { 423395 },
         -- Midnight IDs first so the tracker picks the current spell when legacy IDs are phantom-known.
-        fallback = { 1223014, 1225150, 423395, 423443 },
+        fallback = { 1301657, 1223014, 1225150, 423395 },
     },
     mine = {
         infused = { 1225392 }, -- Overload Infused Deposit
         wild = { 1225819 }, -- Overload Wild Deposits
-        empowered = { 423394, 423334, 423335 }, -- legacy/alt empowered deposit IDs
-        fallback = { 1225392, 1225819, 423394, 423334, 423335 },
+        cursed = { 1301495 }, -- 12.1 Overload Cursed Deposits
+        -- 423394 is the only real "Overload Empowered Deposit"; 423334/423335 resolve to
+        -- "Khaz Algar Enchanting"/"Engineering" in DB2 12.1.0.69497 — removed.
+        empowered = { 423394 },
+        fallback = { 1301495, 1225392, 1225819, 423394 },
     },
 }
 
@@ -449,10 +458,13 @@ local MODIFIER_KEYWORDS = {
     wild = { "wild" },
     infused = { "infused", "lightfused", "voidbound", "primal" },
     empowered = { "empowered" },
+    --- 12.1: Cursed herb / deposit nodes on the Coiled Isle.
+    cursed = { "cursed", "cursebound" },
 }
 
 -- "wild" / "infused" alone match many NPC names; only treat modifiers on lines that look like nodes or overload text.
 local GATHERING_LINE_HINTS = {
+    "cursed",
     "herb",
     "flower",
     "plant",

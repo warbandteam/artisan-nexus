@@ -219,6 +219,13 @@ function CraftQueueActionButton:Enable()
     if self._eventOwner then
         return
     end
+
+    -- Binding UI label (Key Bindings > Artisan Nexus); the binding itself is in Bindings.xml.
+    local L = ns.L
+    _G.BINDING_HEADER_ARTISANNEXUS = _G.BINDING_HEADER_ARTISANNEXUS or "Artisan Nexus"
+    _G["BINDING_NAME_CLICK " .. BUTTON_NAME .. ":LeftButton"] =
+        (L and L["BINDING_CRAFT_QUEUE_CAST"]) or "Craft Next in Queue"
+
     local E = ns.Constants and ns.Constants.EVENTS
     local owner = ns.NewEventOwner("CraftQueueActionButton")
     self._eventOwner = owner

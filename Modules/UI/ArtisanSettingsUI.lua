@@ -892,6 +892,16 @@ function ArtisanSettingsUI:ApplyChrome()
 
     local close = _G.ArtisanNexusSettings_Close
     if close then
+        --- Strict skin separation: Modern gets our glyph control, Classic keeps the
+        --- native Blizzard look (the XML button no longer inherits UIPanelCloseButton,
+        --- so Classic restores that art here).
+        if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+            close:SetNormalTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
+            close:SetPushedTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
+            close:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight")
+        elseif ns.UI_AdoptShellGlyphButton then
+            ns.UI_AdoptShellGlyphButton(close, "\195\151", "danger")
+        end
         close:SetScript("OnClick", function()
             f:Hide()
         end)

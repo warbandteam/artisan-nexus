@@ -1,8 +1,11 @@
 --[[
-    Artisan Nexus — Midnight (12.0.5) recipe catalog.
+    Artisan Nexus — Midnight (12.1.0) recipe catalog.
     Source: wago.tools DB2 dumps (SkillLine, SkillLineAbility, SpellName).
-    Build 12.0.5.67088. Midnight child skill-lines 2906-2918 mapped to their
-    base profession parent skill-lines.
+    Build 12.1.0.69497 (verified 2026-08-29). Midnight child skill-lines
+    2906-2918 mapped to their base profession parent skill-lines; recipes are
+    matched on SkillLineAbility.SkillupSkillLineID (not SkillLine).
+    12.1 “Coiled Isle” patch added 81 recipes; empty string = spell has no
+    SpellName row in this build (unnamed/placeholder, kept for ID parity).
 
     Schema: ns.MidnightRecipeCatalog[profession] = {
       skillLineID       = <midnight child SLID>,
@@ -80,6 +83,10 @@ ns.MidnightRecipeCatalog = {
             [1265692] = "Resourcefulness",
             [1265701] = "Ingenuity",
             [1265732] = "Skill",
+            [1289744] = "Concentrated Silvermoon Health Potion",
+            [1289745] = "Liquid Luster",
+            [1289746] = "Alluring Nostrum",
+            [1296429] = "Ersatz Venom Splatter",
         },
     },
     Blacksmithing = {
@@ -193,6 +200,13 @@ ns.MidnightRecipeCatalog = {
             [1276110] = "Gilded Silvermoon Hanger",
             [1276111] = "Ren'dorei Anvil",
             [1276112] = "Masterwork Crafting Hammer",
+            [1288608] = "",
+            [1288712] = "",
+            [1291682] = "Odious Alloy",
+            [1291683] = "Hunter's Ritual Stone",
+            [1296495] = "Amani Forgemaster's Workbench",
+            [1296496] = "Amani Forgemaster's Decorative Spear",
+            [1296497] = "Amani Forgemaster's Rack",
         },
     },
     Cooking = {
@@ -246,6 +260,17 @@ ns.MidnightRecipeCatalog = {
             [1265601] = "Multicraft",
             [1265687] = "Skill",
             [1265693] = "Resourcefulness",
+            [1295534] = "Amani Cornucopia",
+            [1295776] = "Loa's Gathering",
+            [1295777] = "Feast of Knowledge",
+            [1295783] = "Venom-Spiced Cutlets",
+            [1296257] = "",
+            [1296280] = "",
+            [1296418] = "Puffer Plate",
+            [1296419] = "Sweet-And-Sour Skewers",
+            [1296426] = "",
+            [1296449] = "Practically Pork",
+            [1296450] = "Plant Protein",
         },
     },
     Enchanting = {
@@ -356,6 +381,10 @@ ns.MidnightRecipeCatalog = {
             [1281342] = "Endless Codex of Blooming Light",
             [1281348] = "Endless Codex of Nature's Grace",
             [1281349] = "Endless Codex of the Voidtouched",
+            [1291694] = "Enchant Weapon - Rite of the Hash'ey",
+            [1296498] = "Keen Hex Mask",
+            [1296499] = "Furious Tiki Mask",
+            [1296500] = "Enchanted Voidwell Fish",
         },
     },
     Engineering = {
@@ -436,7 +465,7 @@ ns.MidnightRecipeCatalog = {
             [1229928] = "Wormhole Generator: Quel'Thalas",
             [1229930] = "Recycling",
             [1229935] = "Evercore Swiftfeet",
-            [1229936] = "Evercore Stichwraps",
+            [1229936] = "Evercore Stitchwraps",
             [1229937] = "Evercore Turbochains",
             [1229938] = "Evercore Greaseplates",
             [1248610] = "Ren'dorei Void Projector",
@@ -475,6 +504,13 @@ ns.MidnightRecipeCatalog = {
             [1282455] = "Evercore Dome Dinger",
             [1282456] = "P.O.W. x3",
             [1282457] = "Thalassian Competitor's Rifle",
+            [1291687] = "Coiled Snake-Eye",
+            [1296501] = "Coiled Amani Hookshot",
+            [1296502] = "Proudmoore Ship-in-a-Bottle",
+            [1296503] = "Aetherlume Field Lamp",
+            [1297585] = "R0CKY",
+            [1297647] = "G-00",
+            [1305148] = "R0CKY-To-Go",
         },
     },
     Inscription = {
@@ -578,6 +614,11 @@ ns.MidnightRecipeCatalog = {
             [1265697] = "Resourcefulness",
             [1265705] = "Ingenuity",
             [1269575] = "Midnight Milling",
+            [1290560] = "",
+            [1290561] = "Vantus Rune: Tides",
+            [1296505] = "\"Cursed Gaze of Ula'tek\" Mural",
+            [1296506] = "Chiseled Amani Tablet",
+            [1303151] = "Contract: Zul'jarra's Forces",
         },
     },
     Jewelcrafting = {
@@ -673,6 +714,12 @@ ns.MidnightRecipeCatalog = {
             [1265690] = "Skill",
             [1265698] = "Resourcefulness",
             [1265706] = "Ingenuity",
+            [1291690] = "Polished Ammolite",
+            [1297679] = "Opalescent Amani Peridot",
+            [1297680] = "Piercing Amani Lapis",
+            [1297681] = "Roaring Amani Garnet",
+            [1307462] = "Refine Crystalline Glass |A:Professions-ChatIcon-Quality-12-Tier2:20:20|a",
+            [1307466] = "Refine Duskshrouded Stone |A:Professions-ChatIcon-Quality-12-Tier2:20:20|a",
         },
     },
     Leatherworking = {
@@ -790,6 +837,10 @@ ns.MidnightRecipeCatalog = {
             [1265699] = "Resourcefulness",
             [1265707] = "Ingenuity",
             [1291046] = "Rope Lynx Harness",
+            [1291691] = "Adorned Fang",
+            [1296509] = "Flat Snakeskin Canopy",
+            [1296510] = "Stretched Snakeskin Rack",
+            [1296511] = "Mounted Moby",
         },
     },
     Tailoring = {
@@ -889,6 +940,9 @@ ns.MidnightRecipeCatalog = {
             [1280544] = "Farstrider's Embroidered Cover",
             [1280545] = "Blood-Tempered Cape",
             [1280546] = "Spellbreaker's Shroud",
+            [1288335] = "Snakeskin Lining",
+            [1296512] = "Twilight's Blade Bedroll",
+            [1296514] = "Tortollan Slingsack",
         },
     },
     Fishing = {
@@ -923,10 +977,30 @@ ns.MidnightRecipeCatalog = {
             [1226157] = "Lucky Loa Lure",
             [1226159] = "Amani Angler's Ward",
             [1226161] = "Ominous Octopus Lure",
-            [1231090] = "",
+            [1231090] = "Coiled Stargorger Lure",
             [1235486] = "Blood Hunter Lure",
             [1265717] = "Skill",
             [1265725] = "Perception",
+            [1295404] = "Spotted Killifish",
+            [1295405] = "Toxic Tlhapi",
+            [1295406] = "Ula'tek Snakehead",
+            [1295407] = "Sulfurous Sludgefish",
+            [1295408] = "Coiled Stargorger",
+            [1295409] = "Dirty Darter",
+            [1295410] = "Polluted Puffer",
+            [1295411] = "Blightswarmer",
+            [1295420] = "The Coiled Isle",
+            [1295421] = "Venom Fishing",
+            [1295422] = "Temple Fishing",
+            [1295922] = "Tokka's Multi-Ward",
+            [1302819] = "Ula'tek Snakehead Lure",
+            [1303630] = "The Briny Best of 'Em",
+            [1305972] = "Oozing Goby",
+            [1305973] = "Giggling Skull",
+            [1305975] = "Grotesque Sturgeon",
+            [1305976] = "Many-Eyed Flounder",
+            [1305978] = "Twin-Headed Snipefish",
+            [1305979] = "Loathsome Anglerfish",
         },
     },
     Herbalism = {
@@ -979,6 +1053,12 @@ ns.MidnightRecipeCatalog = {
             [1265724] = "Perception",
             [1265728] = "Deftness",
             [1265814] = "Artisan Herbalist's Moxie",
+            [1301647] = "Cursed Argentleaf",
+            [1301649] = "Cursed Azeroot",
+            [1301651] = "Cursed Mana Lily",
+            [1301654] = "Cursed Sanguithorn",
+            [1301655] = "Cursed Tranquility Bloom",
+            [1301657] = "Overload Cursed Herb",
         },
     },
     Mining = {
@@ -1020,6 +1100,10 @@ ns.MidnightRecipeCatalog = {
             [1265729] = "Deftness",
             [1265815] = "Artisan Miner's Moxie",
             [1285705] = "Dazzling Thorium",
+            [1301486] = "Cursed Brilliant Silver",
+            [1301492] = "Cursed Refulgent Copper",
+            [1301494] = "Cursed Umbral Tin",
+            [1301495] = "Overload Cursed Deposits",
         },
     },
     Skinning = {

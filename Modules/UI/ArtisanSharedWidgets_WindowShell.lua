@@ -14,6 +14,9 @@ end
 local function ShellLayout()
     local LAYOUT = ns.UI_LAYOUT or {}
     return {
+        controlSz = ((ns.UI_IsClassicUi and ns.UI_IsClassicUi())
+            and (LAYOUT.CLASSIC_SHELL_TITLE_CONTROL_SIZE or 24))
+            or LAYOUT.SHELL_CONTROL_SIZE or 22,
         pad = LAYOUT.SHELL_PAD or LAYOUT.BASE_INDENT or 12,
         headerH = LAYOUT.SHELL_HEADER_HEIGHT or 44,
         headerHClassic = LAYOUT.SHELL_HEADER_HEIGHT_CLASSIC or 36,
@@ -71,6 +74,11 @@ function ns.UI_RefreshWindowHeader(headerBar)
             ns.UI_RegisterClassicShellDebug(parent, headerBar)
         end
     end
+    -- Header controls are ours now, so they must be repainted when the theme or UI mode flips.
+    if ns.UI_StyleShellGlyphButton then
+        ns.UI_StyleShellGlyphButton(headerBar._anShellClose, false, "danger")
+        ns.UI_StyleShellGlyphButton(headerBar._anShellSettings, false)
+    end
     if ns.UI_LayoutModernShellHeader then
         ns.UI_LayoutModernShellHeader(headerBar)
     end
@@ -86,7 +94,7 @@ function ns.UI_LayoutModernShellHeader(headerBar)
     local close = headerBar._anShellClose
     if close then
         close:ClearAllPoints()
-        close:SetPoint("RIGHT", headerBar, "RIGHT", -4, 0)
+        close:SetPoint("RIGHT", headerBar, "RIGHT", -pad, 0)
     end
     local rightClip = close
     local utilGap = -2
@@ -390,6 +398,88 @@ function ns.UI_StyleShellToolButton(btn, highlight, skipTextColor)
     end
 end
 
+--- Repaint a shell header glyph control (close / settings) for the active theme + UI mode.
+--- `tone` picks the hover fill: "danger" for close, accent for everything else.
+---@param btn Button|nil
+---@param hover boolean|nil
+---@param tone string|nil
+function ns.UI_StyleShellGlyphButton(btn, hover, tone)
+    if not btn then
+        return
+    end
+    if not btn._anGlyph then
+        --- Not one of ours (Classic uses native Blizzard controls) — leave it alone.
+        return
+    end
+    local c = Colors()
+    if ns.UI_ApplyVisuals then
+        local fill = c.bgCard
+        if hover then
+            fill = (tone == "danger" and c.danger) or c.accentDark or c.tabHover or c.bgLight
+        end
+        local br = (hover and (c.borderLight or c.border)) or c.border or { 0.26, 0.24, 0.30, 1 }
+        ns.UI_ApplyVisuals(btn, fill, { br[1], br[2], br[3], hover and 0.85 or 0.48 })
+    end
+    local glyph = btn._anGlyph
+    if glyph then
+        local t = (hover and (c.textBright or { 0.96, 0.95, 0.97, 1 })) or c.textNormal or { 0.82, 0.80, 0.86, 1 }
+        glyph:SetTextColor(t[1], t[2], t[3], t[4] or 1)
+    end
+end
+
+--- Addon-drawn header control. Replaces Blizzard's UIPanelCloseButton / UI-OptionsButton
+--- so window chrome is entirely ours in both UI modes (see the SharedWidgets/Factory rule:
+--- no default Blizzard or AceGUI widgets in window chrome).
+---@param parent Frame
+---@param glyphText string UTF-8 glyph, e.g. "\195\151" (multiplication sign) for close
+---@param tone string|nil "danger" tints the hover fill red (close button)
+---@return Button
+function ns.UI_CreateShellGlyphButton(parent, glyphText, tone)
+    local sl = ShellLayout()
+    local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    btn:SetSize(sl.controlSz, sl.controlSz)
+    return ns.UI_AdoptShellGlyphButton(btn, glyphText, tone)
+end
+
+--- Give an already-created button (e.g. one declared in XML) the same addon-drawn
+--- glyph, hover states and theming as UI_CreateShellGlyphButton.
+---@param btn Button
+---@param glyphText string|nil
+---@param tone string|nil
+---@return Button
+function ns.UI_AdoptShellGlyphButton(btn, glyphText, tone)
+    if not btn then
+        return btn
+    end
+    local fonts = ns.UI_FONTS or {}
+    btn._anGlyphTone = tone
+    if not btn._anGlyph then
+        local glyph = btn:CreateFontString(nil, "OVERLAY", fonts.WINDOW_SECTION or "GameFontHighlightMedium")
+        glyph:SetPoint("CENTER", btn, "CENTER", 0, 0)
+        btn._anGlyph = glyph
+    end
+    btn._anGlyph:SetText(glyphText or "")
+    ns.UI_StyleShellGlyphButton(btn, false, tone)
+    btn:SetScript("OnEnter", function(self)
+        ns.UI_StyleShellGlyphButton(self, true, self._anGlyphTone)
+        if self._anTooltip then
+            GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+            GameTooltip:SetText(self._anTooltip.title or "", 1, 1, 1)
+            if self._anTooltip.desc and self._anTooltip.desc ~= "" then
+                GameTooltip:AddLine(self._anTooltip.desc, 0.85, 0.85, 0.85, true)
+            end
+            GameTooltip:Show()
+        end
+    end)
+    btn:SetScript("OnLeave", function(self)
+        ns.UI_StyleShellGlyphButton(self, false, self._anGlyphTone)
+        if self._anTooltip then
+            GameTooltip:Hide()
+        end
+    end)
+    return btn
+end
+
 ---@param parent Frame
 ---@param config table|nil
 ---@return table shell { bar, title, logo, close, settings, utilities, rightClip, pad, headerH }
@@ -402,11 +492,19 @@ function ns.UI_CreateWindowHeader(parent, config)
     if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
         headerH = sl.headerHClassic or 36
     end
+    --- `config.headerHeight` lets a compact window (overload tracker HUD) run a
+    --- shorter title bar without shrinking it for every full-size window.
+    headerH = tonumber(config.headerHeight) or headerH
 
+    --- `config.inset` boxes the header inside the window instead of bleeding to its
+    --- edges, so a compact window (overload tracker) can align its header with its
+    --- rows. Defaults to 0 — every full-size window keeps its edge-to-edge title bar.
+    local hInset = tonumber(config.inset) or 0
     local headerBar = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     headerBar._anShellParent = parent
-    headerBar:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
-    headerBar:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, 0)
+    headerBar._anShellInset = hInset
+    headerBar:SetPoint("TOPLEFT", parent, "TOPLEFT", hInset, -hInset)
+    headerBar:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -hInset, -hInset)
     headerBar:SetHeight(headerH)
     headerBar:EnableMouse(true)
 
@@ -438,7 +536,7 @@ function ns.UI_CreateWindowHeader(parent, config)
         headerBar._anShellLogo = logo
     end
 
-    local title = headerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    local title = headerBar:CreateFontString(nil, "OVERLAY", (ns.UI_FONTS and ns.UI_FONTS.WINDOW_TITLE) or "GameFontNormalLarge")
     title:SetJustifyH("LEFT")
     title:SetWordWrap(false)
     title:SetMaxLines(1)
@@ -452,8 +550,18 @@ function ns.UI_CreateWindowHeader(parent, config)
     title:SetText(config.title or "")
     headerBar._anShellTitle = title
 
-    local close = CreateFrame("Button", nil, headerBar, "UIPanelCloseButton")
-    close:SetPoint("RIGHT", headerBar, "RIGHT", -4, 0)
+    --- Strict skin separation: Classic keeps Blizzard's native control, Modern gets ours.
+    --- Neither skin may borrow the other's chrome. Switching uiMode calls ReloadUI(),
+    --- so picking the widget once at creation is enough.
+    local close
+    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+        close = CreateFrame("Button", nil, headerBar, "UIPanelCloseButton")
+        close:SetPoint("RIGHT", headerBar, "RIGHT", -4, 0)
+    else
+        -- U+00D7 MULTIPLICATION SIGN, drawn by us — no Blizzard art in the Modern skin.
+        close = ns.UI_CreateShellGlyphButton(headerBar, "\195\151", "danger")
+        close:SetPoint("RIGHT", headerBar, "RIGHT", -pad, 0)
+    end
     close:SetScript("OnClick", config.onClose or function()
         parent:Hide()
     end)
@@ -464,33 +572,37 @@ function ns.UI_CreateWindowHeader(parent, config)
 
     local settingsBtn
     if config.showSettings then
-        settingsBtn = CreateFrame("Button", nil, headerBar)
-        settingsBtn:SetSize(26, 26)
-        settingsBtn:SetPoint("RIGHT", close, "LEFT", -4, 0)
-        settingsBtn:SetNormalTexture("Interface\\Buttons\\UI-OptionsButton")
-        settingsBtn:SetHighlightTexture("Interface\\Buttons\\UI-OptionsButton")
-        if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_StyleClassicToolButton then
-            ns.UI_StyleClassicToolButton(settingsBtn)
+        if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
+            --- Classic skin: native Blizzard art, styled the classic way.
+            settingsBtn = CreateFrame("Button", nil, headerBar)
+            settingsBtn:SetSize(26, 26)
+            settingsBtn:SetNormalTexture("Interface\\Buttons\\UI-OptionsButton")
+            settingsBtn:SetHighlightTexture("Interface\\Buttons\\UI-OptionsButton")
+            if ns.UI_StyleClassicToolButton then
+                ns.UI_StyleClassicToolButton(settingsBtn)
+            end
+        else
+            --- Modern skin: our chrome, and the gear glyph is desaturated and tinted to
+            --- the addon palette so no Blizzard gold bleeds in. Media/ has no gear asset
+            --- yet; swap SetTexture for one when it does.
+            settingsBtn = ns.UI_CreateShellGlyphButton(headerBar, "")
+            local c = Colors()
+            local gear = settingsBtn:CreateTexture(nil, "ARTWORK")
+            gear:SetPoint("CENTER", settingsBtn, "CENTER", 0, 0)
+            gear:SetSize(sl.controlSz - 8, sl.controlSz - 8)
+            gear:SetTexture("Interface\\Buttons\\UI-OptionsButton")
+            gear:SetDesaturated(true)
+            local tn = c.textNormal or { 0.82, 0.80, 0.86, 1 }
+            gear:SetVertexColor(tn[1], tn[2], tn[3], tn[4] or 1)
+            settingsBtn._anGearIcon = gear
         end
+        settingsBtn:SetPoint("RIGHT", close, "LEFT", -4, 0)
         settingsBtn:SetScript("OnClick", config.onSettings or function()
             if ns.OpenAddonSettings then
                 ns.OpenAddonSettings()
             end
         end)
-        if config.settingsTooltip then
-            local st = config.settingsTooltip
-            settingsBtn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                GameTooltip:SetText(st.title or "", 1, 1, 1)
-                if st.desc and st.desc ~= "" then
-                    GameTooltip:AddLine(st.desc, 0.85, 0.85, 0.85, true)
-                end
-                GameTooltip:Show()
-            end)
-            settingsBtn:SetScript("OnLeave", function()
-                GameTooltip:Hide()
-            end)
-        end
+        settingsBtn._anTooltip = config.settingsTooltip
         rightClip = settingsBtn
     end
 

@@ -92,7 +92,9 @@ local function GetTrackerChromeMetrics()
     if classic and ns.UI_GetClassicShellContentTop then
         contentTop = ns.UI_GetClassicShellContentTop()
     else
-        contentTop = (layout.SHELL_HEADER_HEIGHT or 44) + (layout.OVERLOAD_BODY_GAP or 6)
+        --- Header is boxed by `inset` on top/left/right, so content starts below
+        --- inset + header + gap. One inset for header and rows = equal widths.
+        contentTop = inset + (layout.OVERLOAD_HEADER_HEIGHT or 32) + (layout.OVERLOAD_BODY_GAP or 6)
     end
     return {
         classic = classic,
@@ -118,9 +120,10 @@ local function AnchorTrackerBody(tracker, body, headerBar)
         body:SetPoint("TOPLEFT", tracker, "TOPLEFT", m.inset, -m.contentTop)
         body:SetPoint("TOPRIGHT", tracker, "TOPRIGHT", -m.inset, -m.contentTop)
     elseif headerBar then
+        --- Flush with the header box: header and rows must share left/right edges.
         local gap = (ns.UI_LAYOUT or {}).OVERLOAD_BODY_GAP or 6
-        body:SetPoint("TOPLEFT", headerBar, "BOTTOMLEFT", m.sidePad, -gap)
-        body:SetPoint("TOPRIGHT", headerBar, "BOTTOMRIGHT", -m.sidePad, -gap)
+        body:SetPoint("TOPLEFT", headerBar, "BOTTOMLEFT", 0, -gap)
+        body:SetPoint("TOPRIGHT", headerBar, "BOTTOMRIGHT", 0, -gap)
     end
 end
 
@@ -153,7 +156,7 @@ local function ApplyOverloadTrackerLayout(indicator)
     if hasH then
         herb:Show()
         herb:ClearAllPoints()
-        herb:SetPoint("TOPLEFT", body, "TOPLEFT", m.bodyPad, y)
+        herb:SetPoint("TOPLEFT", body, "TOPLEFT", 0, y)
         y = y - m.rowH - m.rowGap
         n = n + 1
     else
@@ -162,7 +165,7 @@ local function ApplyOverloadTrackerLayout(indicator)
     if hasM then
         mine:Show()
         mine:ClearAllPoints()
-        mine:SetPoint("TOPLEFT", body, "TOPLEFT", m.bodyPad, y)
+        mine:SetPoint("TOPLEFT", body, "TOPLEFT", 0, y)
         n = n + 1
     else
         mine:Hide()
@@ -171,7 +174,10 @@ local function ApplyOverloadTrackerLayout(indicator)
         return
     end
 
-    local rowW = m.trackerW - (m.sidePad * 2) - (m.bodyPad * 2)
+    --- Same width as the header box: window minus one inset per side.
+    --- `bodyPad` is vertical padding only — a second horizontal inset here is what
+    --- used to make the rows visibly narrower than the title bar.
+    local rowW = m.trackerW - (m.sidePad * 2)
     herb:SetWidth(rowW)
     mine:SetWidth(rowW)
 
@@ -194,7 +200,10 @@ local function ApplyOverloadTrackerLayout(indicator)
     local bodyH = m.bodyPad + rowsH + modifierH + m.bodyPad
     body:SetHeight(bodyH)
     tr:SetHeight(m.contentTop + bodyH + m.bottomPad)
-    if tr._anHeader and ns.UI_RefreshClassicWindowHeader then
+    --- Classic-only: this paints the UI-DialogBox-Header strip and its gold title.
+    --- It used to run unconditionally, which dragged the Classic frame into the
+    --- Modern skin (ornate corners + gold text around an otherwise flat window).
+    if m.classic and tr._anHeader and ns.UI_RefreshClassicWindowHeader then
         ns.UI_RefreshClassicWindowHeader(tr._anHeader)
     end
 end
@@ -241,6 +250,9 @@ local function ModifierLabel(mod)
     end
     if mod == "empowered" then
         return (L and L["OVERLOAD_MODIFIER_EMPOWERED"]) or "Empowered"
+    end
+    if mod == "cursed" then
+        return (L and L["OVERLOAD_MODIFIER_CURSED"]) or "Cursed"
     end
     return mod
 end
@@ -347,6 +359,8 @@ function GatheringOverloadIndicator:EnsureFrames()
 
     local shell = ns.UI_CreateWindowHeader(tracker, {
         title = (L and L["OVERLOAD_TRACKER_TITLE"]) or "Overload Tracker",
+        inset = (not m.classic) and m.sidePad or nil,
+        headerHeight = (not m.classic) and (ns.UI_LAYOUT or {}).OVERLOAD_HEADER_HEIGHT or nil,
         dragFrame = tracker,
         showSettings = false,
         showLogo = true,

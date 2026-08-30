@@ -17,7 +17,7 @@ local ADDON_NAME, ns = ...
 ---@class GatheringNodeOverloadRegistry
 local GatheringNodeOverloadRegistry = {}
 
---- [templateId] = { cat = "herb"|"mine", mod = "wild"|"infused"|"empowered"|nil }
+--- [templateId] = { cat = "herb"|"mine", mod = "wild"|"infused"|"empowered"|"cursed"|nil }
 --- Fill from in-game GUID dumps when you want a hard guarantee for a specific node.
 local OBJECT_TEMPLATE_IDS = {
     -- Example (fake id): [452198] = { cat = "mine", mod = "wild" },
@@ -96,6 +96,8 @@ local function BuildExactNameMap()
             { "wild ", "wild" },
             { "infused ", "infused" },
             { "empowered ", "empowered" },
+            --- 12.1 Coiled Isle: "Cursed Argentleaf", "Cursed Umbral Tin", …
+            { "cursed ", "cursed" },
         }
         for vi = 1, #variants do
             local v = variants[vi]

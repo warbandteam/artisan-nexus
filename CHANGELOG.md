@@ -1,17 +1,23 @@
-## v0.2.0 (2026-08-06)
+## v0.3.0 (2026-08-29)
 
 Added:
-- Loot History, Artisan Hub, Recipes, and Settings windows reopen at the position you last left them instead of recentering every time.
-- Session loot overlay shows a reagent quality badge on each pickup.
+- WoW 12.1 “Coiled Isle” content: 81 recipes across every profession, 14 fish, and 12 materials.
+- Cursed herb and deposit nodes are recognised, along with their overload cast.
+- The craft queue button can be bound to a key (Key Bindings > Artisan Nexus).
 
 Fixed:
-- Session loot overlay text now scales with the overlay size slider.
-- Character class color and name are recorded correctly again.
-- Overloaded node hints use the correct catalog modifier instead of always guessing from the tooltip.
-- Craft queue and overload action buttons no longer throw action-blocked errors during combat.
+- Gathering loot no longer lands on the wrong tab. Fifteen spell IDs pointed at unrelated spells such as “Draenor Scribe” and “Khaz Algar Enchanting”.
+- Empowered node overloads are detected again; the three IDs used for them belonged to other spells.
+- Category detection by spell icon works at all. None of its four icons matched a real gathering spell.
+- The Overload Tracker drew the Classic ornate title frame even on the Modern skin.
+- The Overload Tracker's title bar, body and rows were three different widths; they now share one edge.
+- “Evercore Stitchwraps” was misspelled, and “Coiled Stargorger Lure” never appeared because its name was blank.
 
 Updated:
-- Auction House sync button is now a compact icon with an inline progress bar and pause overlay.
-- Session loot overlay toasts are slightly wider so names and prices fit.
+- Interface target raised to 12.1.
+- The Overload Tracker is shorter and tighter, without changing any other window.
+- Window close buttons are drawn by the addon on the Modern skin; the Classic skin keeps native Blizzard controls.
+- Gathering spell tables rebuilt from game data: every expansion is covered now, 43 IDs to 501.
+- Key binding names come from the language files instead of fixed English.
 
 CurseForge: Artisan Nexus
