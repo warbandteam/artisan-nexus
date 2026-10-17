@@ -4,7 +4,17 @@
     Wiki (Midnight): TRADE_SKILL_CRAFT_BEGIN (recipeSpellID),
     TRADE_SKILL_ITEM_CRAFTED_RESULT (CraftingItemResultData table).
 
-    Single frame owner; CraftingQueueService and CraftLootService register listeners.
+    Single frame owner; CraftingQueueService, CraftLootService and CraftLedgerService
+    register listeners.
+
+    Verified 2026-10-14, TradeSkillUITypesDocumentation.lua (12.1.5.70391):
+      CraftingItemResultData { itemID, quantity, multicraft (extra items), bonusCraft,
+        operationID, firstCraftReward, resourcesReturned?, concentrationSpent,
+        hasIngenuityProc, ingenuityRefund, craftingQuality?, isEnchant, ... }
+      TRADE_SKILL_CURRENCY_REWARD_RESULT (CraftingCurrencyResultData { currencyID, quantity,
+        operationID, firstCraftReward, showCurrencyText })
+    Blizzard_ProfessionsCraftingOutputLog.lua: one craft can fire several result events that
+    share an operationID; Blizzard settles them 0.35 s after the last one.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -13,6 +23,7 @@ local CraftEventService = {
     pendingSpellID = nil,
     _craftBeginListeners = {},
     _craftResultListeners = {},
+    _currencyResultListeners = {},
 }
 
 ---@param spellID number|nil
@@ -37,14 +48,8 @@ function CraftEventService:ResultMatchesRecipe(spellID, data)
             return true
         end
         --- Quality-tier crafts return a tier item that differs from the base output.
-        local sch = rs and rs.GetSchematic and rs:GetSchematic(spellID)
-        local qids = sch and sch.qualityItemIDs
-        if type(qids) == "table" then
-            for i = 1, #qids do
-                if tonumber(qids[i]) == resultID then
-                    return true
-                end
-            end
+        if self:IsQualityItemOfRecipe(spellID, resultID) then
+            return true
         end
         if outID and outID > 0 then
             return false
@@ -55,6 +60,199 @@ function CraftEventService:ResultMatchesRecipe(spellID, data)
         return true
     end
     return false
+end
+
+--- True when itemID is one of the recipe's per-tier outputs (harvested schematic first,
+--- then live TradeSkillRecipeInfo.qualityItemIDs while the profession window is open).
+---@param spellID number
+---@param itemID number
+---@return boolean
+function CraftEventService:IsQualityItemOfRecipe(spellID, itemID)
+    spellID, itemID = tonumber(spellID), tonumber(itemID)
+    if not spellID or not itemID or itemID <= 0 then
+        return false
+    end
+    local rs = ns.RecipeService
+    local sch = rs and rs.GetSchematic and rs:GetSchematic(spellID)
+    local qids = sch and sch.qualityItemIDs
+    if type(qids) == "table" then
+        for i = 1, #qids do
+            if tonumber(qids[i]) == itemID then
+                return true
+            end
+        end
+    end
+    -- verified 2026-10-14, TradeSkillUITypesDocumentation: TradeSkillRecipeInfo.qualityItemIDs?
+    if C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo then
+        local ok, info = pcall(C_TradeSkillUI.GetRecipeInfo, spellID)
+        local live = ok and type(info) == "table" and info.qualityItemIDs
+        if type(live) == "table" then
+            for i = 1, #live do
+                if tonumber(live[i]) == itemID then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+--- Recipe whose output (base or quality tier) is itemID, from the harvested schematics.
+---@param itemID number
+---@return number|nil spellID
+function CraftEventService:ResolveSpellFromOutput(itemID)
+    itemID = tonumber(itemID)
+    if not itemID or itemID <= 0 then
+        return nil
+    end
+    local rs = ns.RecipeService
+    local s = rs and rs.GetSchematicStore and rs:GetSchematicStore()
+    if type(s) ~= "table" then
+        return nil
+    end
+    local tierHit
+    for spellID, sch in pairs(s) do
+        if type(sch) == "table" then
+            if sch.output and tonumber(sch.output.itemID) == itemID then
+                return spellID
+            end
+            if not tierHit and type(sch.qualityItemIDs) == "table" then
+                for i = 1, #sch.qualityItemIDs do
+                    if tonumber(sch.qualityItemIDs[i]) == itemID then
+                        tierHit = spellID
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return tierHit
+end
+
+--- Recipe a result belongs to: the pending CRAFT_BEGIN spell when the output matches it,
+--- else a reverse lookup on the output item. Bonus results match nothing by design.
+---@param data table|nil
+---@param pendingSpellID number|nil
+---@return number|nil spellID
+function CraftEventService:ResolveSpellForResult(data, pendingSpellID)
+    if type(data) ~= "table" then
+        return nil
+    end
+    local probe = data
+    if data.bonusCraft then
+        -- Match on the item alone; bonus flag would make ResultMatchesRecipe refuse it.
+        probe = { itemID = data.itemID, isEnchant = data.isEnchant }
+    end
+    if pendingSpellID and self:ResultMatchesRecipe(pendingSpellID, probe) then
+        return tonumber(pendingSpellID)
+    end
+    local itemID = self:GetResultItemID(data)
+    if itemID then
+        return self:ResolveSpellFromOutput(itemID)
+    end
+    return nil
+end
+
+--- Units a single result event put in the bags.
+--- `multicraft` is the number of extra items (Blizzard_ProfessionsCraftingOutputLog shows it
+--- as a separate "+N" row). Whether `quantity` already includes those extras is UNVERIFIED
+--- (OutputLog only shows `quantity` as the item count and `multicraft` in a tooltip):
+--- when quantity exceeds the recipe's quantityMax the extras are taken as included,
+--- otherwise they are added on top. quantityMax comes from the cached RecipeService
+--- schematic, else the live C_TradeSkillUI.GetRecipeSchematic(recipeSpellID, isRecraft)
+--- (verified 2026-10-15, TradeSkillUIDocumentation.lua / TradeSkillUITypesDocumentation.lua
+--- 12.1.5: CraftingRecipeSchematic.quantityMax). With neither (no recipe resolved) the
+--- same "not included" default applies: if one in-game multicraft proc shows quantity
+--- already includes the extras, flip both branches together.
+---@param data table|nil
+---@param spellID number|nil
+---@return number total
+---@return number extra multicraft extra units within total
+---@return number base total - extra
+function CraftEventService:GetResultTotalQuantity(data, spellID)
+    if type(data) ~= "table" then
+        return 0, 0, 0
+    end
+    local qty = math.max(0, tonumber(data.quantity) or 0)
+    local mc = math.max(0, tonumber(data.multicraft) or 0)
+    if qty == 0 and mc == 0 then
+        qty = 1
+    end
+    if mc <= 0 then
+        return qty, 0, qty
+    end
+    local rs = ns.RecipeService
+    local sch = spellID and rs and rs.GetSchematic and rs:GetSchematic(spellID)
+    local qmax = sch and sch.output and tonumber(sch.output.quantityMax or sch.output.quantityMin)
+    if not qmax and spellID and C_TradeSkillUI and C_TradeSkillUI.GetRecipeSchematic then
+        local ok, live = pcall(C_TradeSkillUI.GetRecipeSchematic, spellID, false)
+        if ok and type(live) == "table" then
+            local v = live.quantityMax or live.quantityMin
+            if type(v) == "number" and not (issecretvalue and issecretvalue(v)) then
+                qmax = v
+            end
+        end
+    end
+    if qmax and qmax > 0 and qty > qmax and qty - mc >= 1 then
+        return qty, mc, qty - mc
+    end
+    return qty + mc, mc, qty
+end
+
+--- Per-operation de-duplication of multicraft extras against separate bonusCraft results.
+--- A primary result credits base + multicraft; a later bonusCraft result of the same item in
+--- the same operation is assumed to be those same extras (UNVERIFIED pairing) and only the
+--- part not already credited counts. The reverse order is handled symmetrically.
+---@return table deduper with :Credit(data, spellID) -> creditedUnits, extraUnits
+function CraftEventService:CreateOutputDeduper()
+    local ops = {}
+    local svc = self
+    local deduper = {}
+    local function Op(opID)
+        local now = GetTime()
+        for k, o in pairs(ops) do
+            if now - o.t > 10 then
+                ops[k] = nil
+            end
+        end
+        local o = ops[opID]
+        if not o then
+            o = { t = now, mcCredited = {}, bonusCredited = {} }
+            ops[opID] = o
+        end
+        o.t = now
+        return o
+    end
+    function deduper:Credit(data, spellID)
+        if type(data) ~= "table" then
+            return 0, 0
+        end
+        local itemID = svc:GetResultItemID(data) or 0
+        local opID = tonumber(data.operationID) or 0
+        if data.bonusCraft then
+            local q = math.max(0, tonumber(data.quantity) or 0)
+            if opID == 0 then
+                return q, q
+            end
+            local o = Op(opID)
+            local covered = math.min(q, o.mcCredited[itemID] or 0)
+            o.mcCredited[itemID] = (o.mcCredited[itemID] or 0) - covered
+            local credit = q - covered
+            o.bonusCredited[itemID] = (o.bonusCredited[itemID] or 0) + credit
+            return credit, credit
+        end
+        local total, extra = svc:GetResultTotalQuantity(data, spellID)
+        if opID == 0 or extra <= 0 then
+            return total, extra
+        end
+        local o = Op(opID)
+        local already = math.min(extra, o.bonusCredited[itemID] or 0)
+        o.bonusCredited[itemID] = (o.bonusCredited[itemID] or 0) - already
+        local creditExtra = extra - already
+        o.mcCredited[itemID] = (o.mcCredited[itemID] or 0) + creditExtra
+        return total - already, creditExtra
+    end
+    return deduper
 end
 
 ---@param data table|nil
@@ -84,29 +282,54 @@ function CraftEventService:RegisterCraftResult(listener)
     return #self._craftResultListeners
 end
 
+---@param listener function(data: table|nil, pendingSpellID: number|nil) CraftingCurrencyResultData
+---@return number listenerId
+function CraftEventService:RegisterCurrencyResult(listener)
+    self._currencyResultListeners[#self._currencyResultListeners + 1] = listener
+    return #self._currencyResultListeners
+end
+
+--- One failing listener must not starve the others (queue, loot, ledger).
+local function SafeCall(fn, a, b)
+    local ok, err = pcall(fn, a, b)
+    if not ok and geterrorhandler then
+        geterrorhandler()(err)
+    end
+end
+
 local function DispatchCraftBegin(recipeSpellID)
     CraftEventService.pendingSpellID = tonumber(recipeSpellID)
     local listeners = CraftEventService._craftBeginListeners
     for i = 1, #listeners do
-        listeners[i](CraftEventService.pendingSpellID)
+        SafeCall(listeners[i], CraftEventService.pendingSpellID)
     end
 end
 
 local function DispatchCraftResult(data)
     local listeners = CraftEventService._craftResultListeners
     for i = 1, #listeners do
-        listeners[i](data, CraftEventService.pendingSpellID)
+        SafeCall(listeners[i], data, CraftEventService.pendingSpellID)
+    end
+end
+
+local function DispatchCurrencyResult(data)
+    local listeners = CraftEventService._currencyResultListeners
+    for i = 1, #listeners do
+        SafeCall(listeners[i], data, CraftEventService.pendingSpellID)
     end
 end
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("TRADE_SKILL_CRAFT_BEGIN")
 frame:RegisterEvent("TRADE_SKILL_ITEM_CRAFTED_RESULT")
+frame:RegisterEvent("TRADE_SKILL_CURRENCY_REWARD_RESULT")
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "TRADE_SKILL_CRAFT_BEGIN" then
         DispatchCraftBegin(arg1)
     elseif event == "TRADE_SKILL_ITEM_CRAFTED_RESULT" then
         DispatchCraftResult(arg1)
+    elseif event == "TRADE_SKILL_CURRENCY_REWARD_RESULT" then
+        DispatchCurrencyResult(arg1)
     end
 end)
 

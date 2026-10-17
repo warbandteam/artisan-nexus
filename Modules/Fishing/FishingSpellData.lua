@@ -54,6 +54,10 @@ local FISHING_SPELLS = {
     [1257770] = true,
     [1281823] = true,
     [1281824] = true,
+    --- 12.1 zone fishing casts on skill line 356 (verified 2026-10-15, SpellName DB2 12.1.5.70391):
+    --- detection only — not in FISHING_CAST_SPELL_PRIORITY, the keybind keeps the generic cast.
+    [1295421] = true, -- Venom Fishing
+    [1295422] = true, -- Temple Fishing
 }
 
 --- Primary fishing spell art (pole) — matches unknown Midnight spell IDs when not yet listed above.
@@ -65,11 +69,13 @@ local function PlayerKnowsFishingSpell(spellId)
     if not spellId then
         return false
     end
-    if IsPlayerSpell and IsPlayerSpell(spellId) then
-        return true
-    end
-    if IsSpellKnownOrOverridesKnown and IsSpellKnownOrOverridesKnown(spellId) then
-        return true
+    -- 12.1.5: the IsPlayerSpell / IsSpellKnownOrOverridesKnown globals are gone; use the
+    -- documented C_SpellBook.IsSpellKnownOrInSpellBook (SpellBookDocumentation, verified 2026-10-14).
+    if C_SpellBook and C_SpellBook.IsSpellKnownOrInSpellBook then
+        local okK, known = pcall(C_SpellBook.IsSpellKnownOrInSpellBook, spellId)
+        if okK and known then
+            return true
+        end
     end
     if C_SpellBook and C_SpellBook.IsSpellInSpellBook then
         local ok, inBook = pcall(C_SpellBook.IsSpellInSpellBook, spellId)
@@ -181,40 +187,6 @@ local function ScanSpellBookForFishingCastSpellId()
         end
     end
     return candidates[1]
-end
-
---- Localized spell name for macros / debug (never use for string ops on secret values).
----@param spellId number|nil
----@return string|nil
-function FishingSpellData.GetFishingCastLocalizedName(spellId)
-    if not spellId or type(spellId) ~= "number" then
-        return nil
-    end
-    if C_Spell and C_Spell.GetSpellName then
-        local ok, name = pcall(C_Spell.GetSpellName, spellId)
-        if ok and type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then
-            return name
-        end
-    end
-    if C_Spell and C_Spell.GetSpellInfo then
-        local ok, info = pcall(C_Spell.GetSpellInfo, spellId)
-        if ok and type(info) == "table" and info.name then
-            local name = info.name
-            if type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then
-                return name
-            end
-        end
-    end
-    if C_Spell and C_Spell.GetSpellLink then
-        local ok, link = pcall(C_Spell.GetSpellLink, spellId)
-        if ok and type(link) == "string" and link ~= "" and not (issecretvalue and issecretvalue(link)) then
-            local parsed = link:match("%[(.-)%]")
-            if type(parsed) == "string" and parsed ~= "" and not (issecretvalue and issecretvalue(parsed)) then
-                return parsed
-            end
-        end
-    end
-    return nil
 end
 
 --- Best spell ID for fishing cast (priority list → static table → spellbook scan for unlisted Midnight ranks).

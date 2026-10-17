@@ -1,0 +1,784 @@
+--[[
+    Warband Nexus - Window Factory
+    External dialog/popup builder (draggable header, ESC/outside close, duplicate guard).
+    Canonical path; SharedWidgets keeps CreateContainer / ApplyVisuals only.
+]]
+
+local ADDON_NAME, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
+
+-- Debug print helper
+local DebugPrint = ns.DebugPrint
+-- Import dependencies from namespace
+local COLORS = ns.UI_COLORS
+local ApplyVisuals = ns.UI_ApplyVisuals
+local ApplyMainWindowShellFill = ns.UI_ApplyMainWindowShellFill
+local FontManager = ns.FontManager
+local CreateIcon = ns.UI_CreateIcon
+local CreateButton = ns.UI_CreateButton
+local Factory = ns.UI and ns.UI.Factory
+
+local function ThemeTextHex(role)
+    if ns.UI_GetTextRoleHex then
+        return ns.UI_GetTextRoleHex(role)
+    end
+    if role == "Dim" then return "|cff888888" end
+    if role == "Muted" then return "|cffaaaaaa" end
+    return "|cffeeeeee"
+end
+
+local function SemanticGoldHex()
+    if ns.UI_GetSemanticGoldHex then
+        return ns.UI_GetSemanticGoldHex()
+    end
+    return "|cffffd700"
+end
+
+local function ControlChromeBg()
+    if ns.UI_GetControlChromeBackdrop then
+        return ns.UI_GetControlChromeBackdrop()
+    end
+    return COLORS and COLORS.bgCard or { 0.12, 0.12, 0.15, 1 }
+end
+
+local function ControlChromeHoverBg()
+    if ns.UI_GetControlChromeHoverBackdrop then
+        return ns.UI_GetControlChromeHoverBackdrop()
+    end
+    return COLORS and COLORS.surfaceRowEven or { 0.18, 0.18, 0.22, 1 }
+end
+
+local function SemanticGreenHex()
+    if ns.UI_GetSemanticGreenColor then
+        local r, g, b = ns.UI_GetSemanticGreenColor()
+        return string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
+    end
+    return "|cff44ff44"
+end
+
+-- RUNTIME DEPENDENCY VALIDATION
+
+-- Defer validation to first use (allows SharedWidgets to complete loading)
+-- Dependencies checked at runtime in CreateExternalWindow function
+
+-- EXTERNAL WINDOW SYSTEM
+
+---@class ExternalWindowConfig
+---@field name string Unique dialog name (required)
+---@field title string Dialog title (required)
+---@field icon string Icon path/atlas (required)
+---@field width number|nil Width in pixels (default 400)
+---@field height number|nil Height in pixels (default 300)
+---@field iconIsAtlas boolean|nil If true, icon is an atlas name (default false)
+---@field onClose function|nil Callback when dialog closes
+---@field preventDuplicates boolean|nil Prevent multiple instances (default true)
+---@field persistent boolean|nil Reusable shell built once by the caller: Close only hides (overlay, scale
+---  registration, WindowManager entry and the global name stay). Caller caches the frame and re-Shows it.
+
+---Creates a standardized external window/dialog with modern UI features
+---@param config ExternalWindowConfig Configuration table
+---@return Frame|nil dialog Main dialog frame
+---@return Frame|nil contentFrame Frame where you add your content
+---@return Frame|nil header Header frame (for custom additions)
+local function CreateExternalWindow(config)
+    -- Runtime dependency check (deferred to first use)
+    if not COLORS or not ApplyVisuals or not FontManager or not CreateIcon or not CreateButton or not Factory then
+        DebugPrint("|cffff0000[WN WindowFactory ERROR]|r Missing dependencies - SharedWidgets not loaded")
+        return nil
+    end
+    
+    -- Validate config
+    if not config or not config.name or not config.title or not config.icon then
+        error("CreateExternalWindow: name, title, and icon are required")
+        return nil
+    end
+    
+    local globalName = "ArtisanNexus_" .. config.name
+    local width = config.width or 400
+    local height = config.height or 300
+
+    -- Clamp external window size to ensure it never exceeds laptop or small display bounds
+    local screenW = UIParent:GetWidth() or 1920
+    local screenH = UIParent:GetHeight() or 1080
+    local scale = (ns.UI_GetAddonUIScale and ns.UI_GetAddonUIScale()) or 1.0
+    if not scale or scale <= 0 then scale = 1.0 end
+    local maxAvailW = math.floor((screenW * 0.95) / scale)
+    local maxAvailH = math.floor((screenH * 0.92) / scale)
+    if width > maxAvailW then width = maxAvailW end
+    if height > maxAvailH then height = maxAvailH end
+
+    local preventDuplicates = (config.preventDuplicates ~= false) -- default true
+    local mainShellLayout = ns.UI_LAYOUT and ns.UI_LAYOUT.MAIN_SHELL or {}
+    local extDlgHeaderH = mainShellLayout.HEADER_BAR_HEIGHT or mainShellLayout.EXTERNAL_DIALOG_HEADER_HEIGHT or 40
+    --- Body region below header: full-bleed like main shell (no side/bottom gutter).
+    local extContentBodyH = math.max(1, height - extDlgHeaderH)
+    local recycle = ns.UI_RecycleBin
+    local dialog
+    local function AbortIncompleteExternalWindow(overlayMaybe)
+        if overlayMaybe then
+            overlayMaybe:Hide()
+            overlayMaybe:SetScript("OnMouseDown", nil)
+            if recycle then overlayMaybe:SetParent(recycle) else overlayMaybe:SetParent(nil) end
+        end
+        if dialog then
+            dialog:Hide()
+            if recycle then dialog:SetParent(recycle) else dialog:SetParent(nil) end
+        end
+        _G[globalName] = nil
+    end
+    
+    -- Prevent duplicates
+    if preventDuplicates then
+        if _G[globalName] and _G[globalName]:IsShown() then
+            return nil -- Already open
+        end
+    end
+    
+    -- Dialog shell (Factory container; borders from ApplyVisuals below)
+    dialog = Factory:CreateContainer(UIParent, width, height, false, globalName)
+    if not dialog then return nil end
+    dialog:SetClampedToScreen(true)
+    -- Remember the last dragged spot instead of always re-centering.
+    local posKey = globalName
+    if not (ns.WindowManager and ns.WindowManager.RestorePosition
+            and ns.WindowManager:RestorePosition(dialog, posKey)) then
+        dialog:SetPoint("CENTER")
+    end
+
+    -- WindowManager: standardized strata/level
+    if ns.WindowManager then
+        ns.WindowManager:ApplyStrata(dialog, ns.WindowManager.PRIORITY.POPUP)
+    else
+        dialog:SetFrameStrata("FULLSCREEN_DIALOG")
+        dialog:SetFrameLevel(200)
+    end
+    
+    -- Shell: full Blizzard dialog in classic; modern full-bleed fill + accent border quartet.
+    local shellBg = COLORS.bg or { 0.04, 0.04, 0.05, 0.98 }
+    local useClassicShell = ns.UI_IsClassicMode and ns.UI_IsClassicMode()
+    if useClassicShell and ns.UI_ApplyBlizzardDialogBackdrop then
+        local classicBg = (ns.UI_CLASSIC_SURFACE_VARIANT and ns.UI_CLASSIC_SURFACE_VARIANT.bg)
+            or shellBg
+        ns.UI_ApplyBlizzardDialogBackdrop(dialog, classicBg)
+    elseif ApplyMainWindowShellFill then
+        ApplyMainWindowShellFill(dialog, shellBg)
+    elseif ApplyVisuals then
+        ApplyVisuals(dialog, shellBg, { COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.8 })
+    end
+
+    local sideInset, topInset, bottomInset = 0, 0, 0
+    if useClassicShell then
+        local bd = ns.UI_CLASSIC_DIALOG_BACKDROP and ns.UI_CLASSIC_DIALOG_BACKDROP.insets
+        if bd then
+            sideInset = bd.left or 11
+            topInset = bd.top or 12
+            bottomInset = bd.bottom or 11
+        end
+    end
+    
+    dialog:EnableMouse(true)
+    dialog:SetMovable(true)
+    
+    -- Header bar (raw Frame + ApplyVisuals — matches CreateMainWindow title band)
+    local header = CreateFrame("Frame", nil, dialog)
+    header:SetHeight(extDlgHeaderH)
+    header:ClearAllPoints()
+    header:SetPoint("TOPLEFT", dialog, "TOPLEFT", sideInset, -topInset)
+    header:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", -sideInset, -topInset)
+    header:SetFrameLevel(dialog:GetFrameLevel() + 10)
+    dialog._wnExternalHeader = header
+
+    local headerBorder = (ns.UI_GetMainHeaderBorderColor and ns.UI_GetMainHeaderBorderColor())
+        or { COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.8 }
+    if ns.UI_IsClassicMode and ns.UI_IsClassicMode() and ns.UI_ApplyClassicInteriorFlatFill then
+        ns.UI_ApplyClassicInteriorFlatFill(header, { 0, 0, 0, 0 })
+    elseif ApplyVisuals and (not ns.UI_CanApplyCustomChrome or ns.UI_CanApplyCustomChrome(header)) then
+        local headerBg = (ns.UI_GetMainHeaderChromeColor and ns.UI_GetMainHeaderChromeColor())
+            or (COLORS.accentDark and { COLORS.accentDark[1], COLORS.accentDark[2], COLORS.accentDark[3], 1 })
+            or COLORS.bgCard
+        ApplyVisuals(header, headerBg, headerBorder)
+    end
+    
+    -- Make header draggable (scale-correct)
+    header:EnableMouse(true)
+    local function SaveDialogPosition()
+        if ns.WindowManager and ns.WindowManager.SavePosition then
+            ns.WindowManager:SavePosition(dialog, posKey)
+        end
+    end
+    if ns.WindowManager and ns.WindowManager.InstallDragHandler then
+        ns.WindowManager:InstallDragHandler(header, dialog, SaveDialogPosition)
+    else
+        header:SetMovable(true)
+        header:RegisterForDrag("LeftButton")
+        header:SetScript("OnDragStart", function()
+            dialog:StartMoving()
+        end)
+        header:SetScript("OnDragStop", function()
+            dialog:StopMovingOrSizing()
+            SaveDialogPosition()
+        end)
+    end
+    
+  -- Icon (support both texture and atlas)
+    local iconIsAtlas = config.iconIsAtlas or false
+    local iconFrame = CreateIcon(header, config.icon, 24, iconIsAtlas, nil, true)
+    iconFrame:SetPoint("LEFT", 15, 0)
+    iconFrame:Show()
+    
+    -- Title (role color — matches main shell / floating trackers)
+    local titleText = FontManager:CreateFontString(header, FontManager:GetFontRole("windowChromeTitle"), "OVERLAY")
+    titleText:SetPoint("LEFT", iconFrame, "RIGHT", 10, 0)
+    titleText:SetText(config.title)
+    if ns.UI_SetTextColorRole then
+        ns.UI_SetTextColorRole(titleText, "Bright")
+    else
+        titleText:SetText(ThemeTextHex("Bright") .. config.title .. "|r")
+    end
+    
+    -- Close button (Blizzard template in classic; custom chrome otherwise)
+    local closeBtn
+    if ns.UI_ShouldUseBlizzardChrome and ns.UI_ShouldUseBlizzardChrome() then
+        closeBtn = CreateFrame("Button", nil, header, "UIPanelCloseButton")
+        closeBtn:SetPoint("TOPRIGHT", header, "TOPRIGHT", -2, -2)
+    else
+        local closeBg = ns.UI_GetCloseButtonBackdrop and ns.UI_GetCloseButtonBackdrop() or { 0.15, 0.15, 0.15, 0.9 }
+        closeBtn = CreateButton(header, 28, 28, closeBg, headerBorder, false)
+        if not closeBtn then AbortIncompleteExternalWindow() return nil end
+        closeBtn:SetPoint("RIGHT", -8, 0)
+
+        -- Close icon (IconRegistry "close": WN stroke X, tinted below)
+        local closeIcon = closeBtn:CreateTexture(nil, "ARTWORK")
+        closeIcon:SetSize(16, 16)
+        closeIcon:SetPoint("CENTER")
+        ns.UI_SetIcon(closeIcon, "close")
+        closeIcon:SetVertexColor(0.9, 0.3, 0.3)
+
+        -- Hover effects
+        closeBtn:SetScript("OnEnter", function()
+            closeIcon:SetVertexColor(1, 0.2, 0.2)
+            if ApplyVisuals then
+                local negBg, negBorder
+                if ns.UI_GetSemanticNegativeCard then
+                    negBg, negBorder = ns.UI_GetSemanticNegativeCard(true)
+                end
+                if negBg and negBorder then
+                    ApplyVisuals(closeBtn, negBg, negBorder)
+                end
+            end
+        end)
+
+        closeBtn:SetScript("OnLeave", function()
+            closeIcon:SetVertexColor(0.9, 0.3, 0.3)
+            if ApplyVisuals then
+                local idle = ns.UI_GetCloseButtonBackdrop and ns.UI_GetCloseButtonBackdrop() or closeBg
+                ApplyVisuals(closeBtn, idle, headerBorder)
+            end
+        end)
+    end
+    if not closeBtn then AbortIncompleteExternalWindow() return nil end
+    
+    -- Close function (onClose called once here only; OnHide must not call it again)
+    local persistent = (config.persistent == true)
+    local function CloseDialog()
+        if persistent then
+            -- Reused shell: OnHide below hides the click-outside overlay; OnShow brings it back.
+            if config.onClose then
+                config.onClose()
+            end
+            dialog:Hide()
+            return
+        end
+        local bin = ns.UI_RecycleBin
+        local overlay = dialog._clickOutsideFrame
+        if overlay then
+            overlay:Hide()
+            if bin then overlay:SetParent(bin) else overlay:SetParent(nil) end
+            overlay:SetScript("OnMouseDown", nil)
+            dialog._clickOutsideFrame = nil
+        end
+        if config.onClose then
+            config.onClose()
+        end
+        dialog:Hide()
+        if ns.UI_UnregisterScaledFrame then
+            ns.UI_UnregisterScaledFrame(dialog)
+        end
+        if bin then dialog:SetParent(bin) else dialog:SetParent(nil) end
+        _G[globalName] = nil
+    end
+    
+    closeBtn:SetScript("OnClick", CloseDialog)
+    
+    -- Content frame: edge-to-edge below header (viewport fill — no gray corner gutters).
+    local contentFrame = Factory:CreateContainer(dialog, math.max(1, width), extContentBodyH, false)
+    if not contentFrame then AbortIncompleteExternalWindow() return nil end
+    contentFrame:ClearAllPoints()
+    contentFrame:SetPoint("TOPLEFT", dialog, "TOPLEFT", sideInset, -(extDlgHeaderH + topInset))
+    contentFrame:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -sideInset, bottomInset)
+    local viewportBg = COLORS.surfaceViewport or COLORS.bg
+    local contentFill = contentFrame:CreateTexture(nil, "BACKGROUND")
+    contentFill:SetDrawLayer("BACKGROUND", -8)
+    contentFill:SetAllPoints()
+    if ns.UI_ShouldUseBlizzardChrome and ns.UI_ShouldUseBlizzardChrome() then
+        contentFill:Hide()
+    else
+        contentFill:SetColorTexture(viewportBg[1], viewportBg[2], viewportBg[3], viewportBg[4] or 0.98)
+    end
+    dialog._wnExternalContentFill = contentFill
+    
+    -- Click-outside overlay (released in CloseDialog to avoid frame buildup)
+    local clickOutsideFrame = Factory:CreateContainer(UIParent, 1, 1, false)
+    if not clickOutsideFrame then AbortIncompleteExternalWindow() return nil end
+    dialog._clickOutsideFrame = clickOutsideFrame
+    clickOutsideFrame:SetAllPoints()
+    clickOutsideFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    clickOutsideFrame:SetFrameLevel(dialog:GetFrameLevel() - 1) -- Just below dialog
+    clickOutsideFrame:EnableMouse(true)
+    clickOutsideFrame:SetScript("OnMouseDown", function()
+        CloseDialog()
+    end)
+    
+    -- OnHide: only hide overlay (do NOT call onClose — CloseDialog already did)
+    dialog:SetScript("OnHide", function()
+        if dialog._clickOutsideFrame then
+            dialog._clickOutsideFrame:Hide()
+        end
+    end)
+    
+    dialog:SetScript("OnShow", function()
+        clickOutsideFrame:Show()
+    end)
+    
+    -- Store close function
+    dialog.Close = CloseDialog
+
+    -- WindowManager: register popup + ESC handler + combat hide
+    if ns.UI_RegisterScaledFrame then
+        ns.UI_RegisterScaledFrame(dialog)
+    elseif ns.UI_ApplyAddonUIScale then
+        ns.UI_ApplyAddonUIScale(dialog)
+    end
+
+    if ns.WindowManager then
+        ns.WindowManager:Register(dialog, ns.WindowManager.PRIORITY.POPUP, CloseDialog)
+        ns.WindowManager:InstallESCHandler(dialog)
+    else
+        -- Fallback ESC handling (combat-safe)
+        if not InCombatLockdown() then
+            dialog:EnableKeyboard(true)
+            dialog:SetPropagateKeyboardInput(true)
+        end
+        dialog:SetScript("OnKeyDown", function(self, key)
+            if key == "ESCAPE" then
+                if not InCombatLockdown() then self:SetPropagateKeyboardInput(false) end
+                CloseDialog()
+            else
+                if not InCombatLockdown() then self:SetPropagateKeyboardInput(true) end
+            end
+        end)
+    end
+
+    if ns.UI_RaiseMainWindowShellBorderOverlay then
+        ns.UI_RaiseMainWindowShellBorderOverlay(dialog)
+    end
+
+    return dialog, contentFrame, header
+end
+
+--- Re-apply theme-dependent shell chrome (frame fill, header band, body fill) on a live external window.
+--- Mirrors the create path above; for persistent shells that survive a theme toggle.
+---@param dialog Frame Frame returned by CreateExternalWindow
+local function RefreshExternalWindowChrome(dialog)
+    if not dialog or not COLORS then return end
+    local shellBg = COLORS.bg or { 0.04, 0.04, 0.05, 0.98 }
+    local useClassicShell = ns.UI_IsClassicMode and ns.UI_IsClassicMode()
+    if useClassicShell and ns.UI_ApplyBlizzardDialogBackdrop then
+        local classicBg = (ns.UI_CLASSIC_SURFACE_VARIANT and ns.UI_CLASSIC_SURFACE_VARIANT.bg)
+            or shellBg
+        ns.UI_ApplyBlizzardDialogBackdrop(dialog, classicBg)
+    elseif ApplyMainWindowShellFill then
+        ApplyMainWindowShellFill(dialog, shellBg)
+    end
+
+    local header = dialog._wnExternalHeader
+    if header and useClassicShell and ns.UI_ApplyClassicInteriorFlatFill then
+        ns.UI_ApplyClassicInteriorFlatFill(header, { 0, 0, 0, 0 })
+    elseif header and ApplyVisuals
+            and (not ns.UI_CanApplyCustomChrome or ns.UI_CanApplyCustomChrome(header)) then
+        local headerBorder = (ns.UI_GetMainHeaderBorderColor and ns.UI_GetMainHeaderBorderColor())
+            or { COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.8 }
+        local headerBg = (ns.UI_GetMainHeaderChromeColor and ns.UI_GetMainHeaderChromeColor())
+            or (COLORS.accentDark and { COLORS.accentDark[1], COLORS.accentDark[2], COLORS.accentDark[3], 1 })
+            or COLORS.bgCard
+        ApplyVisuals(header, headerBg, headerBorder)
+    end
+
+    local contentFill = dialog._wnExternalContentFill
+    if contentFill then
+        if ns.UI_ShouldUseBlizzardChrome and ns.UI_ShouldUseBlizzardChrome() then
+            contentFill:Hide()
+        else
+            local viewportBg = COLORS.surfaceViewport or COLORS.bg
+            contentFill:SetColorTexture(viewportBg[1], viewportBg[2], viewportBg[3], viewportBg[4] or 0.98)
+            contentFill:Show()
+        end
+    end
+
+    if ns.UI_RaiseMainWindowShellBorderOverlay then
+        ns.UI_RaiseMainWindowShellBorderOverlay(dialog)
+    end
+end
+
+-- ACHIEVEMENT CRITERIA POPUP (Shared, pooled frame)
+
+local achievementPopup = nil  -- Single shared frame, reused across clicks
+
+local function ShowAchievementPopup(achievementID, anchorFrame)
+    if not achievementID or not anchorFrame then return end
+    if not Factory or not CreateButton or not ApplyVisuals or not FontManager or not COLORS then return end
+    
+    -- Toggle: if popup is already showing this achievement, close it
+    if achievementPopup and achievementPopup:IsShown() and achievementPopup._currentID == achievementID then
+        achievementPopup:Hide()
+        return
+    end
+    
+    local L = ns.L
+    
+    -- Resolve achievement info
+    local ok, id, name, points, completed, month, day, year, description, flags, icon,
+          rewardText, isGuild, wasEarnedByMe, earnedBy = pcall(GetAchievementInfo, achievementID)
+    if not ok or not name then return end
+    
+    local POPUP_WIDTH = 340
+    local PADDING = 14
+    local ICON_SIZE = 40
+    local BTN_HEIGHT = 26
+    local BTN_WIDTH = 90
+    local CONTENT_WIDTH = POPUP_WIDTH - (2 * PADDING)
+    local NAME_WIDTH = CONTENT_WIDTH - ICON_SIZE - 10
+    
+    -- Create shared frame on first use
+    if not achievementPopup then
+        local popup = Factory:CreateContainer(UIParent, POPUP_WIDTH, 180, false, "ArtisanNexus_AchievementPopup")
+        if not popup then return end
+        popup:EnableMouse(true)
+        -- Follow profile.uiScale like CreateExternalWindow shells (pooled: registered once).
+        if ns.UI_RegisterScaledFrame then
+            ns.UI_RegisterScaledFrame(popup)
+        end
+
+        -- WindowManager: standardized strata/level + ESC + combat hide
+        if ns.WindowManager then
+            ns.WindowManager:ApplyStrata(popup, ns.WindowManager.PRIORITY.POPUP)
+            ns.WindowManager:Register(popup, ns.WindowManager.PRIORITY.POPUP)
+            ns.WindowManager:InstallESCHandler(popup)
+        else
+            popup:SetFrameStrata("FULLSCREEN_DIALOG")
+            popup:SetFrameLevel(200)
+            if not InCombatLockdown() then
+                popup:EnableKeyboard(true)
+                popup:SetPropagateKeyboardInput(true)
+            end
+        end
+        
+        if ns.UI_ApplyStandardCardElevatedChrome then
+            ns.UI_ApplyStandardCardElevatedChrome(popup)
+        elseif ApplyVisuals then
+            ApplyVisuals(popup, COLORS.bg, {COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.9})
+        end
+        
+        -- ESC handled by WindowManager (no UISpecialFrames to avoid taint)
+        
+        -- Click-outside dismiss: check popup AND all child buttons
+        local function IsMouseOverPopup(frame)
+            if frame:IsMouseOver() then return true end
+            if frame._trackBtn and frame._trackBtn:IsMouseOver() then return true end
+            if frame._addBtn and frame._addBtn:IsMouseOver() then return true end
+            return false
+        end
+
+        local dismissOverlay = Factory:CreateContainer(UIParent, 1, 1, false)
+        if not dismissOverlay then return end
+        dismissOverlay:SetAllPoints(UIParent)
+        dismissOverlay:SetFrameStrata("FULLSCREEN_DIALOG")
+        dismissOverlay:SetFrameLevel(math.max(1, popup:GetFrameLevel() - 1))
+        dismissOverlay:EnableMouse(true)
+        dismissOverlay:Hide()
+        dismissOverlay:SetScript("OnMouseDown", function()
+            if popup:IsShown() and not IsMouseOverPopup(popup) then
+                popup:Hide()
+            end
+        end)
+        popup._dismissOverlay = dismissOverlay
+        popup:SetScript("OnShow", function(self)
+            if self._dismissOverlay then
+                self._dismissOverlay:SetFrameLevel(math.max(1, self:GetFrameLevel() - 1))
+                self._dismissOverlay:Show()
+            end
+        end)
+        popup:SetScript("OnHide", function(self)
+            if self._dismissOverlay then
+                self._dismissOverlay:Hide()
+            end
+        end)
+        
+        -- Icon
+        popup._icon = popup:CreateTexture(nil, "ARTWORK")
+        popup._icon:SetSize(ICON_SIZE, ICON_SIZE)
+        popup._icon:SetPoint("TOPLEFT", PADDING, -PADDING)
+        
+        -- Name (right of icon, top-aligned; status icon is prepended to text)
+        popup._name = FontManager:CreateFontString(popup, FontManager:GetFontRole("collectionAchievementPopupName"), "OVERLAY")
+        popup._name:SetPoint("TOPLEFT", popup._icon, "TOPRIGHT", 10, 0)
+        popup._name:SetJustifyH("LEFT")
+        popup._name:SetWordWrap(true)
+        popup._name:SetMaxLines(2)
+        popup._name:SetWidth(NAME_WIDTH)
+        
+        -- Points line (below name)
+        popup._points = FontManager:CreateFontString(popup, FontManager:GetFontRole("collectionAchievementPopupBody"), "OVERLAY")
+        popup._points:SetPoint("TOPLEFT", popup._name, "BOTTOMLEFT", 0, -3)
+        popup._points:SetJustifyH("LEFT")
+        popup._points:SetWidth(NAME_WIDTH)
+        
+        -- Separator line
+        popup._separator = popup:CreateTexture(nil, "ARTWORK")
+        if ns.UI_SetRuleThickness then ns.UI_SetRuleThickness(popup._separator, "horizontal", 1) else popup._separator:SetHeight(1) end
+        popup._separator:SetColorTexture(COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.4)
+        
+        -- Description
+        popup._desc = FontManager:CreateFontString(popup, FontManager:GetFontRole("collectionAchievementPopupBody"), "OVERLAY")
+        popup._desc:SetJustifyH("LEFT")
+        popup._desc:SetWordWrap(true)
+        popup._desc:SetMaxLines(6)
+        popup._desc:SetSpacing(2)
+        popup._desc:SetWidth(CONTENT_WIDTH)
+        
+        -- Reward text
+        popup._reward = FontManager:CreateFontString(popup, FontManager:GetFontRole("collectionAchievementPopupBody"), "OVERLAY")
+        popup._reward:SetPoint("TOPLEFT", popup._desc, "BOTTOMLEFT", 0, -6)
+        popup._reward:SetJustifyH("LEFT")
+        popup._reward:SetWordWrap(true)
+        popup._reward:SetMaxLines(2)
+        popup._reward:SetWidth(CONTENT_WIDTH)
+        
+        -- Button row (Track + Add) — Track: same cornerless style as Add
+        popup._trackBtn = CreateButton(popup, BTN_WIDTH, BTN_HEIGHT, nil, nil, true)
+        if not popup._trackBtn then return end
+        popup._trackBtn:SetPoint("BOTTOMLEFT", PADDING, 10)
+        popup._trackLabel = FontManager:CreateFontString(popup._trackBtn, FontManager:GetFontRole("collectionAchievementPopupButton"), "OVERLAY")
+        popup._trackLabel:SetPoint("CENTER")
+        popup._trackBtn:SetScript("OnEnter", function()
+            if popup._trackLabel then
+                local ar, ag, ab = COLORS.accent[1], COLORS.accent[2], COLORS.accent[3]
+                popup._trackLabel:SetTextColor(ar, ag, ab, 1)
+            end
+        end)
+        popup._trackBtn:SetScript("OnLeave", function()
+            if popup._trackLabel and popup._currentID and ns.ArtisanNexus then
+                local L = ns.L
+                local tracked = ns.ArtisanNexus:IsAchievementTracked(popup._currentID)
+                popup._trackLabel:SetText(tracked and (SemanticGreenHex() .. (L and L["TRACKED"] or "Tracked") .. "|r") or (SemanticGoldHex() .. (L and L["TRACK"] or "Track") .. "|r"))
+            end
+        end)
+        
+        popup._addBtn = CreateButton(popup, BTN_WIDTH, BTN_HEIGHT, ControlChromeBg(), {
+            COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.6,
+        }, false)
+        if not popup._addBtn then return end
+        popup._addBtn:SetPoint("LEFT", popup._trackBtn, "RIGHT", 8, 0)
+        popup._addLabel = FontManager:CreateFontString(popup._addBtn, FontManager:GetFontRole("collectionAchievementPopupButton"), "OVERLAY")
+        popup._addLabel:SetPoint("CENTER")
+        popup._addBtn:SetScript("OnEnter", function(self)
+            if ApplyVisuals then ApplyVisuals(self, ControlChromeHoverBg(), {COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.8}) end
+        end)
+        popup._addBtn:SetScript("OnLeave", function(self)
+            if ApplyVisuals then ApplyVisuals(self, ControlChromeBg(), {COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.6}) end
+        end)
+        
+        achievementPopup = popup
+    end
+    
+    local popup = achievementPopup
+    
+    -- Populate data
+    popup._currentID = achievementID
+    popup._icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+    
+    -- Title: status icon + achievement name + (Planned) indicator
+    local statusIcon = completed
+        and ns.UI_GetIconMarkup("status_ok", 14, 14, 0, 0)
+        or  ns.UI_GetIconMarkup("status_fail", 14, 14, 0, 0)
+    local nameColor = completed and SemanticGreenHex() or ThemeTextHex("Bright")
+    local plannedTag = ""
+    local WarbandNexus = ns.ArtisanNexus
+    if WarbandNexus and WarbandNexus.IsAchievementPlanned and WarbandNexus:IsAchievementPlanned(achievementID) then
+        local plannedWord = (L and L["PLANNED"]) or "Planned"
+        plannedTag = " |cffffcc00(" .. plannedWord .. ")|r"
+    end
+    popup._name:SetText(statusIcon .. " " .. nameColor .. (name or ((ns.L and ns.L["UNKNOWN"]) or "Unknown")) .. "|r" .. plannedTag)
+    
+    -- Points line
+    if points and points > 0 then
+        local ptsFormat = L["ACHIEVEMENT_POINTS_FORMAT"] or "%d pts"
+        popup._points:SetText(SemanticGoldHex() .. string.format(ptsFormat, points) .. "|r")
+        popup._points:Show()
+    else
+        popup._points:SetText("")
+        popup._points:Hide()
+    end
+    
+    -- Calculate header height using explicit widths (accurate on first render)
+    local nameHeight = popup._name:GetStringHeight() or 16
+    local pointsHeight = popup._points:IsShown() and ((popup._points:GetStringHeight() or 14) + 3) or 0
+    local headerBottom = PADDING + math.max(ICON_SIZE, nameHeight + pointsHeight) + 8
+    
+    -- Position separator below header
+    popup._separator:ClearAllPoints()
+    popup._separator:SetPoint("TOPLEFT", popup, "TOPLEFT", PADDING, -headerBottom)
+    popup._separator:SetPoint("RIGHT", popup, "RIGHT", -PADDING, 0)
+    
+    -- Description below separator
+    local contentTop = headerBottom + 8
+    popup._desc:ClearAllPoints()
+    popup._desc:SetPoint("TOPLEFT", PADDING, -contentTop)
+    
+    if description and description ~= "" then
+        popup._desc:SetText(ThemeTextHex("Normal") .. description .. "|r")
+        popup._desc:Show()
+    else
+        popup._desc:SetText("")
+        popup._desc:Hide()
+    end
+    
+    -- Reward below description
+    if rewardText and rewardText ~= "" then
+        popup._reward:SetText(SemanticGoldHex() .. (L["REWARD_LABEL"] or "Reward:") .. "|r " .. ThemeTextHex("Bright") .. rewardText .. "|r")
+        popup._reward:Show()
+    else
+        popup._reward:SetText("")
+        popup._reward:Hide()
+    end
+    
+    -- Track button
+    if completed then
+        popup._trackLabel:SetText(ThemeTextHex("Dim") .. (L["TRACK"] or "Track") .. "|r")
+        popup._trackBtn:SetScript("OnClick", nil)
+        popup._trackBtn:SetAlpha(0.4)
+        popup._trackBtn:SetScript("OnEnter", nil)
+        popup._trackBtn:SetScript("OnLeave", nil)
+    else
+        popup._trackBtn:SetAlpha(1)
+        local WarbandNexus = ns.ArtisanNexus
+        local function IsTracked()
+            if WarbandNexus and WarbandNexus.IsAchievementTracked then
+                return WarbandNexus:IsAchievementTracked(achievementID)
+            end
+            return false
+        end
+        local function UpdateTrackLabel()
+            if IsTracked() then
+                popup._trackLabel:SetText(SemanticGreenHex() .. (L["TRACKED"] or "Tracked") .. "|r")
+            else
+                popup._trackLabel:SetText(SemanticGoldHex() .. (L["TRACK"] or "Track") .. "|r")
+            end
+        end
+        UpdateTrackLabel()
+        popup._trackBtn:SetScript("OnClick", function()
+            if WarbandNexus and WarbandNexus.ToggleAchievementTracking then
+                WarbandNexus:ToggleAchievementTracking(achievementID)
+            end
+            UpdateTrackLabel()
+        end)
+        popup._trackBtn:SetScript("OnEnter", function()
+            if popup._trackLabel then
+                local ar, ag, ab = COLORS.accent[1], COLORS.accent[2], COLORS.accent[3]
+                popup._trackLabel:SetTextColor(ar, ag, ab, 1)
+            end
+        end)
+        popup._trackBtn:SetScript("OnLeave", function()
+            UpdateTrackLabel()
+        end)
+    end
+    
+    -- Add button
+    if completed then
+        popup._addLabel:SetText(ThemeTextHex("Dim") .. (L["ADD_BUTTON"] or "To-Do") .. "|r")
+        popup._addBtn:SetScript("OnClick", nil)
+        popup._addBtn:SetAlpha(0.4)
+        popup._addBtn:SetScript("OnEnter", nil)
+        popup._addBtn:SetScript("OnLeave", nil)
+    else
+        popup._addBtn:SetAlpha(1)
+        local isPlanned = WarbandNexus and WarbandNexus.IsAchievementPlanned and WarbandNexus:IsAchievementPlanned(achievementID)
+        if isPlanned then
+            popup._addLabel:SetText(SemanticGreenHex() .. (L["ADDED"] or "Added") .. "|r")
+            popup._addBtn:SetScript("OnClick", nil)
+        else
+            popup._addLabel:SetText(SemanticGoldHex() .. (L["ADD_BUTTON"] or "To-Do") .. "|r")
+            popup._addBtn:SetScript("OnClick", function()
+                if WarbandNexus and WarbandNexus.AddPlan then
+                    local planRewardText
+                    if rewardText and rewardText ~= "" then
+                        planRewardText = rewardText
+                    elseif WarbandNexus.GetAchievementRewardInfo then
+                        local ri = WarbandNexus:GetAchievementRewardInfo(achievementID)
+                        if ri then planRewardText = ri.title or ri.itemName end
+                    end
+                    WarbandNexus:AddPlan({
+                        type = "achievement",
+                        achievementID = achievementID,
+                        name = name,
+                        icon = icon,
+                        points = points,
+                        rewardText = planRewardText,
+                    })
+                    popup:Hide()
+                end
+            end)
+        end
+        popup._addBtn:SetScript("OnEnter", function(self) self:SetAlpha(0.8) end)
+        popup._addBtn:SetScript("OnLeave", function(self) self:SetAlpha(1) end)
+    end
+    
+    -- Calculate total height and size the popup
+    local function RecalculateSize()
+        local descH = popup._desc:IsShown() and (popup._desc:GetStringHeight() or 14) or 0
+        local rewardH = popup._reward:IsShown() and ((popup._reward:GetStringHeight() or 0) + 6) or 0
+        local total = contentTop + descH + rewardH + 12 + BTN_HEIGHT + 16
+        popup:SetSize(POPUP_WIDTH, math.max(130, total))
+    end
+    RecalculateSize()
+    
+    -- Anchor near the clicked element
+    popup:ClearAllPoints()
+    popup:SetPoint("TOPLEFT", anchorFrame, "BOTTOMLEFT", 0, -4)
+    popup:SetClampedToScreen(true)
+    popup:Show()
+    popup:Raise()
+    
+    -- Recalculate after layout pass to fix first-render sizing
+    C_Timer.After(0, function()
+        if popup:IsShown() then
+            RecalculateSize()
+        end
+    end)
+end
+
+local function HideAchievementPopup()
+    if achievementPopup and achievementPopup:IsShown() then
+        achievementPopup:Hide()
+    end
+end
+
+-- NAMESPACE EXPORTS
+
+ns.UI_CreateExternalWindow = CreateExternalWindow
+ns.UI_RefreshExternalWindowChrome = RefreshExternalWindowChrome
+ns.UI_ShowAchievementPopup = ShowAchievementPopup
+ns.UI_HideAchievementPopup = HideAchievementPopup
+
+-- Module loaded - verbose logging removed

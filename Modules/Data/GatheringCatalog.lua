@@ -3,14 +3,15 @@
     Single representative icon per row uses ranks[1]; ranks[] are separate item IDs (Midnight uses two reagent tiers per mat, not three DF-style qualities).
 
     Some Midnight mats (e.g. Motes) can drop from more than one activity; they may appear in multiple
-    tab grids. `GetGatheringCategoryForItemId` returns a primary tab (mine for motes) for DB reset
+    tab grids. `GetGatheringCategoryForItemId` returns a primary tab ("others" for motes) for DB reset
     ownership; `ItemListedInGatheringTab` is used for session routing and per-tab Overall totals.
 
     Maintenance (12.1.0): IDs verified against wago.tools DB2 (Item, ItemSparse) build
     12.1.0.69497 on 2026-08-29. When Blizzard adds new rank tiers or mats, append `ranks`
-    (and optionally a new row). Mining “Dazzling Thorium” ships as a single rank until a
-    second item ID is confirmed. Leather rows use documented two-ID pairs where Silver/Gold
-    splits exist; add missing IDs in the same column format.
+    (and optionally a new row). Dazzling Thorium 237366 and Nocturnal Lotus 236780 have
+    CraftingQualityID 0 in DB2 Item 12.1.5.70391 (checked 2026-10-15): single rank.
+    Leather rows use documented two-ID pairs where Silver/Gold splits exist; add missing
+    IDs in the same column format.
 
     12.1 “Coiled Isle” added no new herb or ore items — the Cursed nodes drop the existing
     herbs/ores plus Cursebound Globe, so only the `others` tab grew.
@@ -34,7 +35,7 @@ local BY_CAT = {
         { note = "Refulgent Copper Ore", ranks = { 237359, 237361 } },
         { note = "Umbral Tin Ore", ranks = { 237362, 237363 } },
         { note = "Brilliant Silver Ore", ranks = { 237364, 237365 } },
-        -- No separate R2 item id documented next to 237366 (237367 is another item); single slot until confirmed.
+        -- Single rank: CraftingQualityID 0 (DB2 Item 12.1.5.70391).
         { note = "Dazzling Thorium", ranks = { 237366 } },
     },
     --- Midnight skinning (12.0.x). Two item IDs = Silver / Gold reagent ranks where Blizzard split them.
@@ -97,11 +98,6 @@ function ns.GetGatheringCatalogByCategory(cat)
         return t
     end
     return BY_CAT.herb
-end
-
----@return table[]
-function ns.GetGatheringCatalogEntries()
-    return ns.GetGatheringCatalogByCategory("herb")
 end
 
 --- [itemID] = { herb = true, mine = true, ... } — an item may appear on multiple tab grids (e.g. motes).

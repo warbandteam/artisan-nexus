@@ -1,34 +1,80 @@
 --[[
-    Session loot overlay — compact on-screen toasts (icon, name, qty, price).
-    No window chrome: appears on pickup, fades out. Position from Settings (X/Y).
-    Classic / Modern row styling via uiMode + theme helpers.
+    Session loot overlay — one Warband Nexus compact toast per pickup (icon, name, qty, price).
+
+    Every toast is built exactly like the WN compact collectible toast
+    (NotificationManager.lua:1167-1418 ShowModalNotification `config.compact` branch):
+      host / layers            -> ns.NotificationToastFactory:CreateToastHost / CreateToastLayer
+      backdrop + accent border -> NotificationManager.lua:1189-1201 + ToastChrome.ApplyCompactBackdropChrome
+      icon slot + icon border  -> NotificationManager.lua:1203-1231 + ToastChrome.ApplyCompactIconBorder
+      badge / title / detail   -> NotificationManager.lua:1287-1416 + NotificationToastFactory:ApplyCompactTextLayout
+      geometry + fonts         -> NotificationManager_AlertStack.lua:85-186 (collectible tier)
+      entrance / fade / stack  -> NotificationManager.lua:1435-1455, AlertStack.lua:767-796 (fade out)
+    The WN layout scale (1.15) is the overlay size slider here (default 1.15 = WN look).
+
+    The stack hangs from a movable, invisible anchor (position edit: drag preview, right-click saves).
 ]]
 
 local ADDON_NAME, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
 
-local E = ns.Constants and ns.Constants.EVENTS
+-- 12.1.5 removed the global item/coin fallbacks; bind the namespaced APIs.
+local GetItemInfo = C_Item.GetItemInfo
+
+local E = ns.Constants.EVENTS
 local L = ns.L
-local COLORS = ns.UI_COLORS
+local FontManager = ns.FontManager
 
 local OVERLAY_SCALE_DEFAULT = 1.15
 local OVERLAY_SCALE_MIN = 0.75
 local OVERLAY_SCALE_MAX = 1.5
 
-local OVERLAY_DIM_BASE = {
-    toastW = 396,
-    toastH = 38,
-    toastGap = 6,
-    iconSz = 26,
-    toastPad = 6,
-    toastIconGap = 6,
-    toastColGap = 6,
-    toastQtyW = 32,
-    toastPriceW = 96,
-    toastCoinH = 13,
-    rankSz = 18,
-    rankGap = 4,
-    panelPad = 5,
-    slideOffset = 20,
+-- NotificationManager_AlertStack.lua:150-186 (collectible compact tier, unscaled px).
+local ALERT_WIDTH = 320
+local ALERT_HEIGHT = 58
+local ALERT_GAP = 6
+local ALERT_ICON_SIZE = 36
+local ALERT_ICON_SLOT = 50
+local ALERT_PAD_LEFT = 8
+local ALERT_PAD_RIGHT = 10
+local ALERT_PAD_TEXT = 6
+local ALERT_TEXT_LINE_GAP = 2
+local WN_TOAST_LAYOUT_SCALE = 1.15
+-- AlertStack.lua:85-90 typography scales.
+local TOAST_FONT_SCALE_META = 1.0
+local TOAST_FONT_SCALE_PRIMARY = 0.96
+
+-- NotificationManager.lua:49-53 / AlertStack.lua:13-15 timings.
+local TOAST_FADE_OUT_SEC = 0.32
+local TOAST_COLLAPSE_DELAY_SEC = 0.14
+local TOAST_REPOSITION_SEC = 0.38
+local TOAST_ENTRANCE_SEC = 0.3
+local TOAST_ENTRANCE_OFFSET = 50
+
+local HOLD_SEC_DEFAULT = 4.0
+local STACK_MAX_DEFAULT = 3
+local STACK_MAX_LIMIT = 6
+local PREVIEW_ITEM_ID = 2770
+local PREVIEW_COPPER = 1845000
+local SCALE_PREVIEW_SEC = 2.5
+local EDIT_HINT_GAP = 6
+local COIN_ICON_SIZE = 11
+
+---@class SessionLootOverlayUI
+local SessionLootOverlayUI = {
+    anchor = nil,
+    _pool = {},
+    _active = {},
+    _lastShownRt = 0,
+    _inited = false,
+    _lootPulsePending = false,
+    _positionEdit = false,
+    _editPreviewEntry = nil,
+    _editHint = nil,
+    _editGuard = nil,
+    _scalePreview = false,
+    _scalePreviewEntry = nil,
+    _scalePreviewSeq = 0,
 }
 
 local function GetOverlayScale()
@@ -40,180 +86,9 @@ local function GetOverlayScale()
     return math.max(OVERLAY_SCALE_MIN, math.min(OVERLAY_SCALE_MAX, n))
 end
 
-local function OverlayDim(key)
-    local base = OVERLAY_DIM_BASE[key]
-    if not base then
-        return 0
-    end
-    return math.floor(base * GetOverlayScale() + 0.5)
-end
-
-local HOLD_SEC_DEFAULT = 4.0
-local FADE_SEC = 0.85
-local SLIDE_IN_SEC = 0.22
-local PULSE_SEC = 0.55
-local STACK_MAX_DEFAULT = 3
-local STACK_MAX_LIMIT = 6
-
----@class SessionLootOverlayUI
-local SessionLootOverlayUI = {
-    anchor = nil,
-    _pool = {},
-    _active = {},
-    _lastShownRt = 0,
-    _inited = false,
-    _lootSeq = 0,
-    _positionEdit = false,
-    _editPreviewEntry = nil,
-    _editHint = nil,
-    _editGuard = nil,
-}
-
-local PREVIEW_ITEM_ID = 2770
-
-local AcquireToast, PaintToast, StyleToastRow, LayoutToastRow, ReleaseToast
-
-local function ToastFont()
-    if ns.UI_GetWindowFont then
-        return ns.UI_GetWindowFont("WINDOW_EMPHASIS")
-    end
-    local fonts = ns.UI_FONTS or {}
-    return fonts.WINDOW_EMPHASIS or fonts.WINDOW_BODY or "GameFontNormalLarge"
-end
-
---- Resolve the toast font object plus its base metrics so text can scale with the
---- overlay size slider (font object alone stays a fixed size).
----@return string|table fontRef, string|nil file, number|nil size, string|nil flags
-local function ToastFontSpec()
-    local ref = ToastFont()
-    local obj = ref
-    if type(ref) == "string" then
-        obj = _G[ref]
-    end
-    if obj and obj.GetFont then
-        local file, size, flags = obj:GetFont()
-        return ref, file, size, flags
-    end
-    return ref, nil, nil, nil
-end
-
---- Catalog rows (fishing / gathering by category) give the authoritative reagent
---- tier for the quality badge; crafted / unknown tabs have none.
-local function ResolveOverlayCatalogEntries(tabKey)
-    if tabKey == "fishing" then
-        return ns.GetFishingCatalogEntries and ns.GetFishingCatalogEntries() or nil
-    end
-    if not tabKey or tabKey == "crafted" then
-        return nil
-    end
-    return ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(tabKey) or nil
-end
-
-local function SaveAnchorConfigFromFrame(frame)
-    if not frame or not ns.db or not ns.db.profile then
-        return
-    end
-    local point, _, relativePoint, x, y = frame:GetPoint(1)
-    if not point then
-        return
-    end
-    ns.db.profile.sessionLootOverlayFrame = {
-        point = point,
-        relativePoint = relativePoint or point,
-        x = math.floor((tonumber(x) or 0) + 0.5),
-        y = math.floor((tonumber(y) or 0) + 0.5),
-    }
-end
-
-local function EnsureEditGuard(self)
-    if self._editGuard then
-        return self._editGuard
-    end
-    local guardName = "ArtisanNexusSessionLootOverlayEditGuard"
-    local g = CreateFrame("Frame", guardName, UIParent)
-    g:SetSize(1, 1)
-    g:Hide()
-    g:SetScript("OnHide", function()
-        if SessionLootOverlayUI._positionEdit and not SessionLootOverlayUI._editClosing then
-            SessionLootOverlayUI:EndPositionEdit(false)
-        end
-    end)
-    local listed = false
-    for i = 1, #UISpecialFrames do
-        if UISpecialFrames[i] == guardName then
-            listed = true
-            break
-        end
-    end
-    if not listed then
-        tinsert(UISpecialFrames, guardName)
-    end
-    self._editGuard = g
-    return g
-end
-
-local function SetEditHintVisible(self, show)
-    local hint = self._editHint
-    if not hint then
-        return
-    end
-    if show then
-        hint:SetText((L and L["LOOT_OVERLAY_EDIT_HINT"]) or "Left-click drag to move — right-click to save")
-        local tc = COLORS.textBright or COLORS.textNormal
-        if tc then
-            hint:SetTextColor(tc[1], tc[2], tc[3], 1)
-        end
-        hint:Show()
-    else
-        hint:Hide()
-    end
-end
-
-local function EnsureEditHint(self)
-    self:EnsureAnchor()
-    local anchor = self.anchor
-    if not anchor then
-        return
-    end
-    if self._editHint then
-        return
-    end
-    local hint = anchor:CreateFontString(nil, "OVERLAY", ToastFont())
-    hint:SetPoint("BOTTOM", anchor, "TOP", 0, 6)
-    hint:SetJustifyH("CENTER")
-    hint:SetWidth(OverlayDim("toastW") + 40)
-    if hint.SetWordWrap then
-        hint:SetWordWrap(true)
-    end
-    self._editHint = hint
-end
-
-local function ShowEditPreview(self)
-    self:ClearToasts()
-    self._editPreviewEntry = nil
-    local anchor = self.anchor
-    if not anchor then
-        return
-    end
-    local row = AcquireToast(anchor)
-    PaintToast(row, { itemID = PREVIEW_ITEM_ID, qty = 3, rt = GetTime() })
-    StyleToastRow(row)
-    local entry = { row = row, born = GetTime(), rt = GetTime(), _preview = true }
-    self._active[1] = entry
-    self._editPreviewEntry = entry
-    self:LayoutStack()
-    anchor:Show()
-end
-
-local function ClearEditPreview(self)
-    if self._editPreviewEntry and self._editPreviewEntry.row then
-        ReleaseToast(self._editPreviewEntry.row)
-    end
-    self._editPreviewEntry = nil
-    self._active = {}
-    if self.anchor then
-        self.anchor:Hide()
-    end
+--- AlertStack.lua:92-94 ToastPx with the overlay size slider as the layout scale.
+local function ToastPx(value)
+    return math.max(1, math.floor((tonumber(value) or 0) * GetOverlayScale() + 0.5))
 end
 
 local function IsOverlayEnabled()
@@ -234,6 +109,22 @@ local function GetAnchorConfig()
     end
     return p.point or "TOPRIGHT", p.relativePoint or p.point or "TOPRIGHT",
         tonumber(p.x) or -24, tonumber(p.y) or -120
+end
+
+local function SaveAnchorConfigFromFrame(frame)
+    if not frame or not ns.db or not ns.db.profile then
+        return
+    end
+    local point, _, relativePoint, x, y = frame:GetPoint(1)
+    if not point then
+        return
+    end
+    ns.db.profile.sessionLootOverlayFrame = {
+        point = point,
+        relativePoint = relativePoint or point,
+        x = math.floor((tonumber(x) or 0) + 0.5),
+        y = math.floor((tonumber(y) or 0) + 0.5),
+    }
 end
 
 local function GetHoldSec()
@@ -263,318 +154,540 @@ local function TexForItem(itemID)
     return (fileID and fileID > 0) and fileID or "Interface\\Icons\\INV_Misc_QuestionMark"
 end
 
-local function EaseOutQuad(t)
-    if t <= 0 then
-        return 0
+--- Catalog rows (fishing / gathering by category) give the authoritative reagent
+--- tier for the quality badge; crafted / unknown tabs have none.
+local function ResolveOverlayCatalogEntries(tabKey)
+    if tabKey == "fishing" then
+        return ns.GetFishingCatalogEntries and ns.GetFishingCatalogEntries() or nil
     end
-    if t >= 1 then
-        return 1
+    if not tabKey or tabKey == "crafted" then
+        return nil
     end
-    return 1 - (1 - t) * (1 - t)
+    return ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(tabKey) or nil
 end
 
-local function GetPriceColor()
-    local w = COLORS.warning
-    if w then
-        return w[1], w[2], w[3], 1
+-- ── WN toast helpers (NotificationManager.lua:75-143, ToastChrome.lua:117-181) ──
+
+--- Toast accent when the item quality is unknown (NotificationManager.lua:75 GetThemeAccentColor).
+local function GetThemeAccentColor()
+    local c = ns.UI_COLORS
+    if c and c.accent then
+        return { c.accent[1], c.accent[2], c.accent[3] }
     end
-    local a = COLORS.accent
-    if a then
-        return a[1], a[2], a[3], 1
-    end
-    return 1, 0.82, 0.35, 1
+    return { 0.40, 0.20, 0.58 }
 end
 
-LayoutToastRow = function(row)
-    if not row then
-        return
+--- NotificationManager.lua:111-120 NM_GetElevatedBackdropFillRGBA.
+local function GetElevatedBackdropFillRGBA()
+    local c = ns.UI_COLORS or {}
+    local s = c.surfaceElevated or c.bgLight or c.bg
+    if s then
+        local a = s[4]
+        if type(a) ~= "number" or a ~= a or a <= 0 or a > 1 then a = 0.94 end
+        return s[1], s[2], s[3], a
     end
-    row:SetSize(OverlayDim("toastW"), OverlayDim("toastH"))
-    local toastFont, fontFile, fontSize, fontFlags = ToastFontSpec()
-    local scale = GetOverlayScale()
-    local ic = row._icon
-    if ic then
-        local iconSz = OverlayDim("iconSz")
-        ic:SetSize(iconSz, iconSz)
-        ic:ClearAllPoints()
-        ic:SetPoint("LEFT", row, "LEFT", OverlayDim("toastPad"), 0)
+    return 0.03, 0.03, 0.05, 0.98
+end
+
+--- NotificationManager.lua:122-129 NM_ThemeTextHex.
+local function ThemeTextHex(role)
+    if ns.UI_GetTextRoleHex then
+        return ns.UI_GetTextRoleHex(role)
     end
-    local rank = row._rank
-    if rank then
-        local rsz = OverlayDim("rankSz")
-        rank:SetSize(rsz, rsz)
-        rank:ClearAllPoints()
-        rank:SetPoint("LEFT", ic or row, "RIGHT", OverlayDim("toastIconGap"), 0)
+    if role == "Dim" then return "|cff888888" end
+    if role == "Muted" then return "|cffaaaaaa" end
+    return "|cffeeeeee"
+end
+
+--- NotificationManager.lua:131-143 NM_ApplyTextShadow.
+local function ApplyTextShadow(fs, strength)
+    if not fs or not fs.SetShadowColor then return end
+    local sr, sg, sb, sa
+    if ns.UI_GetTextShadowRGBA then
+        sr, sg, sb, sa = ns.UI_GetTextShadowRGBA(strength)
+    else
+        sr, sg, sb, sa = 0, 0, 0, 0.9 * (strength or 1)
     end
-    local textFields = { row._name, row._qty, row._price }
-    for i = 1, 3 do
-        local fs = textFields[i]
-        if fs and fs.SetFontObject then
-            fs:SetFontObject(toastFont)
-        end
-        if fs and fontFile and fs.SetFont then
-            fs:SetFont(fontFile, math.max(8, math.floor(fontSize * scale + 0.5)), fontFlags)
-        end
-        if fs and fs.SetWordWrap then
-            fs:SetWordWrap(false)
-        end
+    fs:SetShadowColor(sr, sg, sb, sa)
+    fs:SetShadowOffset(1, -1)
+end
+
+--- ToastChrome.lua:166-177 AccentHex / TitleHex.
+local function AccentHex(accentRGB, boost)
+    if not accentRGB then return "|cffffffff" end
+    boost = boost or 1.06
+    local tr = math.floor(math.min(255, accentRGB[1] * 255 * boost))
+    local tg = math.floor(math.min(255, accentRGB[2] * 255 * boost))
+    local tb = math.floor(math.min(255, accentRGB[3] * 255 * boost))
+    return string.format("|cff%02x%02x%02x", tr, tg, tb)
+end
+
+--- AlertStack.lua:112-139 NM_ToastFontSize + NM_ApplyToastFont (size follows the overlay scale).
+local function ApplyToastFont(fs, category)
+    if not fs or not FontManager then return end
+    local base = (FontManager.GetFontSize and FontManager:GetFontSize(category)) or 12
+    local catScale = (category == "small") and TOAST_FONT_SCALE_META or TOAST_FONT_SCALE_PRIMARY
+    local size = base * catScale * (GetOverlayScale() / WN_TOAST_LAYOUT_SCALE)
+    size = math.max(6, math.min(72, math.floor(size + 0.5)))
+    local flags = FontManager:GetAAFlags(category, {})
+    local face = FontManager:GetFontFace()
+    pcall(function()
+        fs:SetFont(face, size, flags)
+    end)
+    if FontManager.ApplyReadableEdge then
+        FontManager:ApplyReadableEdge(fs, category, {})
     end
-    local price = row._price
-    local qty = row._qty
-    local name = row._name
-    if price then
-        price:SetWidth(OverlayDim("toastPriceW"))
-        price:ClearAllPoints()
-        price:SetPoint("RIGHT", row, "RIGHT", -OverlayDim("toastPad"), 0)
-        if price.SetJustifyH then
-            price:SetJustifyH("RIGHT")
-        end
-        if price.SetMaxLines then
-            price:SetMaxLines(1)
-        end
+end
+
+--- AlertStack.lua:141-147 NM_CreateToastFontString.
+local function CreateToastFontString(parent, category)
+    local fs = FontManager:CreateFontString(parent, category, "OVERLAY")
+    ApplyToastFont(fs, category)
+    return fs
+end
+
+local function ToastHost(parent, width, height, options)
+    return ns.NotificationToastFactory:CreateToastHost(parent, width, height, options)
+end
+
+local function ToastLayer(parent, width, height)
+    return ns.NotificationToastFactory:CreateToastLayer(parent, width, height)
+end
+
+--- ToastChrome.ApplyCompactIconBorder (border frame created once per pooled toast, recolored on reuse).
+local function ApplyCompactIconBorder(iconSlot, iconTex, iconSize, accentRGB)
+    iconTex:SetVertexColor(1, 1, 1, 1)
+    iconTex:SetAlpha(1)
+    local edgeSize = (ns.UI_GetBorderThickness and ns.UI_GetBorderThickness(iconSlot)) or 1
+    local border = iconSlot._anIconBorder
+    if not border then
+        border = CreateFrame("Frame", nil, iconSlot, "BackdropTemplate")
+        border:EnableMouse(false)
+        iconSlot._anIconBorder = border
     end
-    if qty and price then
-        qty:SetWidth(OverlayDim("toastQtyW"))
-        qty:ClearAllPoints()
-        qty:SetPoint("RIGHT", price, "LEFT", -OverlayDim("toastColGap"), 0)
-        if qty.SetJustifyH then
-            qty:SetJustifyH("RIGHT")
-        end
+    border:SetFrameLevel(iconSlot:GetFrameLevel() + 2)
+    border:SetSize(iconSize + edgeSize * 2, iconSize + edgeSize * 2)
+    border:ClearAllPoints()
+    border:SetPoint("CENTER", iconTex, "CENTER", 0, 0)
+    border:SetBackdrop({
+        bgFile = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8",
+        tile = false,
+        edgeSize = edgeSize,
+        insets = { left = edgeSize, right = edgeSize, top = edgeSize, bottom = edgeSize },
+    })
+    border:SetBackdropColor(0, 0, 0, 0)
+    local r, g, b = 0.42, 0.42, 0.46
+    if accentRGB then r, g, b = accentRGB[1], accentRGB[2], accentRGB[3] end
+    border:SetBackdropBorderColor(r, g, b, 0.88)
+end
+
+--- NotificationManager.lua:1189-1201 backdrop layer + ToastChrome.ApplyCompactBackdropChrome.
+local function ApplyBackdropChrome(backdrop, accentRGB)
+    backdrop:SetBackdrop({
+        bgFile = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8",
+        tile = false,
+        edgeSize = (ns.UI_GetBorderThickness and ns.UI_GetBorderThickness(backdrop)) or 1,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    backdrop:SetBackdropColor(GetElevatedBackdropFillRGBA())
+    if accentRGB then
+        backdrop:SetBackdropBorderColor(accentRGB[1], accentRGB[2], accentRGB[3], 0.38)
     end
-    if name then
-        name:ClearAllPoints()
-        name:SetPoint("LEFT", ic or row, "RIGHT", OverlayDim("toastIconGap"), 0)
-        if qty then
-            name:SetPoint("RIGHT", qty, "LEFT", -OverlayDim("toastColGap"), 0)
-        elseif price then
-            name:SetPoint("RIGHT", price, "LEFT", -OverlayDim("toastColGap"), 0)
+end
+
+-- ── Toast build / layout / paint ──
+
+local function ToastWidth()
+    return ToastPx(ALERT_WIDTH)
+end
+
+local function ToastHeight()
+    return ToastPx(ALERT_HEIGHT)
+end
+
+--- Geometry + fonts for the current overlay scale (NotificationManager.lua:1171-1231).
+local function LayoutToast(toast)
+    local w, h = ToastWidth(), ToastHeight()
+    local slotW, iconSz = ToastPx(ALERT_ICON_SLOT), ToastPx(ALERT_ICON_SIZE)
+    local padLeft, padRight = ToastPx(ALERT_PAD_LEFT), ToastPx(ALERT_PAD_RIGHT)
+    toast:SetSize(w, h)
+    toast._backdrop:SetAllPoints(toast)
+    toast._iconSlot:SetSize(slotW, h)
+    toast._iconSlot:ClearAllPoints()
+    toast._iconSlot:SetPoint("LEFT", toast, "LEFT", padLeft, 0)
+    toast._icon:SetSize(iconSz, iconSz)
+    toast._iconSz = iconSz
+    local rankSz = math.floor(iconSz * 0.5 + 0.5)
+    toast._rank:SetSize(rankSz, rankSz)
+    toast._rankSz = rankSz
+    toast._content:ClearAllPoints()
+    toast._content:SetPoint("TOP", toast, "TOP", 0, 0)
+    toast._content:SetPoint("BOTTOM", toast, "BOTTOM", 0, 0)
+    toast._content:SetPoint("LEFT", toast, "LEFT", padLeft + slotW, 0)
+    toast._content:SetPoint("RIGHT", toast, "RIGHT", -padRight, 0)
+    toast._textUseW = math.max(48, w - padLeft - slotW - padRight - ToastPx(ALERT_PAD_TEXT) * 2)
+    ApplyToastFont(toast._title, "title")
+    ApplyToastFont(toast._badge, "small")
+    ApplyToastFont(toast._detail, "small")
+end
+
+local function CreateToast(parent)
+    local w, h = ToastWidth(), ToastHeight()
+    local toast = ToastHost(parent, w, h, {
+        strata = parent:GetFrameStrata(),
+        frameLevel = parent:GetFrameLevel() + 2,
+        clampToScreen = false,
+    })
+    -- Layer 1: backdrop (fill + accent border).
+    local backdrop = ToastLayer(toast, w, h)
+    backdrop:SetFrameLevel(toast:GetFrameLevel() + 1)
+    backdrop:EnableMouse(false)
+    toast._backdrop = backdrop
+    -- Layer 2: icon slot (shared left gutter) + item icon + crafting-quality rank.
+    local iconSlot = ToastLayer(toast, ToastPx(ALERT_ICON_SLOT), h)
+    iconSlot:SetFrameLevel(toast:GetFrameLevel() + 2)
+    iconSlot:EnableMouse(false)
+    toast._iconSlot = iconSlot
+    local icon = iconSlot:CreateTexture(nil, "ARTWORK")
+    icon:SetPoint("CENTER", iconSlot, "CENTER", 0, 0)
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    toast._icon = icon
+    local rank = iconSlot:CreateTexture(nil, "OVERLAY", nil, 2)
+    rank:SetPoint("TOPLEFT", icon, "TOPLEFT", -2, 2)
+    rank:Hide()
+    toast._rank = rank
+    -- Content frame (right): badge / title / detail.
+    local content = ToastLayer(toast, 1, h)
+    content:SetFrameLevel(toast:GetFrameLevel() + 2)
+    content:EnableMouse(false)
+    content:SetClipsChildren(true)
+    toast._content = content
+    local textGroup = ToastLayer(content)
+    textGroup:SetFrameLevel(content:GetFrameLevel() + 1)
+    textGroup:EnableMouse(false)
+    toast._textGroup = textGroup
+    local title = CreateToastFontString(textGroup, "title")
+    title:SetJustifyH("LEFT")
+    title:SetWordWrap(false)
+    title:SetMaxLines(1)
+    toast._title = title
+    local badge = CreateToastFontString(textGroup, "small")
+    badge:SetJustifyH("LEFT")
+    badge:SetWordWrap(false)
+    badge:SetMaxLines(1)
+    toast._badge = badge
+    local detail = CreateToastFontString(textGroup, "small")
+    detail:SetJustifyH("LEFT")
+    detail:SetWordWrap(false)
+    detail:SetMaxLines(1)
+    toast._detail = detail
+    -- Left-click dismisses this toast, right-click every toast (NotificationManager.lua:1420-1426).
+    toast:SetScript("OnMouseDown", function(self, button)
+        local entry = self._anEntry
+        if not entry or SessionLootOverlayUI._positionEdit then
+            return
+        end
+        if button == "RightButton" then
+            SessionLootOverlayUI:ClearToasts()
         else
-            name:SetPoint("RIGHT", row, "RIGHT", -OverlayDim("toastPad"), 0)
+            SessionLootOverlayUI:DismissEntry(entry)
         end
-        if name.SetJustifyH then
-            name:SetJustifyH("LEFT")
-        end
-    end
+    end)
+    LayoutToast(toast)
+    return toast
 end
 
-StyleToastRow = function(row)
-    if not row then
+local function AcquireToast(parent)
+    local toast = table.remove(SessionLootOverlayUI._pool)
+    if toast then
+        toast:SetParent(parent)
+        toast:SetFrameStrata(parent:GetFrameStrata())
+        LayoutToast(toast)
+    else
+        toast = CreateToast(parent)
+    end
+    toast:SetAlpha(0)
+    toast:EnableMouse(not SessionLootOverlayUI._positionEdit)
+    toast:Show()
+    return toast
+end
+
+local function ReleaseToast(toast)
+    if not toast then
         return
     end
-    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
-    if classic and ns.UI_ApplyClassicInsetPanel then
-        ns.UI_ApplyClassicInsetPanel(row)
-    elseif ns.UI_ApplyVisuals and COLORS then
-        local bg = COLORS.lootCellBg or COLORS.bgCard or COLORS.surfaceRowEven
-        local bd = COLORS.lootCellBorder or COLORS.border
-        ns.UI_ApplyVisuals(row, bg, bd)
-    end
-    if row._shadow then
-        row._shadow:SetColorTexture(0, 0, 0, 0.28)
-    end
-    if row._pulseBg then
-        local pick = COLORS.lootPickBorder or COLORS.accent
-        if pick then
-            row._pulseBg:SetVertexColor(pick[1], pick[2], pick[3])
-        end
-    end
+    toast:Hide()
+    toast:ClearAllPoints()
+    toast._anEntry = nil
+    toast._anLastEvent = nil
+    toast._anItemGen = (toast._anItemGen or 0) + 1
+    SessionLootOverlayUI._pool[#SessionLootOverlayUI._pool + 1] = toast
 end
 
-AcquireToast = function(parent)
-    local pool = SessionLootOverlayUI._pool
-    local row = table.remove(pool)
-    if row then
-        row:SetParent(parent)
-        row:Show()
-        row:SetAlpha(1)
-        row:SetScript("OnUpdate", nil)
-        row._slideX = nil
-        if row._pulseBg then
-            row._pulseBg:SetAlpha(0)
-        end
-        if row._accent then
-            row._accent:Hide()
-        end
-        if row._rank then
-            row._rank:Hide()
-        end
-        LayoutToastRow(row)
-        return row
+--- Badge / title / detail lines + compact text layout (NotificationManager.lua:1287-1416).
+local function LayoutToastText(toast)
+    local textUseW = toast._textUseW
+    local title, badge, detail = toast._title, toast._badge, toast._detail
+    title:SetWidth(textUseW)
+    badge:SetWidth(textUseW)
+    local hasDetail = (detail:GetText() or "") ~= ""
+    if hasDetail then
+        detail:SetWidth(textUseW)
+        detail:Show()
+    else
+        detail:Hide()
     end
-
-    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
-    local createIcon = ns.UI_CreateIcon
-    local toastFont = ToastFont()
-
-    row = CreateFrame("Frame", nil, parent, "BackdropTemplate")
-
-    local shadow = row:CreateTexture(nil, "BACKGROUND", nil, -2)
-    shadow:SetPoint("TOPLEFT", 2, -2)
-    shadow:SetPoint("BOTTOMRIGHT", -2, 2)
-    row._shadow = shadow
-
-    local pulseBg = row:CreateTexture(nil, "BACKGROUND", nil, -1)
-    pulseBg:SetTexture("Interface\\Buttons\\WHITE8X8")
-    pulseBg:SetAllPoints()
-    pulseBg:SetAlpha(0)
-    row._pulseBg = pulseBg
-
-    StyleToastRow(row)
-
-    local iconFrame
-    if createIcon then
-        local iconBr = COLORS.lootCellBorder
-        iconFrame = createIcon(row, nil, OverlayDim("iconSz"), false, iconBr, classic and true or false)
-        if iconFrame and ns.UI_StyleLootIconFrame then
-            ns.UI_StyleLootIconFrame(iconFrame, iconBr)
-        end
-        if iconFrame and iconFrame.EnableMouse then
-            --- Keep clicks falling through to the anchor panel (right-click dismiss).
-            iconFrame:EnableMouse(false)
-        end
-    end
-    row._icon = iconFrame
-
-    local rankTex = row:CreateTexture(nil, "ARTWORK")
-    rankTex:Hide()
-    row._rank = rankTex
-
-    local priceStr = row:CreateFontString(nil, "OVERLAY", toastFont)
-    priceStr:SetJustifyH("RIGHT")
-    row._price = priceStr
-
-    local qtyStr = row:CreateFontString(nil, "OVERLAY", toastFont)
-    qtyStr:SetJustifyH("RIGHT")
-    row._qty = qtyStr
-
-    local nameStr = row:CreateFontString(nil, "OVERLAY", toastFont)
-    nameStr:SetJustifyH("LEFT")
-    if nameStr.SetWordWrap then
-        nameStr:SetWordWrap(false)
-    end
-    row._name = nameStr
-
-    LayoutToastRow(row)
-    return row
+    local gapTitle = ToastPx(ALERT_TEXT_LINE_GAP)
+    local hTitle = title:GetStringHeight() or 0
+    local hHeader = badge:GetStringHeight() or 0
+    local hDetail = hasDetail and (detail:GetStringHeight() or 0) or 0
+    local stackH = hTitle + (hasDetail and (gapTitle + hDetail) or 0)
+    local params = {
+        mode = "standard",
+        contentFrame = toast._content,
+        textGroup = toast._textGroup,
+        headerLine = badge,
+        titleLine = title,
+        detailLine = hasDetail and detail or nil,
+        textUseW = textUseW,
+        stackH = stackH,
+        hHeader = hHeader,
+        gapTitle = gapTitle,
+        textLeftPad = ToastPx(ALERT_PAD_TEXT),
+        headerTopInset = ToastPx(2),
+    }
+    ns.NotificationToastFactory:ApplyCompactTextLayout(params)
 end
 
-ReleaseToast = function(row)
-    if not row then
-        return
-    end
-    row:SetScript("OnUpdate", nil)
-    row:Hide()
-    row:SetParent(nil)
-    row._anItemGen = (row._anItemGen or 0) + 1
-    SessionLootOverlayUI._pool[#SessionLootOverlayUI._pool + 1] = row
-end
-
-PaintToast = function(row, event)
+local function PaintToast(toast, event)
     local itemID = event and event.itemID
-    if not itemID or not row then
+    if not itemID or not toast then
         return
     end
-    row._anLastEvent = event
-    LayoutToastRow(row)
+    toast._anLastEvent = event
     local qty = event.qty or 1
-    local ic = row._icon
-    if ic then
-        if ic.texture then
-            ic.texture:SetTexture(TexForItem(itemID))
-            ic.texture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        end
-        if ns.UI_StyleLootIconFrame then
-            ns.UI_StyleLootIconFrame(ic, COLORS.lootCellBorder)
-        end
-        ic:Show()
-    end
 
-    row._qty:SetText(tostring(qty) .. "×")
-    local qc = COLORS.lootQtyOn or COLORS.textBright
-    if qc then
-        row._qty:SetTextColor(qc[1], qc[2], qc[3], 1)
-    end
+    toast._icon:SetTexture(TexForItem(itemID))
+    toast._icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
+    local badge = toast._badge
+    badge:SetText(ThemeTextHex("Bright") .. tostring(qty) .. "×|r")
+    ApplyTextShadow(badge, 0.8)
+
+    local totalCopper
     local unitFn = ns.GetLootUnitCopperWithFallback
-    local formatCopper = ns.FormatCopper
-    local priceStr = row._price
-    local totalCopper = nil
     if unitFn then
         local unit = unitFn(itemID)
         if unit and unit > 0 and qty > 0 then
             totalCopper = unit * qty
         end
     end
-    if totalCopper and totalCopper > 0 and formatCopper then
-        priceStr:SetText(formatCopper(totalCopper, OverlayDim("toastCoinH")) or "")
-        local pr, pg, pb = GetPriceColor()
-        priceStr:SetTextColor(pr, pg, pb, 1)
-        priceStr:Show()
-    else
-        priceStr:SetText((L and L["LOOT_CATALOG_AH_EMPTY"]) or "—")
-        local zc = COLORS.lootQtyZero or COLORS.textDim
-        if zc then
-            priceStr:SetTextColor(zc[1], zc[2], zc[3], 1)
-        end
-        priceStr:Show()
+    if (not totalCopper or totalCopper <= 0) and event._preview then
+        totalCopper = PREVIEW_COPPER
     end
+    local detail = toast._detail
+    local money = totalCopper and totalCopper > 0 and ns.FormatCopper
+        and ns.FormatCopper(totalCopper, ToastPx(COIN_ICON_SIZE))
+    if money and money ~= "" then
+        detail:SetText(money)
+    else
+        detail:SetText(ThemeTextHex("Muted") .. ((L and L["LOOT_CATALOG_AH_EMPTY"]) or "—") .. "|r")
+    end
+    ApplyTextShadow(detail, 0.6)
 
-    row._anItemGen = (row._anItemGen or 0) + 1
-    local itemGen = row._anItemGen
-    local nameStr = row._name
-    local rankTex = row._rank
-    local getQuality = ns.GetQualityRGB
+    toast._anItemGen = (toast._anItemGen or 0) + 1
+    local itemGen = toast._anItemGen
+    local title = toast._title
     local tabKey = event.tabKey or event.cat
 
     local function ApplyRank()
-        if not nameStr then
-            return
-        end
         local shown = false
-        if rankTex and ns.SetProfessionRankAtlasForItem then
+        if ns.SetProfessionRankAtlasForItem then
             local tierFb
             local entries = ResolveOverlayCatalogEntries(tabKey)
             if entries and ns.GetCatalogRankIndexForItem then
                 tierFb = ns.GetCatalogRankIndexForItem(itemID, entries)
             end
-            local rsz = OverlayDim("rankSz")
-            shown = ns.SetProfessionRankAtlasForItem(rankTex, itemID, rsz, rsz, tierFb) and true or false
+            local rsz = toast._rankSz
+            shown = ns.SetProfessionRankAtlasForItem(toast._rank, itemID, rsz, rsz, tierFb) and true or false
         end
-        row._rankShown = shown
-        if rankTex and not shown then
-            rankTex:Hide()
-        end
-        if shown and rankTex then
-            nameStr:SetPoint("LEFT", rankTex, "RIGHT", OverlayDim("rankGap"), 0)
+        if shown then
+            toast._rank:Show()
         else
-            nameStr:SetPoint("LEFT", row._icon or row, "RIGHT", OverlayDim("toastIconGap"), 0)
+            toast._rank:Hide()
         end
     end
 
     local function ApplyName()
-        local nm = GetItemInfo(itemID)
-        local qIdx = select(3, GetItemInfo(itemID)) or 1
-        if nm and not (issecretvalue and issecretvalue(nm)) then
-            nameStr:SetText(nm)
-        else
-            nameStr:SetText("#" .. tostring(itemID))
+        local nm, _, quality = GetItemInfo(itemID)
+        local accent
+        if quality and ns.GetQualityRGB then
+            local qr, qg, qb = ns.GetQualityRGB(quality)
+            accent = { qr, qg, qb }
         end
-        if getQuality then
-            local qr, qg, qb = getQuality(qIdx)
-            nameStr:SetTextColor(qr, qg, qb)
-        end
+        accent = accent or GetThemeAccentColor()
+        local nameStr = (nm and not (issecretvalue and issecretvalue(nm))) and nm or ("#" .. tostring(itemID))
+        title:SetText(AccentHex(accent, 1.14) .. nameStr .. "|r")
+        ApplyTextShadow(title, 0.85)
+        ApplyBackdropChrome(toast._backdrop, accent)
+        ApplyCompactIconBorder(toast._iconSlot, toast._icon, toast._iconSz, accent)
+        LayoutToastText(toast)
     end
+
     ApplyName()
     ApplyRank()
     if not GetItemInfo(itemID) and Item and Item.CreateFromItemID then
         local item = Item:CreateFromItemID(itemID)
         item:ContinueOnItemLoad(function()
-            if row._anItemGen == itemGen then
+            if toast._anItemGen == itemGen then
                 ApplyName()
                 ApplyRank()
             end
         end)
     end
+end
+
+-- ── Stack driver (entrance -> hold -> fade out -> collapse; one OnUpdate on the anchor) ──
+
+local function StackStep()
+    return ToastHeight() + ToastPx(ALERT_GAP)
+end
+
+local function RemoveEntry(self, entry)
+    for i = 1, #self._active do
+        if self._active[i] == entry then
+            table.remove(self._active, i)
+            break
+        end
+    end
+    ReleaseToast(entry.toast)
+    entry.toast = nil
+    if self._editPreviewEntry == entry then self._editPreviewEntry = nil end
+    if self._scalePreviewEntry == entry then self._scalePreviewEntry = nil end
+    self:LayoutStack()
+end
+
+local function AnchorOnUpdate(anchor, elapsed)
+    local self = SessionLootOverlayUI
+    local now = GetTime()
+    local holdSec = GetHoldSec()
+    local repoStep = math.min(1, (elapsed or 0) / TOAST_REPOSITION_SEC * 3)
+    local removed
+    for i = 1, #self._active do
+        local entry = self._active[i]
+        local toast = entry and entry.toast
+        if toast then
+            local age = now - entry.born
+            local alpha, entranceY = 1, 0
+            if age < TOAST_ENTRANCE_SEC then
+                local p = age / TOAST_ENTRANCE_SEC
+                local ease = 1 - (1 - p) * (1 - p)
+                alpha = math.min(1, p * 1.2)
+                entranceY = TOAST_ENTRANCE_OFFSET * (1 - ease)
+            end
+            if not entry.keep then
+                if entry.closingAt then
+                    local p = (now - entry.closingAt) / TOAST_FADE_OUT_SEC
+                    alpha = math.max(0, 1 - p)
+                    if p >= 1 then
+                        alpha = 0
+                        if now - entry.closingAt >= TOAST_FADE_OUT_SEC + TOAST_COLLAPSE_DELAY_SEC then
+                            removed = removed or {}
+                            removed[#removed + 1] = entry
+                        end
+                    end
+                elseif age >= holdSec then
+                    entry.closingAt = now
+                    toast:EnableMouse(false)
+                end
+            end
+            local cy = entry.y or entry.targetY or 0
+            cy = cy + ((entry.targetY or 0) - cy) * repoStep
+            if math.abs((entry.targetY or 0) - cy) < 0.5 then cy = entry.targetY or 0 end
+            entry.y = cy
+            toast:SetAlpha(alpha)
+            toast:ClearAllPoints()
+            toast:SetPoint("TOPRIGHT", anchor, "TOPRIGHT", 0, -cy + entranceY)
+        end
+    end
+    if removed then
+        for i = 1, #removed do
+            RemoveEntry(self, removed[i])
+        end
+    end
+end
+
+-- ── Position edit (anchor drag) ──
+
+local function EnsureEditGuard(self)
+    if self._editGuard then
+        return self._editGuard
+    end
+    local g = CreateFrame("Frame", "ArtisanNexusSessionLootOverlayEditGuard", UIParent)
+    g:SetSize(1, 1)
+    g:Hide()
+    g:SetScript("OnHide", function()
+        if SessionLootOverlayUI._positionEdit and not SessionLootOverlayUI._editClosing then
+            SessionLootOverlayUI:EndPositionEdit(false)
+        end
+    end)
+    --- Esc cancels the position edit: the guard is a WN WindowManager POPUP entry (top of the
+    --- Esc stack while shown).
+    ns.WindowManager:Register(g, ns.WindowManager.PRIORITY.POPUP, function() g:Hide() end)
+    self._editGuard = g
+    return g
+end
+
+local function EnsureEditHint(self)
+    self:EnsureAnchor()
+    local anchor = self.anchor
+    if self._editHint or not anchor then
+        return
+    end
+    local hint = FontManager:CreateFontString(anchor, "body", "OVERLAY")
+    hint:SetPoint("BOTTOM", anchor, "TOP", 0, EDIT_HINT_GAP)
+    hint:SetJustifyH("CENTER")
+    hint:SetWordWrap(true)
+    hint:Hide()
+    self._editHint = hint
+end
+
+local function SetEditHintVisible(self, show)
+    local hint = self._editHint
+    if not hint then
+        return
+    end
+    if show then
+        hint:SetWidth(ToastWidth() + 40)
+        hint:SetText((L and L["LOOT_OVERLAY_EDIT_HINT"]) or "Drag to move, right-click to save")
+        ns.UI_SetTextColorRole(hint, "Bright")
+        ApplyTextShadow(hint, 0.85)
+        hint:Show()
+    else
+        hint:Hide()
+    end
+end
+
+local function PushPreviewEntry(self)
+    local anchor = self.anchor
+    local toast = AcquireToast(anchor)
+    local entry = { toast = toast, born = GetTime() - TOAST_ENTRANCE_SEC, keep = true, _preview = true }
+    toast._anEntry = entry
+    PaintToast(toast, { itemID = PREVIEW_ITEM_ID, qty = 3, rt = GetTime(), _preview = true })
+    table.insert(self._active, 1, entry)
+    self:LayoutStack()
+    return entry
+end
+
+local function ReleaseAllEntries(self)
+    for i = #self._active, 1, -1 do
+        ReleaseToast(self._active[i].toast)
+        self._active[i] = nil
+    end
+    self._editPreviewEntry = nil
+    self._scalePreviewEntry = nil
 end
 
 function SessionLootOverlayUI:ApplyAnchor()
@@ -587,37 +700,17 @@ function SessionLootOverlayUI:ApplyAnchor()
     anchor:SetPoint(point, UIParent, relPoint, x, y)
 end
 
---- Themed border/backdrop around the whole overlay group (toasts sit inside with padding).
-function SessionLootOverlayUI:StyleAnchorPanel()
-    local anchor = self.anchor
-    if not anchor then
-        return
-    end
-    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
-    if classic and ns.UI_ApplyClassicInsetPanel then
-        ns.UI_ApplyClassicInsetPanel(anchor)
-    elseif ns.UI_ApplyVisuals and COLORS then
-        local bg = COLORS.bgCard or COLORS.lootCellBg or COLORS.surfaceRowEven
-        local bd = COLORS.border or COLORS.lootCellBorder
-        ns.UI_ApplyVisuals(anchor, bg, bd)
-    end
-end
-
---- Normal (non-edit) mouse wiring: right-click anywhere on the panel dismisses toasts.
+--- Normal (non-edit) mouse wiring: the anchor itself is click-through; toasts take the clicks.
 function SessionLootOverlayUI:ApplyOverlayMouse()
     local anchor = self.anchor
     if not anchor then
         return
     end
-    anchor:EnableMouse(true)
+    anchor:EnableMouse(false)
     anchor:RegisterForDrag()
     anchor:SetScript("OnDragStart", nil)
     anchor:SetScript("OnDragStop", nil)
-    anchor:SetScript("OnMouseUp", function(_, button)
-        if button == "RightButton" and not SessionLootOverlayUI._positionEdit then
-            SessionLootOverlayUI:ClearToasts()
-        end
-    end)
+    anchor:SetScript("OnMouseUp", nil)
 end
 
 function SessionLootOverlayUI:EnsureAnchor()
@@ -625,13 +718,14 @@ function SessionLootOverlayUI:EnsureAnchor()
         self:ApplyAnchor()
         return
     end
-    local pad = OverlayDim("panelPad")
-    local anchor = CreateFrame("Frame", "ArtisanNexusSessionLootOverlayAnchor", UIParent)
-    anchor:SetSize(OverlayDim("toastW") + pad * 2, OverlayDim("toastH") + pad * 2)
-    anchor:SetFrameStrata("HIGH")
-    anchor:SetFrameLevel(30)
+    local anchor = ns.UI.Factory:CreateContainer(UIParent, ToastWidth(), ToastHeight(), false,
+        "ArtisanNexusSessionLootOverlayAnchor")
+    anchor:Hide()
+    --- Toast HUD: WN FLOATING tier strata (not ESC / combat registered: toasts outlive both).
+    ns.WindowManager:ApplyStrata(anchor, ns.WindowManager.PRIORITY.FLOATING)
+    anchor:SetClampedToScreen(true)
+    anchor:SetScript("OnUpdate", AnchorOnUpdate)
     self.anchor = anchor
-    self:StyleAnchorPanel()
     self:ApplyOverlayMouse()
     self:ApplyAnchor()
 end
@@ -652,18 +746,16 @@ function SessionLootOverlayUI:BeginPositionEdit()
         return false
     end
     EnsureInitialized()
+    if self._scalePreview then
+        self:ClearScalePreview()
+    end
     self._positionEdit = true
     self:EnsureAnchor()
     local anchor = self.anchor
-    if not anchor then
-        self._positionEdit = false
-        return false
-    end
-    anchor:SetFrameStrata("DIALOG")
-    anchor:SetFrameLevel(40)
+    ReleaseAllEntries(self)
+    ns.WindowManager:ApplyStrata(anchor, ns.WindowManager.PRIORITY.POPUP)
     anchor:SetMovable(true)
     anchor:EnableMouse(true)
-    anchor:SetClampedToScreen(true)
     anchor:RegisterForDrag("LeftButton")
     anchor:SetScript("OnDragStart", function(_, button)
         if button == "LeftButton" then
@@ -680,9 +772,8 @@ function SessionLootOverlayUI:BeginPositionEdit()
     end)
     EnsureEditHint(self)
     SetEditHintVisible(self, true)
-    ShowEditPreview(self)
-    local guard = EnsureEditGuard(self)
-    guard:Show()
+    self._editPreviewEntry = PushPreviewEntry(self)
+    EnsureEditGuard(self):Show()
     return true
 end
 
@@ -694,24 +785,23 @@ function SessionLootOverlayUI:EndPositionEdit(save)
     local anchor = self.anchor
     if save and anchor then
         SaveAnchorConfigFromFrame(anchor)
-    elseif anchor then
-        self:ApplyAnchor()
     end
     if anchor then
         anchor:SetMovable(false)
-        anchor:SetFrameStrata("HIGH")
-        anchor:SetFrameLevel(30)
+        ns.WindowManager:ApplyStrata(anchor, ns.WindowManager.PRIORITY.FLOATING)
         self:ApplyOverlayMouse()
+        self:ApplyAnchor()
     end
-    ClearEditPreview(self)
+    ReleaseAllEntries(self)
     SetEditHintVisible(self, false)
     self._positionEdit = false
+    self:LayoutStack()
     if self._editGuard and self._editGuard:IsShown() then
         self._editGuard:Hide()
     end
     self._editClosing = false
-    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.RefreshOverlayPositionButton then
-        ns.ArtisanSettingsUI:RefreshOverlayPositionButton()
+    if ns.RefreshAddonSettings then
+        ns.RefreshAddonSettings()
     end
 end
 
@@ -722,7 +812,7 @@ function SessionLootOverlayUI:SavePositionEdit()
     self:EndPositionEdit(true)
     local addon = ns.ArtisanNexus
     if addon and addon.Print then
-        addon:Print((L and L["SLASH_OVERLAY_MOVE_DONE"]) or "Loot overlay position saved.")
+        addon:Print((L and L["OVERLAY_MOVE_DONE"]) or "Loot overlay position saved.")
     end
 end
 
@@ -731,114 +821,46 @@ function SessionLootOverlayUI:TogglePositionEdit()
         self:SavePositionEdit()
         return false
     end
-    local started = self:BeginPositionEdit()
-    if started then
-        local addon = ns.ArtisanNexus
-        if addon and addon.Print then
-            addon:Print((L and L["SLASH_OVERLAY_MOVE"]) or "Left-click drag the preview to move. Right-click to save.")
-        end
-    end
-    return started
+    return self:BeginPositionEdit()
 end
 
+-- ── Stack ──
+
+--- Target slots (newest on top) + anchor size; the anchor OnUpdate moves toasts to them.
 function SessionLootOverlayUI:LayoutStack()
     local anchor = self.anchor
     if not anchor then
         return
     end
-    local active = self._active
-    local n = #active
-    local pad = OverlayDim("panelPad")
+    local n = #self._active
+    local w, h = ToastWidth(), ToastHeight()
     if n < 1 then
+        anchor:SetSize(w, h)
         anchor:Hide()
-        anchor:SetHeight(OverlayDim("toastH") + pad * 2)
         return
     end
-    local toastH = OverlayDim("toastH")
-    local toastGap = OverlayDim("toastGap")
-    local h = n * toastH + math.max(0, n - 1) * toastGap
-    anchor:SetSize(OverlayDim("toastW") + pad * 2, h + pad * 2)
-    local y = pad
+    local step = StackStep()
+    anchor:SetSize(w, n * h + (n - 1) * ToastPx(ALERT_GAP))
     for i = 1, n do
-        local entry = active[i]
-        local row = entry and entry.row
-        if row then
-            local slideX = (entry and entry.slideX) or 0
-            row:ClearAllPoints()
-            row:SetPoint("TOPRIGHT", anchor, "TOPRIGHT", -(pad + slideX), -y)
-            row:Show()
-            y = y + toastH + toastGap
+        local entry = self._active[i]
+        entry.targetY = (i - 1) * step
+        if entry.y == nil then
+            entry.y = entry.targetY
         end
     end
     anchor:Show()
+    AnchorOnUpdate(anchor, 0)
 end
 
-local function RemoveActiveEntry(self, entry)
-    for i = 1, #self._active do
-        if self._active[i] == entry then
-            table.remove(self._active, i)
-            ReleaseToast(entry.row)
-            break
-        end
-    end
-    self:LayoutStack()
-end
-
-function SessionLootOverlayUI:StartToastFade(entry)
-    local row = entry and entry.row
-    if not row then
+--- Begin the WN fade-out on one toast (click dismiss).
+function SessionLootOverlayUI:DismissEntry(entry)
+    if not entry or entry.closingAt or entry.keep then
         return
     end
-    local holdSec = GetHoldSec()
-    local fadeSec = FADE_SEC
-    entry.born = entry.born or GetTime()
-    entry.slideX = OverlayDim("slideOffset")
-    row:SetAlpha(0)
-
-    row:SetScript("OnUpdate", function()
-        local age = GetTime() - entry.born
-        local alphaMul = 1
-
-        if age < SLIDE_IN_SEC then
-            local ease = EaseOutQuad(age / SLIDE_IN_SEC)
-            entry.slideX = OverlayDim("slideOffset") * (1 - ease)
-            alphaMul = ease
-            SessionLootOverlayUI:LayoutStack()
-        elseif not entry._slideDone then
-            entry._slideDone = true
-            entry.slideX = 0
-            SessionLootOverlayUI:LayoutStack()
-        end
-
-        if row._pulseBg then
-            if age < PULSE_SEC then
-                local env = 1 - (age / PULSE_SEC)
-                local pulse = (math.sin(GetTime() * (math.pi * 2 * 2.4)) + 1) * 0.5
-                local aLo, aHi = 0.05, 0.24
-                row._pulseBg:SetAlpha(env * (aLo + (aHi - aLo) * pulse) * alphaMul)
-                local pick = COLORS.lootPickBorder or COLORS.accent
-                if pick then
-                    local bright = 0.90 + 0.10 * pulse
-                    row._pulseBg:SetVertexColor(pick[1] * bright, pick[2] * bright, pick[3] * bright)
-                end
-            else
-                row._pulseBg:SetAlpha(0)
-            end
-        end
-
-        if age < holdSec then
-            row:SetAlpha(alphaMul)
-            return
-        end
-
-        local fadeAge = age - holdSec
-        if fadeAge >= fadeSec then
-            row:SetScript("OnUpdate", nil)
-            RemoveActiveEntry(SessionLootOverlayUI, entry)
-            return
-        end
-        row:SetAlpha((1 - (fadeAge / fadeSec)) * alphaMul)
-    end)
+    entry.closingAt = GetTime()
+    if entry.toast then
+        entry.toast:EnableMouse(false)
+    end
 end
 
 function SessionLootOverlayUI:PushToast(event)
@@ -849,30 +871,27 @@ function SessionLootOverlayUI:PushToast(event)
     local stackMax = GetStackMax()
     while #self._active >= stackMax do
         local old = table.remove(self._active)
-        if old and old.row then
-            ReleaseToast(old.row)
+        if old then
+            ReleaseToast(old.toast)
         end
     end
-
-    local row = AcquireToast(self.anchor)
-    PaintToast(row, event)
-    StyleToastRow(row)
-
-    local entry = { row = row, born = GetTime(), rt = event.rt or GetTime(), _slideDone = false }
+    local toast = AcquireToast(self.anchor)
+    local entry = { toast = toast, born = GetTime(), rt = event.rt or GetTime() }
+    toast._anEntry = entry
+    PaintToast(toast, event)
     table.insert(self._active, 1, entry)
     self:LayoutStack()
-    self:StartToastFade(entry)
 end
 
 function SessionLootOverlayUI:ClearToasts()
     if self._positionEdit then
-        ClearEditPreview(self)
         return
     end
-    for i = #self._active, 1, -1 do
-        ReleaseToast(self._active[i].row)
-        self._active[i] = nil
+    if self._scalePreview then
+        self:ClearScalePreview()
+        return
     end
+    ReleaseAllEntries(self)
     if self.anchor then
         self.anchor:Hide()
     end
@@ -881,6 +900,9 @@ end
 function SessionLootOverlayUI:OnLootUpdated()
     if not IsOverlayEnabled() or self._positionEdit then
         return
+    end
+    if self._scalePreview then
+        self:ClearScalePreview()
     end
     EnsureInitialized()
     local svc = ns.SessionLootService
@@ -895,16 +917,17 @@ function SessionLootOverlayUI:OnLootUpdated()
     if newestRt <= self._lastShownRt then
         return
     end
-    local cluster = 0.12
+    --- Every event since the last flush (oldest first), not only the newest cluster: a burst
+    --- longer than one cluster otherwise loses its older pickups.
     local batch = {}
     for i = #events, 1, -1 do
         local e = events[i]
         local rt = e and e.rt
-        if rt and rt >= newestRt - cluster and rt > self._lastShownRt then
+        if rt and rt > self._lastShownRt then
             batch[#batch + 1] = e
         end
     end
-    for i = #batch, 1, -1 do
+    for i = 1, #batch do
         self:PushToast(batch[i])
     end
     if #batch > 0 then
@@ -912,23 +935,32 @@ function SessionLootOverlayUI:OnLootUpdated()
     end
 end
 
+--- Theme / font / scale change: re-layout and repaint every live toast.
 function SessionLootOverlayUI:RefreshTheme()
-    COLORS = ns.UI_COLORS
-    self:StyleAnchorPanel()
+    for i = 1, #self._pool do
+        LayoutToast(self._pool[i])
+    end
     for i = 1, #self._active do
-        local entry = self._active[i]
-        local row = entry and entry.row
-        StyleToastRow(row)
-        LayoutToastRow(row)
-        if row and row._anLastEvent then
-            PaintToast(row, row._anLastEvent)
+        local toast = self._active[i].toast
+        if toast then
+            LayoutToast(toast)
+            if toast._anLastEvent then
+                PaintToast(toast, toast._anLastEvent)
+            end
         end
     end
+    if self._editHint and self._editHint:IsShown() then
+        SetEditHintVisible(self, true)
+    end
+    self:LayoutStack()
 end
 
 function SessionLootOverlayUI:Hide()
     if self._positionEdit then
         self:EndPositionEdit(true)
+    end
+    if self._scalePreview then
+        self:ClearScalePreview()
     end
     self:ClearToasts()
 end
@@ -952,6 +984,9 @@ function SessionLootOverlayUI:Toggle()
     if ns.LootHistoryUI and ns.LootHistoryUI.UpdateLootOverlayToggle then
         ns.LootHistoryUI:UpdateLootOverlayToggle()
     end
+    if ns.RefreshAddonSettings then
+        ns.RefreshAddonSettings()
+    end
     return IsOverlayEnabled()
 end
 
@@ -965,19 +1000,10 @@ function SessionLootOverlayUI:Open()
     if ns.LootHistoryUI and ns.LootHistoryUI.UpdateLootOverlayToggle then
         ns.LootHistoryUI:UpdateLootOverlayToggle()
     end
+    if ns.RefreshAddonSettings then
+        ns.RefreshAddonSettings()
+    end
     return true
-end
-
-function SessionLootOverlayUI:ResetForUiMode()
-    if self._positionEdit then
-        self:EndPositionEdit(true)
-    end
-    self:ClearToasts()
-    if self.anchor and ns.UI_UnregisterVisuals then
-        ns.UI_UnregisterVisuals(self.anchor)
-    end
-    self.anchor = nil
-    self._pool = {}
 end
 
 local function ScheduleLootPulse()
@@ -985,12 +1011,14 @@ local function ScheduleLootPulse()
         SessionLootOverlayUI:OnLootUpdated()
         return
     end
-    SessionLootOverlayUI._lootSeq = (SessionLootOverlayUI._lootSeq or 0) + 1
-    local token = SessionLootOverlayUI._lootSeq
+    --- Fixed flush 0.06 s after the first event of a burst (not restarted per event), so a
+    --- long burst flushes every 0.06 s and each flush takes all events since the previous one.
+    if SessionLootOverlayUI._lootPulsePending then
+        return
+    end
+    SessionLootOverlayUI._lootPulsePending = true
     C_Timer.After(0.06, function()
-        if token ~= SessionLootOverlayUI._lootSeq then
-            return
-        end
+        SessionLootOverlayUI._lootPulsePending = false
         SessionLootOverlayUI:OnLootUpdated()
     end)
 end
@@ -1012,61 +1040,80 @@ function SessionLootOverlayUI:Init()
         ScheduleLootPulse()
     end
 
-    if E and E.SESSION_LOOT_UPDATED then
-        owner:RegisterMessage(E.SESSION_LOOT_UPDATED, onLoot)
-    end
-    if E and E.LOOT_HISTORY_UPDATED then
-        owner:RegisterMessage(E.LOOT_HISTORY_UPDATED, onLoot)
-    end
-    if E and E.AH_PRICES_UPDATED then
-        owner:RegisterMessage(E.AH_PRICES_UPDATED, function()
-            if not IsOverlayEnabled() then
-                return
+    owner:RegisterMessage(E.SESSION_LOOT_UPDATED, onLoot)
+    owner:RegisterMessage(E.LOOT_HISTORY_UPDATED, onLoot)
+    owner:RegisterMessage(E.AH_PRICES_UPDATED, function()
+        if not IsOverlayEnabled() then
+            return
+        end
+        for i = 1, #SessionLootOverlayUI._active do
+            local toast = SessionLootOverlayUI._active[i].toast
+            if toast and toast._anLastEvent then
+                PaintToast(toast, toast._anLastEvent)
             end
-            for i = 1, #SessionLootOverlayUI._active do
-                local entry = SessionLootOverlayUI._active[i]
-                if entry and entry.row and entry.row._anLastEvent then
-                    PaintToast(entry.row, entry.row._anLastEvent)
-                end
-            end
-        end)
-    end
-    if E and E.THEME_CHANGED then
-        owner:RegisterMessage(E.THEME_CHANGED, function()
-            COLORS = ns.UI_COLORS
-            SessionLootOverlayUI:RefreshTheme()
-        end)
-    end
+        end
+    end)
+    owner:RegisterMessage(E.THEME_CHANGED, function()
+        SessionLootOverlayUI:RefreshTheme()
+    end)
+    owner:RegisterMessage(E.FONT_CHANGED, function()
+        SessionLootOverlayUI:RefreshTheme()
+    end)
 end
 
---- Settings sliders call this after X/Y change.
+--- Settings / profile change: re-read the saved anchor.
 function SessionLootOverlayUI:ApplySettingsAnchor()
     EnsureInitialized()
     self:ApplyAnchor()
     self:LayoutStack()
 end
 
---- Settings overlay size slider — relayout pooled + active toasts.
+--- Settings overlay size slider: re-layout pooled + active toasts.
 function SessionLootOverlayUI:ApplySettingsScale()
     EnsureInitialized()
-    if self._editHint then
-        self._editHint:SetWidth(OverlayDim("toastW") + 40)
+    self:RefreshTheme()
+end
+
+--- Real-time preview toast while dragging the settings scale slider.
+function SessionLootOverlayUI:TriggerScalePreview()
+    EnsureInitialized()
+    if self._positionEdit then
+        self:ApplySettingsScale()
+        return
     end
-    local pool = self._pool
-    for i = 1, #pool do
-        LayoutToastRow(pool[i])
+    self:EnsureAnchor()
+    local anchor = self.anchor
+    ns.WindowManager:ApplyStrata(anchor, ns.WindowManager.PRIORITY.POPUP)
+    if not self._scalePreviewEntry then
+        ReleaseAllEntries(self)
+        self._scalePreviewEntry = PushPreviewEntry(self)
     end
-    for i = 1, #self._active do
-        local entry = self._active[i]
-        local row = entry and entry.row
-        if row then
-            LayoutToastRow(row)
-            if row._anLastEvent then
-                PaintToast(row, row._anLastEvent)
+    self._scalePreview = true
+    self:ApplySettingsScale()
+
+    self._scalePreviewSeq = (self._scalePreviewSeq or 0) + 1
+    local seq = self._scalePreviewSeq
+    if C_Timer and C_Timer.After then
+        C_Timer.After(SCALE_PREVIEW_SEC, function()
+            if SessionLootOverlayUI._scalePreviewSeq ~= seq then
+                return
             end
-        end
+            SessionLootOverlayUI:ClearScalePreview()
+        end)
     end
-    self:LayoutStack()
+end
+
+function SessionLootOverlayUI:ClearScalePreview()
+    if not self._scalePreview then
+        return
+    end
+    self._scalePreview = false
+    self._scalePreviewSeq = (self._scalePreviewSeq or 0) + 1
+    ReleaseAllEntries(self)
+    if self.anchor then
+        ns.WindowManager:ApplyStrata(self.anchor, ns.WindowManager.PRIORITY.FLOATING)
+        self.anchor:Hide()
+    end
 end
 
 ns.SessionLootOverlayUI = SessionLootOverlayUI

@@ -26,17 +26,19 @@ function ArtisanNexus:InitializeMinimapButton()
         type = "launcher",
         text = (L and L["ADDON_NAME"]) or ADDON_NAME,
         icon = MINIMAP_ICON,
+        --- Same entry points as `/an`: left = Hub, right = Settings, Shift+Left = Session
+        --- Loot, middle = Recipe Matcher.
         OnClick = function(_, button)
             if InCombatLockdown() then
                 return
             end
             if button == "LeftButton" then
-                if IsShiftKeyDown and IsShiftKeyDown() then
-                    if ns.ArtisanHubUI and ns.ArtisanHubUI.Toggle then
-                        ns.ArtisanHubUI:Toggle()
+                if IsShiftKeyDown() then
+                    if ns.LootHistoryUI and ns.LootHistoryUI.Toggle then
+                        ns.LootHistoryUI:Toggle()
                     end
-                elseif ns.LootHistoryUI and ns.LootHistoryUI.Toggle then
-                    ns.LootHistoryUI:Toggle()
+                elseif ns.ArtisanNexus and ns.ArtisanNexus.ToggleMainWindow then
+                    ns.ArtisanNexus:ToggleMainWindow()
                 end
             elseif button == "RightButton" then
                 if ns.OpenAddonSettings then
@@ -54,10 +56,10 @@ function ArtisanNexus:InitializeMinimapButton()
             end
             tooltip:SetText("|cff6a0dad" .. ((L and L["ADDON_NAME"]) or ADDON_NAME) .. "|r", 1, 1, 1)
             tooltip:AddLine(" ")
-            tooltip:AddLine((L and L["MINIMAP_TT_LEFT"]) or "Left-Click: Toggle Session loot", 0.9, 0.9, 0.9, true)
-            tooltip:AddLine((L and L["MINIMAP_TT_SHIFT_LEFT"]) or "Shift+Left-Click: Artisan Hub", 0.85, 0.85, 0.85, true)
+            tooltip:AddLine((L and L["MINIMAP_TT_LEFT"]) or "Left-Click: Artisan Hub", 0.9, 0.9, 0.9, true)
+            tooltip:AddLine((L and L["MINIMAP_TT_SHIFT_LEFT"]) or "Shift+Left-Click: Session Loot", 0.85, 0.85, 0.85, true)
             tooltip:AddLine((L and L["MINIMAP_TT_MIDDLE"]) or "Middle-Click: Recipe Matcher", 0.85, 0.85, 0.85, true)
-            tooltip:AddLine((L and L["MINIMAP_TT_RIGHT"]) or "Right-Click: Open options", 0.75, 0.75, 0.75, true)
+            tooltip:AddLine((L and L["MINIMAP_TT_RIGHT"]) or "Right-Click: Settings", 0.75, 0.75, 0.75, true)
         end,
     })
 
@@ -67,6 +69,20 @@ function ArtisanNexus:InitializeMinimapButton()
     else
         LDBI:Show(ADDON_NAME)
     end
+end
+
+--- Profile switch/copy/reset: LibDBIcon keeps the table it was registered with, so rebind
+--- the button to the active profile's minimap table (position, hide, lock).
+--- verified 2026-10-15, libs/LibDBIcon-1.0/LibDBIcon-1.0.lua:428 lib:Refresh(name, db)
+--- (sets button.db = db, re-positions, applies hide/lock).
+function ArtisanNexus:RefreshMinimapButton()
+    if not LDBI or not (LDBI.IsRegistered and LDBI:IsRegistered(ADDON_NAME)) then
+        return
+    end
+    if self.db.profile.minimap == nil then
+        self.db.profile.minimap = { hide = false }
+    end
+    LDBI:Refresh(ADDON_NAME, self.db.profile.minimap)
 end
 
 function ArtisanNexus:SetMinimapButtonVisible(show)
@@ -80,18 +96,5 @@ function ArtisanNexus:SetMinimapButtonVisible(show)
     else
         LDBI:Hide(ADDON_NAME)
         self.db.profile.minimap.hide = true
-    end
-end
-
-function ArtisanNexus:ToggleMinimapButton()
-    if not LDBI then
-        return
-    end
-    if not self.db.profile.minimap or self.db.profile.minimap.hide then
-        self:SetMinimapButtonVisible(true)
-        self:Print((L and L["MINIMAP_SHOWN"]) or "Minimap button shown.")
-    else
-        self:SetMinimapButtonVisible(false)
-        self:Print((L and L["MINIMAP_HIDDEN"]) or "Minimap button hidden.")
     end
 end

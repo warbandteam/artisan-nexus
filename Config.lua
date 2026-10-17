@@ -1,11 +1,11 @@
 --[[
-    Artisan Nexus — Blizzard Settings (Esc → Options → AddOns): single launcher row.
-    Full options: |cff00ccff/an config|r opens ArtisanSettingsFrame (FrameXML + ArtisanSettingsUI glue).
+    Artisan Nexus — settings entry point.
+    ns.OpenAddonSettings opens the Settings tab of the main window (WN SettingsUI); every
+    launcher calls it. The Blizzard Settings (Esc → Options → AddOns) entry is a one-button canvas.
 ]]
 
 local ADDON_NAME, ns = ...
 
-local tinsert = table.insert
 
 local ArtisanNexus = ns.ArtisanNexus
 local L = ns.L
@@ -27,23 +27,24 @@ local function BuildBlizzardSettingsCanvas(parent)
     blurb:SetPoint("TOPRIGHT", -24, -52)
     blurb:SetJustifyH("LEFT")
     blurb:SetSpacing(4)
-    blurb:SetText((L and L["SETTINGS_BLIZZARD_LAUNCHER_TEXT"]) or "")
+    blurb:SetText((L and L["SETTINGS_BLIZZARD_LAUNCHER_TEXT"]) or "Use the button below or type |cff00ccff/an config|r.")
 
     local btn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     btn:SetSize(260, 30)
     btn:SetPoint("TOPLEFT", blurb, "BOTTOMLEFT", 0, -20)
-    btn:SetText((L and L["SETTINGS_BLIZZARD_OPEN_PANEL"]) or "Open Artisan Nexus settings")
+    btn:SetText((L and L["SETTINGS_BLIZZARD_OPEN_PANEL"]) or "Open settings panel")
     btn:SetScript("OnClick", function()
         Config.OpenSettings()
     end)
 end
 
+--- Open the Settings tab of the main window (Warband Nexus OpenOptions, Modules/UI.lua).
 function Config.OpenSettings()
-    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.ShowPanel then
-        ns.ArtisanSettingsUI:ShowPanel()
+    if ArtisanNexus and ArtisanNexus.OpenOptions then
+        ArtisanNexus:OpenOptions()
         return
     end
-    local msg = (L and L["SETTINGS_UI_UNAVAILABLE"]) or "Settings UI is not available."
+    local msg = (L and L["SETTINGS_UI_UNAVAILABLE"]) or "Settings failed to load. Reload the UI."
     if ArtisanNexus and ArtisanNexus.Print then
         ArtisanNexus:Print(msg)
     end
@@ -52,10 +53,6 @@ end
 ns.OpenAddonSettings = Config.OpenSettings
 
 function Config.RegisterOptions(_addon)
-    if not Settings or not Settings.RegisterCanvasLayoutCategory or not Settings.RegisterAddOnCategory then
-        return
-    end
-
     local holder = CreateFrame("Frame", "ArtisanNexusBlizzardSettingsCanvas", UIParent)
     BuildBlizzardSettingsCanvas(holder)
     holder:Hide()

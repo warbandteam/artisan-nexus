@@ -19,6 +19,9 @@
 
 local ADDON_NAME, ns = ...
 
+-- 12.1.5 removed the global item/coin fallbacks; bind the namespaced APIs.
+local GetItemInfo = C_Item.GetItemInfo
+
 --- Midnight: two visible quality steps only.
 ns.PROFESSION_QUALITY_MAX_TIER = 2
 

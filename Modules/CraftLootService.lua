@@ -2,61 +2,49 @@
     Artisan Nexus — craft output session tracking.
 
     Listens on CraftEventService; persists via SessionLootService:PushCraftedSession.
+    Counts base output + multicraft extras + bonusCraft results, de-duplicated per
+    operationID through CraftEventService:CreateOutputDeduper (the only dedup — no time
+    window). First-craft rewards are not output: Blizzard_ProfessionsCraftingOutputLog
+    files `firstCraftReward` results as children of the craft, not as crafted items
+    (verified 2026-10-15, TradeSkillUITypesDocumentation 12.1.5: CraftingItemResultData.firstCraftReward).
 ]]
 
 local ADDON_NAME, ns = ...
 
-local E = ns.Constants and ns.Constants.EVENTS
 local CraftEventService = ns.CraftEventService
 local SessionLootService = ns.SessionLootService
 
 local CraftLootService = {}
 
-local function ResolveSpellFromOutput(itemID)
-    itemID = tonumber(itemID)
-    if not itemID or itemID <= 0 then
-        return nil
-    end
-    local rs = ns.RecipeService
-    if not rs or not rs.GetOutputItem then
-        return nil
-    end
-    local s = ns.ArtisanNexus and ns.ArtisanNexus.db and ns.ArtisanNexus.db.global.recipeSchematics
-    if type(s) ~= "table" then
-        return nil
-    end
-    for spellID in pairs(s) do
-        if rs:GetOutputItem(spellID) == itemID then
-            return spellID
-        end
-    end
-    return nil
-end
+--- Multicraft extras and separate bonusCraft results of one operation are credited once.
+local outputDeduper = nil
 
 local function OnCraftResult(data, pendingSpellID)
     if not SessionLootService or not SessionLootService.PushCraftedSession then
         return
     end
-    if type(data) ~= "table" or data.bonusCraft then
+    if type(data) ~= "table" or not CraftEventService then
         return
     end
-    local itemID = CraftEventService and CraftEventService:GetResultItemID(data)
+    -- First-craft rewards (skill XP currency, Artisan's Mettle) are never crafted output.
+    -- Blizzard_ProfessionsCraftingOutputLog.lua:303-307 files one with operationID == 0 as a
+    -- parent row, but only so it still appears in the log when the pairing ID is missing;
+    -- the reward itself is unchanged, so it is skipped regardless of operationID
+    -- (verified 2026-10-15, wow-ui-source-live).
+    if data.firstCraftReward then
+        return
+    end
+    local itemID = CraftEventService:GetResultItemID(data)
     if not itemID then
         return
     end
-    local spellID = pendingSpellID
-    if spellID and CraftEventService and not CraftEventService:ResultMatchesRecipe(spellID, data) then
-        spellID = nil
+    local spellID = CraftEventService:ResolveSpellForResult(data, pendingSpellID)
+    if not outputDeduper then
+        outputDeduper = CraftEventService:CreateOutputDeduper()
     end
-    if not spellID then
-        spellID = ResolveSpellFromOutput(itemID)
-    end
-    if spellID and CraftEventService and not CraftEventService:ResultMatchesRecipe(spellID, data) then
+    local qty = outputDeduper:Credit(data, spellID)
+    if not qty or qty < 1 then
         return
-    end
-    local qty = tonumber(data.quantity) or 1
-    if qty < 1 then
-        qty = 1
     end
     local rs = ns.RecipeService
     local profession = (rs and rs.GetProfession and spellID) and rs:GetProfession(spellID) or nil
@@ -73,9 +61,19 @@ function CraftLootService:Enable()
         return
     end
     self._enabled = true
-    CraftEventService:RegisterCraftResult(function(data, pendingSpellID)
-        OnCraftResult(data, pendingSpellID)
-    end)
+    -- CraftEventService has no unregister; register once and gate on _enabled.
+    if not self._registered then
+        self._registered = true
+        CraftEventService:RegisterCraftResult(function(data, pendingSpellID)
+            if CraftLootService._enabled then
+                OnCraftResult(data, pendingSpellID)
+            end
+        end)
+    end
+end
+
+function CraftLootService:Disable()
+    self._enabled = false
 end
 
 ns.CraftLootService = CraftLootService

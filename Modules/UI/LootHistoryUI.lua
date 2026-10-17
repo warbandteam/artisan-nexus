@@ -1,87 +1,40 @@
 --[[
-    Session loot: per-tab catalog (Session vs Overall totals) + Last N pickups (always in-memory session feed).
+    Session Loot window: per-tab catalog (Session vs Overall totals) + Last N pickups (always
+    the in-memory session feed). Footer: per-tab reset (confirmed) + session rate status line.
+
+    Built exactly like a Warband Nexus floating window (PlansTrackerWindow.lua) through
+    ns.ArtisanWindow (ArtisanWindow.lua):
+      shell / title band / close / resize / position  -> ns.ArtisanWindow.Create
+      header utility buttons (gear = IconRegistry "settings", PlansTrackerWindow.lua:2390-2409)
+                                                       -> ns.ArtisanWindow.AddHeaderButton
+      profession tabs + Session/Overall switch         -> ns.UI_CreateSubTabBar (wrapRows, PvPUI
+                                                          recent-filter metrics)
+      catalog grid + pickup list                       -> two ns.ArtisanWindow.CreateScrollViewport
+      reset (footer, small)                            -> ns.UI_CreateThemedButton + ns.ArtisanWindow.Confirm
 ]]
 
 local ADDON_NAME, ns = ...
 
 local ArtisanNexus = ns.ArtisanNexus
-local L = ns.L
-local E = ns.Constants.EVENTS
 
-local COLORS = ns.UI_COLORS
-local LAYOUT = ns.UI_LAYOUT
-local ApplyPanelBackdrop = ns.UI_ApplyPanelBackdrop
-local ApplyVisuals = ns.UI_ApplyVisuals
-
-local PAD = LAYOUT.BASE_INDENT or 12
-
---- Horizontal clearance for rows anchored straight to the window edge (tabBar,
---- sessionHost). Classic's ornate dialog border art needs more room than the
---- plain PAD used by the modern skin — see AN-UI-theme.mdc border footprint.
-local function BodyHInset()
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellHorizontalInset then
-        return ns.UI_GetClassicShellHorizontalInset()
-    end
-    return PAD
+local function LT(key, fallback)
+    return (ns.L and ns.L[key]) or fallback
 end
 
-local LOOT_TAB_H = LAYOUT.SHELL_TAB_HEIGHT or 30
-local LOOT_TAB_GAP = 5
-local LOOT_TAB_BAR_H = LOOT_TAB_H + 4
-local LOOT_MIN_W = LAYOUT.LOOT_FRAME_MIN_WIDTH or 340
-local LOOT_MIN_H = LAYOUT.LOOT_FRAME_MIN_HEIGHT or 420
-local LOOT_MAX_W = LAYOUT.LOOT_FRAME_MAX_WIDTH or 900
-local LOOT_MAX_H = LAYOUT.LOOT_FRAME_MAX_HEIGHT or 900
---- Resize grip footprint: 18px art + 5px inset + 1px gap. The session list
---- bottom must clear it so the grip never covers the scrollbar's down button.
-local LOOT_GRIP_SIZE = 18
-local LOOT_GRIP_INSET_X = 4
-local LOOT_GRIP_INSET_Y = 5
-local LOOT_BOTTOM_CLEARANCE = LOOT_GRIP_SIZE + LOOT_GRIP_INSET_Y + 1
---- Space above sessionHost reserved for the "Last N pickups" heading (FontString anchors are unreliable for layout).
-local LOOT_SESSION_LABEL_BAND = 26
-
-local function LootScrollReserve()
-    return (LAYOUT.SCROLLBAR_COLUMN_WIDTH or 22) + (LAYOUT.SCROLL_GAP or 2)
-end
-
---- Bar column height tracks viewport panel (never anchor to scroll — scroll anchors to column).
-local function PositionLootScrollBarColumn(panel, host, barCol)
-    if not panel or not barCol then
-        return
-    end
-    barCol:ClearAllPoints()
-    barCol:SetPoint("TOP", panel, "TOP", 0, 0)
-    barCol:SetPoint("BOTTOM", panel, "BOTTOM", 0, 0)
-    barCol:SetPoint("RIGHT", host or panel, "RIGHT", 0, 0)
-end
-
-local function LootScrollAttachOpts(host, panel)
-    local pad = 4
-    --- Bar column on host right — outside catalog/session inset panels (modern + classic).
-    return ns.UI_BuildExternalScrollOpts(host, {
-        padL = pad,
-        padT = -pad,
-        padR = pad,
-        padB = pad,
-        topInset = 0,
-        bottomInset = 0,
-    })
-end
-
-local function ApplyLootInsetToHost(panel, host)
-    if not panel or not host then
-        return
-    end
-    local reserve = LootScrollReserve()
-    panel:ClearAllPoints()
-    panel:SetPoint("TOPLEFT", host, "TOPLEFT", 0, 0)
-    panel:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 0, 0)
-    panel:SetPoint("TOPRIGHT", host, "TOPRIGHT", -reserve, 0)
-    panel:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -reserve, 0)
-    panel:SetClipsChildren(true)
-    host:SetClipsChildren(true)
-end
+-- Window-specific metrics.
+local WIN_W, WIN_H = 600, 720
+local MIN_W, MIN_H = 360, 440
+local MAX_W, MAX_H = 960, 920
+local SESSION_FRAC = 0.34        -- pickup list share of the window height
+local SESSION_MIN_H = 140
+local SECTION_ROW_H = 24         -- "Catalog" / "Last N pickups" heading rows
+local BLOCK_GAP = 8
+local FOOTER_RIGHT_RESERVE = 16  -- keep the status text clear of the resize grip
+local RESET_BTN_W = 110
+-- Compact sub-tab metrics (PvPUI.lua:58-60 recent-filter bar).
+local TAB_BTN_H = 26
+local TAB_BTN_GAP = 6
+local TAB_PAD_H = 8
 
 local function GetLastLootListCap()
     local s = ns.SessionLootService
@@ -91,19 +44,21 @@ local function GetLastLootListCap()
     return 15
 end
 
-local function OpenAddonSettings()
-    if ns.OpenAddonSettings then
-        ns.OpenAddonSettings()
-        return
+local FormatCopper = ns.FormatCopper
+--- Single loot valuation helper (Utilities.GetLootValueCopper): current market unit, gross
+--- and net-of-AH-cut (cut only on AH-priced units). Grid / rows / overlay / per-character
+--- show GROSS; the session rate shows NET.
+local LootValueCopper = ns.GetLootValueCopper
+
+local function FormatGross(copper)
+    if copper and copper > 0 then
+        local s = FormatCopper(copper)
+        if s then return s end
     end
-    ArtisanNexus:Print((L and L["SETTINGS_UI_UNAVAILABLE"]) or "Settings UI is not available.")
+    return (ns.UI_FormatMoney and ns.UI_FormatMoney(0, 12)) or "0"
 end
 
---- Shared money / unit-price helpers (Modules/Utilities.lua; loads before this file per TOC).
-local FormatCopper = ns.FormatCopper
-local LootUnitCopper = ns.GetLootUnitCopperWithFallback
-
---- Overall grid “Total” and per-row value = Σ(qty × **current** AH unit from `ahPrices`). Counts stay historical; gold revalues when AH sync updates prices (mark-to-market).
+--- Grid total = gross value at the CURRENT price (counts stay historical; mark-to-market).
 local function ComputeTotalsCopper(totals)
     local sum = 0
     if type(totals) ~= "table" then
@@ -112,11 +67,9 @@ local function ComputeTotalsCopper(totals)
     for rawId, qty in pairs(totals) do
         local q = tonumber(qty) or 0
         --- SavedVariables / DB pairs may use string keys — normalize before price lookup.
-        local itemID = tonumber(rawId) or rawId
-        local nid = tonumber(itemID)
-        local unit = nid and LootUnitCopper(nid) or nil
-        if q > 0 and unit and unit > 0 then
-            sum = sum + (q * unit)
+        local nid = tonumber(rawId)
+        if q > 0 and nid then
+            sum = sum + (LootValueCopper(nid, q))
         end
     end
     return sum
@@ -135,11 +88,10 @@ local function ComputeSessionEfficiencyText(events)
         if e then
             local q = math.max(0, tonumber(e.qty) or 0)
             qty = qty + q
-            --- Mark-to-market like ComputeTotalsCopper: current AH/vendor unit price.
             local nid = tonumber(e.itemID)
-            local unit = (q > 0 and nid) and LootUnitCopper(nid) or nil
-            if unit and unit > 0 then
-                valueCopper = valueCopper + (q * unit)
+            if q > 0 and nid then
+                local _, net = LootValueCopper(nid, q)
+                valueCopper = valueCopper + net
             end
             local et = tonumber(e.t)
             if et and et < oldestT then
@@ -150,8 +102,7 @@ local function ComputeSessionEfficiencyText(events)
     if qty <= 0 then
         return nil
     end
-    --- A span under a minute (single pickup: span 0) produces absurd
-    --- extrapolations like "3600 items/hr" — show no rate until there is one.
+    --- Under a minute of span extrapolates absurd rates — show none until there is one.
     local spanSec = newestT - oldestT
     if spanSec < 60 then
         return nil
@@ -159,13 +110,46 @@ local function ComputeSessionEfficiencyText(events)
     local hours = spanSec / 3600
     local iph = qty / hours
     local goldText = FormatCopper and FormatCopper(math.floor(valueCopper / hours), 12) or nil
-    if goldText and L and L["LOOT_EFFICIENCY_FMT"] then
-        return string.format(L["LOOT_EFFICIENCY_FMT"], iph, goldText)
+    if goldText then
+        return string.format(LT("LOOT_EFFICIENCY_NET_SHORT_FMT", "Rate: %.1f items/hr • %s/hr net"), iph, goldText)
     end
-    return string.format((L and L["LOOT_EFFICIENCY_ITEMS_FMT"]) or "Rate: %.1f items/hr", iph)
+    return string.format(LT("LOOT_EFFICIENCY_ITEMS_FMT", "Rate: %.1f items/hr"), iph)
 end
 
---- Top-level tab template; rendered set is filtered by owned professions (same `GetProfessions` scan as Utilities).
+--- Session rate from the active-time clock (idle gaps > 5 min excluded) over ALL session
+--- pickups of the tab, valued net of the AH cut. Falls back to the recent-pickups rate when
+--- the clock has under a minute of active time.
+local function ComputeSessionRateText(tabKey, sessionTotals, recentEvents)
+    local svc = ns.SessionLootService
+    local clock = svc and svc.GetSessionClock and svc:GetSessionClock(tabKey)
+    local active = clock and tonumber(clock.active) or 0
+    if active < 60 or type(sessionTotals) ~= "table" then
+        return ComputeSessionEfficiencyText(recentEvents)
+    end
+    local qty, net = 0, 0
+    for rawId, q in pairs(sessionTotals) do
+        q = tonumber(q) or 0
+        local nid = tonumber(rawId)
+        if q > 0 and nid then
+            qty = qty + q
+            local _, n = LootValueCopper(nid, q)
+            net = net + n
+        end
+    end
+    if qty <= 0 then
+        return nil
+    end
+    local hours = active / 3600
+    local iph = qty / hours
+    local goldText = FormatCopper and FormatCopper(math.floor(net / hours), 12) or nil
+    if goldText then
+        return string.format(LT("LOOT_EFFICIENCY_NET_FMT", "Rate: %.1f items/hr • %s/hr net (%d min active)"),
+            iph, goldText, math.floor(active / 60))
+    end
+    return string.format(LT("LOOT_EFFICIENCY_ITEMS_FMT", "Rate: %.1f items/hr"), iph)
+end
+
+--- Top-level tab template; rendered set is filtered by owned professions.
 local TAB_ORDER = { "fishing", "herb", "mine", "leather", "disenchant", "others", "crafted" }
 
 local function GetOwnedTabMap()
@@ -173,11 +157,9 @@ local function GetOwnedTabMap()
     local herb = U.PlayerOwnsHerbalism and U.PlayerOwnsHerbalism() or false
     local mine = U.PlayerOwnsMining and U.PlayerOwnsMining() or false
     local fishing = U.PlayerOwnsFishing and U.PlayerOwnsFishing() or false
-    --- Fishing tab should remain accessible when profession APIs fail to report secondary lines on some clients.
-    --- If module is enabled and we have any fishing history/events, force the tab visible.
     if not fishing then
-        --- Fishing API can fail to report on some clients; show the tab whenever the module is enabled
-        --- so reset actions don't make the tab vanish (overall/session counts can drop to zero).
+        --- Fishing API can fail to report on some clients; show the tab whenever the module is
+        --- enabled so reset actions don't make the tab vanish.
         local profile = ns.db and ns.db.profile
         local modEnabled = not (profile and profile.modulesEnabled and profile.modulesEnabled.fishing == false)
         if modEnabled then
@@ -193,11 +175,11 @@ local function GetOwnedTabMap()
         leather = leather,
         disenchant = disenchant,
     }
-    --- "Others": shared motes / non-primary-tab mats; same gate as before (no fishing-only requirement).
+    --- "Others": shared motes / non-primary-tab mats.
     if herb or mine or leather or disenchant then
         owned.others = true
     end
-    --- Craft outputs: always available when Session loot is enabled (not a gathering catalog tab).
+    --- Craft outputs: always available (not a gathering catalog tab).
     owned.crafted = true
     return owned
 end
@@ -231,897 +213,14 @@ local function GetVisibleTabOrder()
             out[#out + 1] = key
         end
     end
-    --- Never show every tab when detection fails — that hides the intended profession filter.
-    --- Minimal placeholder until SKILL_LINES_CHANGED / PLAYER_ENTERING_WORLD refreshes (`LayoutTabs`).
+    --- Minimal placeholder until SKILL_LINES_CHANGED / PLAYER_ENTERING_WORLD refreshes.
     if #out == 0 then
         out[1] = "fishing"
     end
     return out
 end
 
---- Forward declaration: Lua block scope begins here so closures above the table literal still close over this upvalue (not `_G.LootHistoryUI`).
-local LootHistoryUI
-
-local IsValidTab
-
----@class LootHistoryUI
-LootHistoryUI = {
-    main = nil,
-    activeTab = "fishing",
-    --- "session" = in-memory (resets on login/manual); "overall" = persisted db.global
-    activeMode = "session",
-    catalogContent = nil,
-    sessionContent = nil,
-    catalogScroll = nil,
-    sessionScroll = nil,
-    sessionPanel = nil,
-    sessionEfficiencyLabel = nil,
-    headerBar = nil,
-    headerLogo = nil,
-    tabBar = nil,
-    tabButtons = {},
-    modeBar = nil,
-    modeButtons = {},
-    resetRow = nil,
-    resetSessionBtn = nil,
-    resetText = nil,
-    settingsBtn = nil,
-    resizeGrip = nil,
-    overloadTrackerBtn = nil,
-    lootOverlayBtn = nil,
-    _sizeSaveTimer = nil,
-    --- Grip `StartSizing` aktifken ağır `Refresh` atlanır (takılma önlemi); bırakınca bir kez tam yenileme.
-    _isLootFrameSizing = false,
-    --- Başlıktan taşırken katalog shimmer / tick işlerini hafiflet (FPS).
-    _pauseLootFx = false,
-    --- Canlı resize sırasında LayoutTabs sıklığını sınırla (son kare Finish’te tamamlanır).
-    _nextLootTabLayoutTime = nil,
-}
-
---- `hooksecurefunc("StopMovingOrSizing")` bazı istemcilerde yok / hata verir. LMB bırakılınca anket + grip MouseUp.
-local function FinishLootFrameSizing()
-    if LootHistoryUI.main then
-        LootHistoryUI.main:SetScript("OnUpdate", nil)
-    end
-    if not LootHistoryUI._isLootFrameSizing then
-        return
-    end
-    LootHistoryUI._isLootFrameSizing = false
-    LootHistoryUI._pauseLootFx = false
-    LootHistoryUI._nextLootTabLayoutTime = nil
-    --- Poll path fires when grip OnMouseUp never did — native sizing must end
-    --- here too, or the frame stays glued to the cursor.
-    if LootHistoryUI.main and LootHistoryUI.main.StopMovingOrSizing then
-        LootHistoryUI.main:StopMovingOrSizing()
-    end
-    LootHistoryUI:LayoutTabs()
-    LootHistoryUI:LayoutModeBtns()
-    LootHistoryUI:SaveFrameSize()
-    LootHistoryUI:Refresh()
-end
-
-local function LootFrameSizingPoll()
-    if not LootHistoryUI._isLootFrameSizing then
-        if LootHistoryUI.main then
-            LootHistoryUI.main:SetScript("OnUpdate", nil)
-        end
-        return
-    end
-    if not IsMouseButtonDown("LeftButton") then
-        FinishLootFrameSizing()
-    end
-end
-
-local function ClearSubtreeScripts(frame)
-    if not frame then
-        return
-    end
-    frame:SetScript("OnUpdate", nil)
-    local ch = { frame:GetChildren() }
-    for i = 1, #ch do
-        ClearSubtreeScripts(ch[i])
-    end
-end
-
-local function ClearScrollContent(scroll, content)
-    if not content then return end
-    --- Pooled path: Draw releases its cells/rows/lines back into the pools
-    --- kept on the content frame (frames are reused, never discarded — WoW
-    --- never garbage-collects frames).
-    local DrawMod = ns.LootHistoryUIDraw
-    if DrawMod and DrawMod.ReleaseContent then
-        DrawMod.ReleaseContent(content)
-        return
-    end
-    --- Legacy fallback (Draw chunk missing): detach and discard.
-    local regions = { content:GetRegions() }
-    for i = 1, #regions do
-        regions[i]:Hide()
-        regions[i]:SetParent(nil)
-    end
-    local ch = { content:GetChildren() }
-    for i = 1, #ch do
-        ClearSubtreeScripts(ch[i])
-        if ns.UI_UnregisterVisuals then
-            ns.UI_UnregisterVisuals(ch[i])
-        end
-        ch[i]:Hide()
-        ch[i]:SetParent(nil)
-    end
-end
-
-local function GetLootFrameBounds()
-    local Chrome = ns.LootHistoryUI_Chrome
-    if Chrome and Chrome.GetFrameBounds then
-        return Chrome.GetFrameBounds(LOOT_MIN_W, LOOT_MAX_W, LOOT_MIN_H, LOOT_MAX_H)
-    end
-    local p = UIParent
-    local maxW, maxH = LOOT_MAX_W, LOOT_MAX_H
-    if p and p.GetWidth and p.GetHeight then
-        local pw = p:GetWidth() or 1200
-        local ph = p:GetHeight() or 800
-        maxW = math.min(LOOT_MAX_W, math.max(LOOT_MIN_W + 80, pw - 24))
-        maxH = math.min(LOOT_MAX_H, math.max(LOOT_MIN_H + 80, ph - 24))
-    end
-    return maxW, maxH
-end
-
-function LootHistoryUI:ApplySavedFramePosition(f)
-    if not f then
-        return
-    end
-    local db = ns.db and ns.db.profile and ns.db.profile.lootHistoryFrame
-    local point = db and db.point
-    f:ClearAllPoints()
-    if point and db.x ~= nil and db.y ~= nil then
-        local relTo = UIParent
-        local rn = db.relativeTo
-        if rn and rn ~= "" and rn ~= "UIParent" then
-            local rf = _G[rn]
-            if rf and rf.IsShown then
-                relTo = rf
-            end
-        end
-        local rp = db.relativePoint or point
-        f:SetPoint(point, relTo, rp, tonumber(db.x) or 0, tonumber(db.y) or 0)
-    else
-        f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    end
-end
-
-function LootHistoryUI:ApplySavedFrameSize(f)
-    if not f then
-        return
-    end
-    local db = ns.db and ns.db.profile and ns.db.profile.lootHistoryFrame
-    local w = (db and db.width) or LAYOUT.WINDOW_WIDTH
-    local h = (db and db.height) or LAYOUT.WINDOW_HEIGHT
-    local maxW, maxH = GetLootFrameBounds()
-    w = math.max(LOOT_MIN_W, math.min(maxW, w))
-    h = math.max(LOOT_MIN_H, math.min(maxH, h))
-    f:SetWidth(w)
-    f:SetHeight(h)
-    self:ApplySavedFramePosition(f)
-end
-
-function LootHistoryUI:SaveFrameSize()
-    if not self.main or not ns.db or not ns.db.profile then
-        return
-    end
-    ns.db.profile.lootHistoryFrame = ns.db.profile.lootHistoryFrame or {}
-    local t = ns.db.profile.lootHistoryFrame
-    t.width = self.main:GetWidth()
-    t.height = self.main:GetHeight()
-    --- GetPoint returns point, relativeTo (frame), relativePoint (string), x, y.
-    local point, relTo, relPoint, x, y = self.main:GetPoint(1)
-    if point then
-        t.point = point
-        t.relativePoint = relPoint or point
-        t.x = math.floor((tonumber(x) or 0) + 0.5)
-        t.y = math.floor((tonumber(y) or 0) + 0.5)
-        if relTo and relTo.GetName then
-            local nm = relTo:GetName()
-            t.relativeTo = (nm and nm ~= "") and nm or "UIParent"
-        else
-            t.relativeTo = "UIParent"
-        end
-    end
-end
-
-local SESSION_FRAC = 0.34
---- Köşeden sürüklerken sekme yerleşimini en fazla bu sıklıkta yap (her pikselde ClearAllPoints olmaz).
-local LOOT_LAYOUT_THROTTLE_SEC = 1 / 20
-
-function LootHistoryUI:LayoutLootBodyChrome()
-    if not self.main or not self.tabBar then
-        return
-    end
-    local f = self.main
-    local layout = ns.UI_LAYOUT or {}
-    local classic = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
-    local contentTop = (classic and ns.UI_GetClassicShellContentTop and ns.UI_GetClassicShellContentTop())
-        or ((layout.SHELL_HEADER_HEIGHT or 44) + 8)
-
-    local hInset = BodyHInset()
-    self.tabBar:ClearAllPoints()
-    self.tabBar:SetPoint("TOPLEFT", f, "TOPLEFT", hInset, -contentTop)
-    self.tabBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -hInset, -contentTop)
-
-    if self.modeBar then
-        self.modeBar:ClearAllPoints()
-        self.modeBar:SetPoint("TOPLEFT", self.tabBar, "BOTTOMLEFT", 0, -8)
-        self.modeBar:SetPoint("TOPRIGHT", self.tabBar, "BOTTOMRIGHT", 0, -8)
-    end
-
-    local hdrLvl = (self.headerBar and self.headerBar:GetFrameLevel()) or (f:GetFrameLevel() or 0)
-    local bodyLvl = hdrLvl + 10
-    if self.headerBar and self.headerBar.SetFrameLevel then
-        self.headerBar:SetFrameLevel(hdrLvl)
-    end
-    local band = {
-        self.tabBar,
-        self.modeBar,
-        self.resetRow,
-        self.catalogHost,
-        self.sessionHost,
-        self.sessionSectionLabel,
-        self.sessionEfficiencyLabel,
-        self.catalogSectionLabel,
-        self.catalogTotalLabel,
-        self.resizeGrip,
-    }
-    for i = 1, #band do
-        local w = band[i]
-        if w and w.SetFrameLevel then
-            w:SetFrameLevel(bodyLvl)
-        end
-    end
-
-    self:LayoutTabs()
-    self:LayoutModeBtns()
-    self:LayoutLootCatalogHost()
-end
-
---- Catalog body fills the band between the "Catalog" header row and the session heading.
-function LootHistoryUI:LayoutLootCatalogHost()
-    if not self.catalogHost or not self.refRow or not self.sessionHost then
-        return
-    end
-    self.catalogHost:ClearAllPoints()
-    self.catalogHost:SetPoint("TOPLEFT", self.refRow, "BOTTOMLEFT", 0, -4)
-    self.catalogHost:SetPoint("TOPRIGHT", self.refRow, "BOTTOMRIGHT", 0, -4)
-    self.catalogHost:SetPoint("BOTTOM", self.sessionHost, "TOP", 0, LOOT_SESSION_LABEL_BAND)
-end
-
-function LootHistoryUI:LayoutClassicShellBodyChrome()
-    self:LayoutLootBodyChrome()
-end
-
---- Match scroll-child width to the live viewport (RecipeMatcher parity).
-function LootHistoryUI:SyncLootScrollContentWidths()
-    if self.catalogScroll and self.catalogContent then
-        if ns.UI_FinishScrollLayout then
-            ns.UI_FinishScrollLayout(self.catalogScroll)
-        end
-        if ns.UI_SyncScrollChildWidth then
-            ns.UI_SyncScrollChildWidth(self.catalogScroll, self.catalogContent, 0)
-        else
-            local w = self.catalogScroll:GetWidth()
-            if w and w > 8 then
-                self.catalogContent:SetWidth(w)
-            end
-        end
-    end
-    if self.sessionScroll and self.sessionContent then
-        if ns.UI_FinishScrollLayout then
-            ns.UI_FinishScrollLayout(self.sessionScroll)
-        end
-        if ns.UI_SyncScrollChildWidth then
-            ns.UI_SyncScrollChildWidth(self.sessionScroll, self.sessionContent, 0)
-        else
-            local w = self.sessionScroll:GetWidth()
-            if w and w > 8 then
-                self.sessionContent:SetWidth(w)
-            end
-        end
-    end
-end
-
-function LootHistoryUI:GetCatalogInnerWidth()
-    if not self.catalogContent then
-        return nil
-    end
-    if self.catalogScroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.catalogScroll)
-    end
-    if self.catalogScroll and ns.UI_SyncScrollChildWidth then
-        ns.UI_SyncScrollChildWidth(self.catalogScroll, self.catalogContent, 0)
-    end
-    local w = self.catalogContent:GetWidth()
-    if w and w >= 80 then
-        return w
-    end
-    if self.catalogScroll then
-        w = self.catalogScroll:GetWidth()
-        if w and w >= 80 then
-            return w
-        end
-    end
-    if self.catalogPanel then
-        w = self.catalogPanel:GetWidth()
-        if w and w >= 80 then
-            return math.max(80, w - 8)
-        end
-    end
-    return nil
-end
-
-function LootHistoryUI:ScheduleDeferredRefresh()
-    if self._deferLootRefresh then
-        return
-    end
-    if not C_Timer or not C_Timer.After then
-        return
-    end
-    self._deferLootRefresh = true
-    C_Timer.After(0, function()
-        self._deferLootRefresh = nil
-        if not self.main or not self.main:IsShown() then
-            return
-        end
-        self:LayoutLootCatalogHost()
-        self:LayoutLootScrollChrome()
-        self:Refresh()
-    end)
-end
-
-function LootHistoryUI:HookLootScrollWidthSync()
-    if self._lootScrollWidthHooked then
-        return
-    end
-    self._lootScrollWidthHooked = true
-    local function onCatalogHostSized()
-        if self._isLootFrameSizing or not self.main or not self.main:IsShown() then
-            return
-        end
-        if self._catalogWidthRefreshPending then
-            return
-        end
-        self._catalogWidthRefreshPending = true
-        C_Timer.After(0, function()
-            self._catalogWidthRefreshPending = nil
-            if not self.main or not self.main:IsShown() then
-                return
-            end
-            self:LayoutLootScrollChrome()
-            self:Refresh()
-        end)
-    end
-    if self.catalogScroll and self.catalogScroll.SetScript then
-        self.catalogScroll:SetScript("OnSizeChanged", onCatalogHostSized)
-    end
-    if self.catalogHost and self.catalogHost.SetScript then
-        self.catalogHost:SetScript("OnSizeChanged", onCatalogHostSized)
-    end
-end
-
-function LootHistoryUI:LayoutLootScrollChrome()
-    ApplyLootInsetToHost(self.catalogPanel, self.catalogHost)
-    ApplyLootInsetToHost(self.sessionPanel, self.sessionHost)
-    if self.catalogScroll and self.catalogPanel and self.catalogScroll.SetFrameLevel then
-        local pl = self.catalogPanel:GetFrameLevel() or 0
-        self.catalogScroll:SetFrameLevel(pl + 2)
-        if self.catalogContent then
-            self.catalogContent:SetFrameLevel(pl + 3)
-        end
-    end
-    if self.sessionScroll and self.sessionPanel and self.sessionScroll.SetFrameLevel then
-        local pl = self.sessionPanel:GetFrameLevel() or 0
-        self.sessionScroll:SetFrameLevel(pl + 2)
-        if self.sessionContent then
-            self.sessionContent:SetFrameLevel(pl + 3)
-        end
-    end
-    if self.catalogScroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.catalogScroll)
-    end
-    if self.sessionScroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.sessionScroll)
-    end
-    if self.catalogScroll and self.catalogScroll._anScrollBarColumn then
-        PositionLootScrollBarColumn(self.catalogPanel, self.catalogHost, self.catalogScroll._anScrollBarColumn)
-    end
-    if self.sessionScroll and self.sessionScroll._anScrollBarColumn then
-        PositionLootScrollBarColumn(self.sessionPanel, self.sessionHost, self.sessionScroll._anScrollBarColumn)
-    end
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_ApplyClassicScrollBarLayout then
-        if self.catalogScroll then
-            ns.UI_ApplyClassicScrollBarLayout(self.catalogScroll)
-        end
-        if self.sessionScroll then
-            ns.UI_ApplyClassicScrollBarLayout(self.sessionScroll)
-        end
-    elseif ns.UI_ApplyModernScrollBarLayout then
-        if self.catalogScroll then
-            ns.UI_ApplyModernScrollBarLayout(self.catalogScroll)
-        end
-        if self.sessionScroll then
-            ns.UI_ApplyModernScrollBarLayout(self.sessionScroll)
-        end
-    end
-    if ns.UI_RegisterViewportDebug then
-        ns.UI_RegisterViewportDebug(self.catalogHost, "loot_catalog_host")
-        ns.UI_RegisterViewportDebug(self.catalogPanel, "loot_catalog_vp")
-        ns.UI_RegisterViewportDebug(self.sessionHost, "loot_session_host")
-        ns.UI_RegisterViewportDebug(self.sessionPanel, "loot_session_vp")
-        if self.catalogScroll then
-            ns.UI_RegisterViewportDebug(self.catalogScroll, "loot_catalog_scroll")
-            ns.UI_RegisterViewportDebug(self.catalogScroll._anScrollBarColumn, "loot_catalog_bar")
-        end
-        if self.sessionScroll then
-            ns.UI_RegisterViewportDebug(self.sessionScroll, "loot_session_scroll")
-            ns.UI_RegisterViewportDebug(self.sessionScroll._anScrollBarColumn, "loot_session_bar")
-        end
-    end
-    if ns.UI_RegisterDebugElement then
-        if self.tabBar then
-            ns.UI_RegisterDebugElement(self.tabBar, {
-                id = "loot.tabBar",
-                label = "loot.tabBar",
-                note = "Profession tab row",
-            })
-        end
-        if self.modeBar then
-            ns.UI_RegisterDebugElement(self.modeBar, {
-                id = "loot.modeBar",
-                label = "loot.modeBar",
-                note = "Session / Overall mode row",
-            })
-        end
-        if self.resetRow then
-            ns.UI_RegisterDebugElement(self.resetRow, {
-                id = "loot.resetRow",
-                label = "loot.resetRow",
-                note = "Reset session button row",
-            })
-        end
-    end
-end
-
-function LootHistoryUI:LayoutTabs()
-    if not self.main or not self.tabBar or not self.tabButtons then
-        return
-    end
-    local order = GetVisibleTabOrder()
-    for key, btn in pairs(self.tabButtons) do
-        if btn then
-            btn:Hide()
-        end
-    end
-    local w = self.tabBar:GetWidth()
-    if (not w or w < 80) and self.main then
-        w = (self.main:GetWidth() or 0) - (PAD * 2)
-    end
-    if not w or w < 80 then
-        return
-    end
-    local n = #order
-    if n < 1 then
-        return
-    end
-    local row = {}
-    for i = 1, n do
-        row[i] = self.tabButtons[order[i]]
-    end
-    if ns.UI_LayoutStretchRow then
-        ns.UI_LayoutStretchRow(self.tabBar, row, LOOT_TAB_GAP)
-    end
-end
-
-function LootHistoryUI:LayoutModeBtns()
-    if not self.modeBar or not self.modeButtons then
-        return
-    end
-    local w = self.modeBar:GetWidth()
-    if (not w or w < 80) and self.main then
-        w = (self.main:GetWidth() or 0) - (PAD * 2)
-    end
-    if not w or w < 80 then
-        return
-    end
-    local row = { self.modeButtons.session, self.modeButtons.overall }
-    if ns.UI_LayoutStretchRow then
-        ns.UI_LayoutStretchRow(self.modeBar, row, LOOT_TAB_GAP)
-    end
-end
-
-function LootHistoryUI:SetMode(mode)
-    if mode ~= "session" and mode ~= "overall" then return end
-    self.activeMode = mode
-    self:Refresh()
-end
-
-function LootHistoryUI:RefreshModeButtonVisuals()
-    if not self.modeButtons then return end
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-        for _, key in ipairs({ "session", "overall" }) do
-            local btn = self.modeButtons[key]
-            if btn and ns.UI_StyleClassicTabButton then
-                ns.UI_StyleClassicTabButton(btn, key == self.activeMode)
-            end
-        end
-        if self.resetText then
-            if self.activeMode == "overall" then
-                self.resetText:SetText((L and L["LOOT_RESET_OVERALL"]) or "Reset overall")
-            else
-                self.resetText:SetText((L and L["LOOT_RESET_SESSION"]) or "Reset session")
-            end
-        end
-        return
-    end
-    if not ApplyVisuals then return end
-    for _, key in ipairs({ "session", "overall" }) do
-        local btn = self.modeButtons[key]
-        if btn then
-            local sel = key == self.activeMode
-            local bg = sel and COLORS.tabActive or COLORS.tabInactive
-            local br = sel
-                and { COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.86 }
-                or { COLORS.border[1], COLORS.border[2], COLORS.border[3], 0.44 }
-            ApplyVisuals(btn, bg, br)
-            local fs = btn:GetFontString()
-            if fs then
-                if sel then
-                    fs:SetTextColor(COLORS.textBright[1], COLORS.textBright[2], COLORS.textBright[3])
-                else
-                    fs:SetTextColor(COLORS.textDim[1], COLORS.textDim[2], COLORS.textDim[3])
-                end
-            end
-        end
-    end
-    if self.resetText then
-        if self.activeMode == "overall" then
-            self.resetText:SetText((L and L["LOOT_RESET_OVERALL"]) or "Reset overall")
-        else
-            self.resetText:SetText((L and L["LOOT_RESET_SESSION"]) or "Reset session")
-        end
-    end
-end
-
-function LootHistoryUI:OnLootFrameSizeChanged()
-    --- SetSize fires this once per axis; skip the duplicate full relayout+Refresh
-    --- when the resolved size did not actually change since the last pass.
-    local fw = (self.main and self.main:GetWidth()) or 0
-    local fh0 = (self.main and self.main:GetHeight()) or 0
-    if not self._isLootFrameSizing
-        and self._lastLayoutW and self._lastLayoutH
-        and math.abs(fw - self._lastLayoutW) < 0.5
-        and math.abs(fh0 - self._lastLayoutH) < 0.5 then
-        return
-    end
-    self._lastLayoutW, self._lastLayoutH = fw, fh0
-    if self.main and self.sessionHost then
-        local fh = self.main:GetHeight() or 668
-        self.sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))
-    end
-    self:LayoutLootCatalogHost()
-    --- Grip ile resize: sekme yerleşimini throttle et; tam düzen FinishLootFrameSizing’de.
-    if self._isLootFrameSizing then
-        local now = GetTime()
-        if not self._nextLootTabLayoutTime or now >= self._nextLootTabLayoutTime then
-            self._nextLootTabLayoutTime = now + LOOT_LAYOUT_THROTTLE_SEC
-            self:LayoutLootBodyChrome()
-            self:ApplyHeaderTitleClip()
-        end
-        return
-    end
-    self._nextLootTabLayoutTime = nil
-    self:LayoutLootBodyChrome()
-    self:ApplyHeaderTitleClip()
-    self:Refresh()
-    if self._sizeSaveTimer and self._sizeSaveTimer.Cancel then
-        self._sizeSaveTimer:Cancel()
-    end
-    if C_Timer and C_Timer.NewTimer then
-        self._sizeSaveTimer = C_Timer.NewTimer(0.2, function()
-            self._sizeSaveTimer = nil
-            if LootHistoryUI.main then
-                LootHistoryUI:SaveFrameSize()
-            end
-        end)
-    else
-        self:SaveFrameSize()
-    end
-end
-
-local Draw = ns.LootHistoryUIDraw
-
-local function SortFishingCatalogEntries(entries, totals)
-    if Draw and Draw.SortFishingCatalogEntries then
-        return Draw.SortFishingCatalogEntries(entries, totals)
-    end
-    return entries
-end
-
-local function PopulateCatalog(content, entries, totals, tabKey, innerW)
-    local draw = ns.LootHistoryUIDraw
-    if not (draw and draw.PopulateCatalog) then
-        return
-    end
-    draw.PopulateCatalog(content, entries, totals, tabKey, innerW)
-end
-
-local function PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)
-    if Draw and Draw.PopulateSessionList then
-        Draw.PopulateSessionList(content, events, catalogEntries, listCap, emptyMsg, tabKey, startY)
-    end
-end
-
---- Catalog reference glow fade only — no list rebuild (hot path during gathering).
-function LootHistoryUI:RefreshCatalogGlowsOnly()
-    if not self.main or not self.main:IsShown() then
-        return
-    end
-    if self._isLootFrameSizing or self._pauseLootFx then
-        return
-    end
-    local Draw = ns.LootHistoryUIDraw
-    if Draw and Draw.RefreshCatalogGlowStrengths and self.catalogContent then
-        Draw.RefreshCatalogGlowStrengths(self.catalogContent, self.activeTab)
-    end
-end
-
-function LootHistoryUI:Refresh()
-    if not self.main or not self.catalogContent or not self.sessionContent then return end
-    if self._isLootFrameSizing or self._pauseLootFx then
-        return
-    end
-    if not IsValidTab(self.activeTab) then
-        local order = GetVisibleTabOrder()
-        self.activeTab = order[1] or "fishing"
-    end
-    if not (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) and ns.UI_StylePanelInset then
-        if self.catalogPanel then
-            ns.UI_StylePanelInset(self.catalogPanel)
-        end
-        if self.sessionPanel then
-            ns.UI_StylePanelInset(self.sessionPanel)
-        end
-    end
-
-    local isOverall = self.activeMode == "overall"
-    local svc = ns.SessionLootService
-    local entries
-    if self.activeTab == "fishing" then
-        entries = (ns.GetFishingCatalogEntries and ns.GetFishingCatalogEntries()) or {}
-    elseif self.activeTab == "crafted" then
-        entries = {}
-    else
-        entries = (ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(self.activeTab)) or {}
-    end
-
-    --- Catalog: Session vs Overall persisted totals. Last pickups: always session event list (not Overall DB slice).
-    local totals = {}
-    local eventsLastPickups = {}
-    if svc then
-        if self.activeTab == "fishing" then
-            totals = svc:GetItemTotals("fishing", nil, isOverall) or {}
-            --- Last pickups: ALWAYS the session event list (crafted/gathering
-            --- already do this) — overall mode fed multi-day, multi-character
-            --- rows into the "Last N pickups" panel and the Rate text.
-            eventsLastPickups = svc:GetRecentEvents("fishing", nil, false) or {}
-        elseif self.activeTab == "crafted" then
-            totals = svc:GetItemTotals("crafted", nil, isOverall) or {}
-            eventsLastPickups = svc:GetRecentEvents("crafted", nil, false) or {}
-            entries = BuildCraftedCatalogEntries(totals)
-        else
-            local cat = self.activeTab
-            totals = svc:GetItemTotals("gathering", cat, isOverall) or {}
-            eventsLastPickups = svc:GetRecentEvents("gathering", cat, false) or {}
-        end
-    end
-    if self.activeTab == "fishing" and type(entries) == "table" then
-        entries = SortFishingCatalogEntries(entries, totals)
-    end
-    if self.catalogTotalLabel then
-        local totalCopper = ComputeTotalsCopper(totals)
-        local totalFmt = (L and L["LOOT_SECTION_TOTAL_FMT"]) or "Total: %s"
-        local worthStr = (totalCopper > 0) and (FormatCopper(totalCopper) or "") or ((L and L["LOOT_CATALOG_AH_EMPTY"]) or "—")
-        self.catalogTotalLabel:SetFormattedText(totalFmt, worthStr)
-    end
-
-    ClearScrollContent(self.catalogScroll, self.catalogContent)
-    ClearScrollContent(self.sessionScroll, self.sessionContent)
-
-    self:LayoutLootCatalogHost()
-    self:LayoutLootScrollChrome()
-
-    if self.catalogHost and self.catalogHost.Show then
-        self.catalogHost:Show()
-    end
-    if self.catalogPanel and self.catalogPanel.Show then
-        self.catalogPanel:Show()
-    end
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and self.catalogPanel and ns.UI_ApplyClassicInsetPanel then
-        ns.UI_ApplyClassicInsetPanel(self.catalogPanel)
-    end
-
-    if ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.catalogScroll)
-        ns.UI_FinishScrollLayout(self.sessionScroll)
-    end
-
-    local cw = self:GetCatalogInnerWidth()
-    if not cw or cw < 1 then
-        cw = (self.catalogScroll and self.catalogScroll:GetWidth()) or 280
-    end
-    --- Never inflate width — a floor lied to PopulateCatalog about the live
-    --- viewport and kept 2 columns when the scroll area was actually narrow.
-    cw = math.max(80, cw)
-    self.catalogContent:SetWidth(cw)
-    if self.catalogScroll and self.catalogScroll.Show then
-        self.catalogScroll:Show()
-    end
-    if self.catalogContent and self.catalogContent.Show then
-        self.catalogContent:Show()
-    end
-    PopulateCatalog(self.catalogContent, entries, totals, self.activeTab, cw)
-    if self.catalogScroll and self.catalogScroll.UpdateScrollChildRect then
-        pcall(function()
-            self.catalogScroll:UpdateScrollChildRect()
-        end)
-    end
-
-    local sw = math.max((self.sessionScroll and self.sessionScroll:GetWidth()) or 360, 280)
-    self.sessionContent:SetWidth(sw)
-    local cap = GetLastLootListCap()
-    if self.sessionSectionLabel then
-        local fmt = (L and L["LOOT_SECTION_SESSION_FMT"]) or "Last %d pickups"
-        if isOverall then
-            self.sessionSectionLabel:SetText((L and L["LOOT_CHAR_EARNINGS_HEADER"]) or "Earnings by character")
-        else
-            self.sessionSectionLabel:SetFormattedText(fmt, cap)
-        end
-    end
-    local emptyLastPickups = (L and L["LOOT_LAST_PICKUPS_EMPTY"]) or (L and L["LOOT_SESSION_EMPTY"]) or "No recent pickups yet."
-    if self.activeTab == "crafted" then
-        emptyLastPickups = (L and L["LOOT_CRAFTED_EMPTY"]) or emptyLastPickups
-    end
-    --- Overall mode: per-character earnings breakdown (GUID-keyed) above the pickup list.
-    local sessionStartY = 0
-    if isOverall and svc and svc.GetPerCharacterEarnings and Draw and Draw.PopulateCharEarnings then
-        sessionStartY = Draw.PopulateCharEarnings(self.sessionContent, svc:GetPerCharacterEarnings()) or 0
-    end
-    PopulateSessionList(self.sessionContent, eventsLastPickups, entries, cap, emptyLastPickups, self.activeTab, sessionStartY)
-    if ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.catalogScroll)
-        ns.UI_FinishScrollLayout(self.sessionScroll)
-    end
-    if self.catalogScroll and (self.catalogScroll:GetWidth() or 0) < 80 then
-        self:ScheduleDeferredRefresh()
-    end
-    if self.sessionEfficiencyLabel then
-        local eff = ComputeSessionEfficiencyText(eventsLastPickups)
-        self.sessionEfficiencyLabel:SetText(eff or "")
-    end
-
-    LootHistoryUI:RefreshTabButtonVisuals()
-    LootHistoryUI:RefreshModeButtonVisuals()
-    LootHistoryUI:UpdateOverloadTrackerToggle()
-    LootHistoryUI:UpdateLootOverlayToggle()
-end
-
---- Dim overlay HUD toggle when the floating overlay is off.
-function LootHistoryUI:UpdateLootOverlayToggle()
-    local b = self.lootOverlayBtn
-    if not b then
-        return
-    end
-    b:Show()
-    local on = ns.db and ns.db.profile and ns.db.profile.sessionLootOverlayEnabled == true
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-        if b.SetAlpha then
-            b:SetAlpha(1)
-        end
-    elseif b.SetAlpha then
-        b:SetAlpha(on and 1 or 0.45)
-    end
-    LootHistoryUI:ApplyHeaderTitleClip()
-end
-
---- Title string clipped to never run under the window control cluster (overload optional).
-function LootHistoryUI:ApplyHeaderTitleClip()
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-        if self.headerBar and self.overloadTrackerBtn then
-            local extras = {}
-            if self.lootOverlayBtn then
-                extras[#extras + 1] = self.lootOverlayBtn
-            end
-            extras[#extras + 1] = self.overloadTrackerBtn
-            self.headerBar._anShellExtraRight = extras
-        end
-        if self.headerBar and ns.UI_RefreshClassicWindowHeader then
-            ns.UI_RefreshClassicWindowHeader(self.headerBar)
-        end
-        return
-    end
-    local ht = self.headerTitle
-    local logo = self.headerLogo
-    local clip = self.shellRightClip
-    if not ht or not logo or not clip then
-        return
-    end
-    ht:ClearAllPoints()
-    ht:SetPoint("LEFT", logo, "RIGHT", 8, 0)
-    ht:SetPoint("RIGHT", clip, "LEFT", -8, 0)
-end
-
---- Hide overload HUD toggle unless Herbalism or Mining; dim when HUD is off.
-function LootHistoryUI:UpdateOverloadTrackerToggle()
-    local b = self.overloadTrackerBtn
-    if not b then
-        return
-    end
-    local U = ns.Utilities
-    if not U or not U.PlayerOwnsAnyOverloadTrackerProfession or not U.PlayerOwnsAnyOverloadTrackerProfession() then
-        b:Hide()
-        LootHistoryUI:ApplyHeaderTitleClip()
-        return
-    end
-    b:Show()
-    local on = ns.db and ns.db.profile and ns.db.profile.overloadTrackerHudEnabled ~= false
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-        if b.SetAlpha then
-            b:SetAlpha(1)
-        end
-    elseif b.SetAlpha then
-        b:SetAlpha(on and 1 or 0.45)
-    end
-    LootHistoryUI:ApplyHeaderTitleClip()
-end
-
----@param btn Frame|Button
----@param selected boolean
----@param otherTabLootPulse boolean|nil non-selected tab that just received catalog loot for its profession
-local function StyleTabButton(btn, selected, otherTabLootPulse)
-    if not btn then
-        return
-    end
-    --- UI_StyleShellTabButton branches on classic itself and forwards opts,
-    --- so the loot pulse survives the classic skin (gold text emphasis).
-    ns.UI_StyleShellTabButton(btn, selected, { pulse = otherTabLootPulse and not selected })
-end
-
-function LootHistoryUI:RefreshTabButtonVisuals()
-    if not self.tabButtons then
-        return
-    end
-    local order = GetVisibleTabOrder()
-    local svc = ns.SessionLootService
-    for i = 1, #TAB_ORDER do
-        local key = TAB_ORDER[i]
-        local btn = self.tabButtons[key]
-        if btn then
-            local visible = false
-            for j = 1, #order do
-                if order[j] == key then
-                    visible = true
-                    break
-                end
-            end
-            if visible then
-                local sel = key == self.activeTab
-                local pulse = (not sel) and svc and svc.IsTabAttentionActive and svc:IsTabAttentionActive(key)
-                StyleTabButton(btn, sel, pulse)
-                btn:Show()
-            else
-                btn:Hide()
-            end
-        end
-    end
-end
-
-IsValidTab = function(tab)
+local function IsValidTab(tab)
     local order = GetVisibleTabOrder()
     for i = 1, #order do
         if order[i] == tab then
@@ -1129,152 +228,6 @@ IsValidTab = function(tab)
         end
     end
     return false
-end
-
-function LootHistoryUI:IsValidTab(tab)
-    return IsValidTab(tab)
-end
-
-function LootHistoryUI:GetVisibleTabOrder()
-    return GetVisibleTabOrder()
-end
-
-function LootHistoryUI:ResetForUiMode()
-    if self.main then
-        if ns.UI_UnregisterDebugFrame then
-            ns.UI_UnregisterDebugFrame(self.main)
-        end
-        self.main:Hide()
-        --- Discarded subtree must leave BORDER_REGISTRY or every theme/scale
-        --- refresh keeps iterating dead frames after each Classic<->Modern switch.
-        if ns.UI_UnregisterVisuals then
-            ns.UI_UnregisterVisuals(self.main)
-        end
-        if ns.UI_PurgeDebugRegistry then
-            ns.UI_PurgeDebugRegistry()
-        end
-        self.main = nil
-    end
-    self.shell = nil
-    self.headerBar = nil
-    self.tabButtons = nil
-    self.modeButtons = nil
-    self.catalogScroll = nil
-    self.sessionScroll = nil
-end
-
-function LootHistoryUI:RefreshClassicChrome()
-    if not self.main or not (ns.UI_IsClassicUi and ns.UI_IsClassicUi()) then
-        return
-    end
-    if self.catalogPanel and ns.UI_ApplyClassicInsetPanel then
-        ns.UI_ApplyClassicInsetPanel(self.catalogPanel)
-    end
-    if self.sessionPanel and ns.UI_ApplyClassicInsetPanel then
-        ns.UI_ApplyClassicInsetPanel(self.sessionPanel)
-    end
-    if self.resetSessionBtn and ns.UI_StyleClassicPanelButton then
-        ns.UI_StyleClassicPanelButton(self.resetSessionBtn)
-    end
-    if self.tabButtons and ns.UI_StyleClassicTabButton then
-        for _, key in ipairs(TAB_ORDER) do
-            local btn = self.tabButtons[key]
-            if btn and btn:IsShown() then
-                ns.UI_StyleClassicTabButton(btn, key == self.activeTab)
-            end
-        end
-    end
-    if self.modeButtons and ns.UI_StyleClassicTabButton then
-        for _, key in ipairs({ "session", "overall" }) do
-            local btn = self.modeButtons[key]
-            if btn then
-                ns.UI_StyleClassicTabButton(btn, key == self.activeMode)
-            end
-        end
-    end
-    if self.sessionSectionLabel then
-        self.sessionSectionLabel:SetTextColor(1, 0.82, 0)
-    end
-    if self.catalogSectionLabel then
-        self.catalogSectionLabel:SetTextColor(1, 0.82, 0)
-    end
-    if self.catalogTotalLabel then
-        self.catalogTotalLabel:SetTextColor(1, 0.82, 0)
-    end
-    if self.headerBar and ns.UI_RefreshClassicWindowHeader then
-        ns.UI_RefreshClassicWindowHeader(self.headerBar)
-    end
-    self:LayoutLootBodyChrome()
-    if self.settingsBtn and ns.UI_StyleClassicToolButton then
-        ns.UI_StyleClassicToolButton(self.settingsBtn)
-    end
-    if self.recipesBtn and ns.UI_StyleClassicToolButton then
-        ns.UI_StyleClassicToolButton(self.recipesBtn)
-    end
-    if self.hubBtn and ns.UI_StyleClassicToolButton then
-        ns.UI_StyleClassicToolButton(self.hubBtn)
-    end
-    if self.overloadTrackerBtn and ns.UI_StyleClassicToolButton then
-        ns.UI_StyleClassicToolButton(self.overloadTrackerBtn)
-    end
-    if self.lootOverlayBtn and ns.UI_StyleClassicToolButton then
-        ns.UI_StyleClassicToolButton(self.lootOverlayBtn)
-    end
-    self:LayoutLootScrollChrome()
-end
-
-function LootHistoryUI:RefreshTheme()
-    if not self.main then
-        return
-    end
-    if ns.UI_ApplyMainWindowChrome then
-        ns.UI_ApplyMainWindowChrome(self.main)
-    elseif ns.UI_ApplyPanelBackdrop then
-        ns.UI_ApplyPanelBackdrop(self.main)
-    end
-    if ns.UI_RefreshWindowHeader then
-        ns.UI_RefreshWindowHeader(self.headerBar)
-    end
-    if ns.UI_RefreshClassicMainWindowShell then
-        ns.UI_RefreshClassicMainWindowShell(self.main)
-    end
-    if ns.UI_StylePanelInset then
-        if self.catalogPanel then
-            ns.UI_StylePanelInset(self.catalogPanel)
-        end
-        if self.sessionPanel then
-            ns.UI_StylePanelInset(self.sessionPanel)
-        end
-    end
-    self:LayoutLootBodyChrome()
-    self:RefreshClassicChrome()
-    self:LayoutLootScrollChrome()
-    if self.main:IsShown() then
-        self:RefreshModeButtonVisuals()
-        self:RefreshTabButtonVisuals()
-        self:Refresh()
-    end
-    if self.catalogScroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.catalogScroll)
-    end
-    if self.sessionScroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.sessionScroll)
-    end
-end
-
----@param tab "fishing"|"herb"|"mine"|"leather"|"disenchant"
-function LootHistoryUI:SetTab(tab)
-    if not IsValidTab(tab) then
-        return
-    end
-    self.activeTab = tab
-    if ns.db and ns.db.profile then
-        ns.db.profile.lootHistoryActiveTab = tab
-    end
-    if ns.SessionLootService and ns.SessionLootService.ClearTabAttentionForTab then
-        ns.SessionLootService:ClearTabAttentionForTab(tab)
-    end
-    self:Refresh()
 end
 
 local function NormalizeShowArg(which)
@@ -1305,527 +258,641 @@ local function NormalizeShowArg(which)
     return nil
 end
 
-function LootHistoryUI:Show(which)
+local function Draw()
+    return ns.LootHistoryUIDraw
+end
+
+local function AW()
+    return ns.ArtisanWindow
+end
+
+---@class LootHistoryUI
+local LootHistoryUI = {
+    main = nil,
+    activeTab = "fishing",
+    --- "session" = in-memory (resets on login/manual); "overall" = persisted db.global
+    activeMode = "session",
+    tabBar = nil,
+    modeBar = nil,
+    catalogVp = nil,
+    sessionVp = nil,
+    catalogContent = nil,
+    sessionContent = nil,
+    footerStatus = nil,
+    resetBtn = nil,
+    overloadTrackerBtn = nil,
+    lootOverlayBtn = nil,
+    --- Draw checks this to pause the pickup pulse (kept for the Draw OnUpdate contract).
+    _pauseLootFx = false,
+}
+
+-- ── Sub-tab bars ──
+
+--- Re-wrap a ns.UI_CreateSubTabBar for the visible keys and current width (same row-wrap rule
+--- as UI_CreateSubTabBar's wrapRows; the bar keeps every button, hidden ones are skipped).
+local function ReflowSubTabBar(bar, keys, maxW)
+    if not bar or not bar.buttons then return end
+    for _, btn in pairs(bar.buttons) do
+        btn:Hide()
+    end
+    local x, row = 0, 0
+    for i = 1, #keys do
+        local btn = bar.buttons[keys[i]]
+        if btn then
+            local bw = btn:GetWidth() or 0
+            if maxW and maxW > 0 and x + bw > maxW and x > 0 then
+                x = 0
+                row = row + 1
+            end
+            btn:ClearAllPoints()
+            btn:SetPoint("TOPLEFT", btn:GetParent(), "TOPLEFT", x, -(row * (TAB_BTN_H + TAB_BTN_GAP)))
+            btn:Show()
+            x = x + bw + TAB_BTN_GAP
+        end
+    end
+    bar:SetHeight((row + 1) * TAB_BTN_H + row * TAB_BTN_GAP)
+end
+
+local function CreateBar(parent, tabs, activeKey, onSelect)
+    return ns.UI_CreateSubTabBar(parent, {
+        tabs = tabs,
+        activeKey = activeKey,
+        onSelect = onSelect,
+        wrapRows = true,
+        btnHeight = TAB_BTN_H,
+        btnSpacing = TAB_BTN_GAP,
+        iconLeft = TAB_PAD_H,
+        textRight = TAB_PAD_H,
+        activeBarInset = 4,
+        activeBarBottom = 2,
+    })
+end
+
+local function BodyWidth()
+    local f = LootHistoryUI.main
+    local ca = f and f.contentArea
+    local w = ca and ca:GetWidth() or 0
+    if w < 1 and f then
+        w = (f:GetWidth() or WIN_W) - 2 * ((AW() and AW().PADDING) or 10)
+    end
+    return w
+end
+
+function LootHistoryUI:LayoutTabs()
+    if not self.main then return end
+    local w = BodyWidth()
+    ReflowSubTabBar(self.tabBar, GetVisibleTabOrder(), w)
+    ReflowSubTabBar(self.modeBar, { "session", "overall" }, w)
+end
+
+--- Pickup list height follows the window height; the catalog takes the rest.
+function LootHistoryUI:LayoutBody()
+    if not self.main or not self.sessionVp then return end
+    local fh = self.main:GetHeight() or WIN_H
+    self.sessionVp.shell:SetHeight(math.max(SESSION_MIN_H, math.floor(fh * SESSION_FRAC)))
+    self:LayoutTabs()
+    local W = AW()
+    W.SyncScrollChildWidth(self.catalogVp)
+    W.SyncScrollChildWidth(self.sessionVp)
+end
+
+-- ── Header toggles ──
+
+--- Dim the overlay toast toggle when the floating overlay is off.
+function LootHistoryUI:UpdateLootOverlayToggle()
+    local b = self.lootOverlayBtn
+    if not b then
+        return
+    end
+    local on = ns.db and ns.db.profile and ns.db.profile.sessionLootOverlayEnabled == true
+    b:SetAlpha(on and 1 or 0.45)
+end
+
+--- Overload HUD toggle: hidden unless Herbalism or Mining; dimmed while the HUD is off.
+function LootHistoryUI:UpdateOverloadTrackerToggle()
+    local b = self.overloadTrackerBtn
+    if not b then
+        return
+    end
+    local U = ns.Utilities
+    local owns = (U and U.PlayerOwnsAnyOverloadTrackerProfession and U.PlayerOwnsAnyOverloadTrackerProfession()) and true or false
+    if owns ~= b:IsShown() then
+        b:SetShown(owns)
+        AW().LayoutHeaderButtons(self.main)
+    end
+    if not owns then
+        return
+    end
+    local on = ns.db and ns.db.profile and ns.db.profile.overloadTrackerHudEnabled ~= false
+    b:SetAlpha(on and 1 or 0.45)
+end
+
+-- ── Tab / mode visuals ──
+
+--- Active tab + "other tab just got loot" attention (gold border + text on that tab).
+function LootHistoryUI:RefreshTabButtonVisuals()
+    local bar = self.tabBar
+    if not bar then return end
+    bar:SetActiveTab(self.activeTab)
+    local svc = ns.SessionLootService
+    if not (svc and svc.IsTabAttentionActive) then return end
+    for key, btn in pairs(bar.buttons) do
+        if key ~= self.activeTab and btn:IsShown() and svc:IsTabAttentionActive(key) then
+            local r, g, b = 1, 0.82, 0
+            if ns.UI_GetSemanticGoldColor then r, g, b = ns.UI_GetSemanticGoldColor() end
+            if ns.UI_UpdateBorderColor and not btn._wnBlizzardButton then
+                ns.UI_UpdateBorderColor(btn, { r, g, b, 1 })
+            end
+            if btn._text then
+                btn._text:SetTextColor(r, g, b)
+            end
+        end
+    end
+end
+
+local function SetButtonLabel(btn, text)
+    if btn.text then
+        btn.text:SetText(text)
+        btn:SetWidth(math.max(RESET_BTN_W, (btn.text:GetStringWidth() or 0) + 20))
+    elseif btn.SetText then
+        btn:SetText(text)
+    end
+end
+
+function LootHistoryUI:RefreshModeButtonVisuals()
+    if self.modeBar then
+        self.modeBar:SetActiveTab(self.activeMode)
+    end
+    if self.resetBtn then
+        if self.activeMode == "overall" then
+            SetButtonLabel(self.resetBtn, LT("LOOT_RESET_OVERALL", "Reset overall"))
+        else
+            SetButtonLabel(self.resetBtn, LT("LOOT_RESET_SESSION", "Reset session"))
+        end
+    end
+end
+
+-- ── Paint ──
+
+--- Catalog reference glow fade only — no list rebuild (hot path during gathering).
+function LootHistoryUI:RefreshCatalogGlowsOnly()
+    if not self.main or not self.main:IsShown() or self._pauseLootFx then
+        return
+    end
+    local D = Draw()
+    if D and D.RefreshCatalogGlowStrengths and self.catalogContent then
+        D.RefreshCatalogGlowStrengths(self.catalogContent, self.activeTab)
+    end
+end
+
+function LootHistoryUI:ScheduleDeferredRefresh()
+    if self._deferLootRefresh or not (C_Timer and C_Timer.After) then
+        return
+    end
+    self._deferLootRefresh = true
+    C_Timer.After(0, function()
+        self._deferLootRefresh = nil
+        if self.main and self.main:IsShown() then
+            self:LayoutBody()
+            self:Refresh()
+        end
+    end)
+end
+
+function LootHistoryUI:Refresh()
+    if not self.main or not self.catalogContent or not self.sessionContent then return end
+    local D = Draw()
+    if not D then return end
+    if not IsValidTab(self.activeTab) then
+        self.activeTab = GetVisibleTabOrder()[1] or "fishing"
+    end
+
+    local isOverall = self.activeMode == "overall"
+    local svc = ns.SessionLootService
+    local entries
+    if self.activeTab == "fishing" then
+        entries = (ns.GetFishingCatalogEntries and ns.GetFishingCatalogEntries()) or {}
+    elseif self.activeTab == "crafted" then
+        entries = {}
+    else
+        entries = (ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(self.activeTab)) or {}
+    end
+
+    --- Catalog: Session vs Overall totals. Last pickups: always the session event list.
+    local totals, events = {}, {}
+    if svc then
+        if self.activeTab == "fishing" then
+            totals = svc:GetItemTotals("fishing", nil, isOverall) or {}
+            events = svc:GetRecentEvents("fishing", nil, false) or {}
+        elseif self.activeTab == "crafted" then
+            totals = svc:GetItemTotals("crafted", nil, isOverall) or {}
+            events = svc:GetRecentEvents("crafted", nil, false) or {}
+            entries = BuildCraftedCatalogEntries(totals)
+        else
+            totals = svc:GetItemTotals("gathering", self.activeTab, isOverall) or {}
+            events = svc:GetRecentEvents("gathering", self.activeTab, false) or {}
+        end
+    end
+    if self.activeTab == "fishing" and type(entries) == "table" then
+        entries = D.SortFishingCatalogEntries(entries, totals)
+    end
+    if self.catalogTotalLabel then
+        self.catalogTotalLabel:SetFormattedText(LT("LOOT_SECTION_TOTAL_GROSS_FMT", "Total (gross): %s"),
+            FormatGross(ComputeTotalsCopper(totals)))
+    end
+
+    D.ReleaseContent(self.catalogContent)
+    D.ReleaseContent(self.sessionContent)
+    self:LayoutBody()
+
+    local W = AW()
+    local cw = W.SyncScrollChildWidth(self.catalogVp)
+    D.PopulateCatalog(self.catalogContent, entries, totals, self.activeTab, math.max(80, cw))
+
+    local sw = W.SyncScrollChildWidth(self.sessionVp)
+    if sw < 80 then sw = 280 end
+    self.sessionContent:SetWidth(sw)
+    local cap = GetLastLootListCap()
+    if self.sessionSectionLabel then
+        if isOverall then
+            self.sessionSectionLabel:SetText(LT("LOOT_CHAR_VALUE_HEADER", "Value by character (gross)"))
+        else
+            self.sessionSectionLabel:SetFormattedText(LT("LOOT_SECTION_SESSION_FMT", "Last %d pickups"), cap)
+        end
+    end
+    --- One empty message per window: an empty catalog already says so (its pickups are empty too).
+    local emptyLastPickups = false
+    if #entries > 0 then
+        if self.activeTab == "crafted" then
+            emptyLastPickups = LT("LOOT_CRAFTED_EMPTY", "Nothing crafted yet.")
+        else
+            emptyLastPickups = LT("LOOT_LAST_PICKUPS_EMPTY", "No recent pickups yet.")
+        end
+    end
+    --- Overall mode: per-character gross value of THIS tab above the pickup list.
+    local startY = 0
+    if isOverall and svc and svc.GetPerCharacterEarnings then
+        startY = D.PopulateCharEarnings(self.sessionContent, svc:GetPerCharacterEarnings(self.activeTab)) or 0
+    end
+    D.PopulateSessionList(self.sessionContent, events, entries, cap, emptyLastPickups, self.activeTab, startY,
+        { contentWidth = sw })
+    W.SyncScroll(self.catalogVp)
+    W.SyncScroll(self.sessionVp)
+    if cw < 80 then
+        self:ScheduleDeferredRefresh()
+    end
+
+    if self.footerStatus then
+        local sessionTotals = totals
+        if isOverall and svc then
+            if self.activeTab == "fishing" then
+                sessionTotals = svc:GetItemTotals("fishing", nil, false) or {}
+            elseif self.activeTab == "crafted" then
+                sessionTotals = svc:GetItemTotals("crafted", nil, false) or {}
+            else
+                sessionTotals = svc:GetItemTotals("gathering", self.activeTab, false) or {}
+            end
+        end
+        self.footerStatus:SetText(ComputeSessionRateText(self.activeTab, sessionTotals, events) or "")
+    end
+
+    self:RefreshTabButtonVisuals()
+    self:RefreshModeButtonVisuals()
+    self:UpdateOverloadTrackerToggle()
+    self:UpdateLootOverlayToggle()
+end
+
+--- Theme / font switch (PlansTrackerWindow.lua:2807-2844): re-skin the shell, then repaint.
+function LootHistoryUI:RefreshTheme()
+    if not self.main then
+        return
+    end
+    AW().RefreshChrome(self.main)
+    local D = Draw()
+    if D and D.RestyleContent then
+        D.RestyleContent(self.catalogContent)
+        D.RestyleContent(self.sessionContent)
+    end
+    if self.catalogSectionLabel then ns.UI_SetTextColorRole(self.catalogSectionLabel, "Bright") end
+    if self.catalogTotalLabel then ns.UI_SetTextColorRole(self.catalogTotalLabel, "Normal") end
+    if self.sessionSectionLabel then ns.UI_SetTextColorRole(self.sessionSectionLabel, "Bright") end
+    if self.footerStatus then ns.UI_SetTextColorRole(self.footerStatus, "Dim") end
+    if self.main:IsShown() then
+        self:Refresh()
+    end
+end
+
+function LootHistoryUI:SetMode(mode)
+    if mode ~= "session" and mode ~= "overall" then return end
+    self.activeMode = mode
+    self:Refresh()
+end
+
+---@param tab "fishing"|"herb"|"mine"|"leather"|"disenchant"|"others"|"crafted"
+function LootHistoryUI:SetTab(tab)
+    if not IsValidTab(tab) then
+        return
+    end
+    self.activeTab = tab
+    if ns.db and ns.db.profile then
+        ns.db.profile.lootHistoryActiveTab = tab
+    end
+    if ns.SessionLootService and ns.SessionLootService.ClearTabAttentionForTab then
+        ns.SessionLootService:ClearTabAttentionForTab(tab)
+    end
+    self:Refresh()
+end
+
+function LootHistoryUI:IsValidTab(tab)
+    return IsValidTab(tab)
+end
+
+function LootHistoryUI:GetVisibleTabOrder()
+    return GetVisibleTabOrder()
+end
+
+-- ── Reset (footer) ──
+
+local function OnResetClick()
+    local svc = ns.SessionLootService
+    if not svc then
+        return
+    end
+    local self = LootHistoryUI
+    local tab = self.activeTab
+    local tabName = ns.GetGatheringTabDisplayName(tab)
+    local yes = LT("YES_RESET", "Yes, Reset")
+    if self.activeMode == "overall" then
+        --- Persisted history cannot be restored.
+        AW().Confirm(string.format(LT("LOOT_RESET_OVERALL_CONFIRM",
+            "Delete saved overall loot history for %s? This cannot be undone."), tabName), yes, function()
+            if tab == "fishing" or tab == "crafted" then
+                svc:ResetOverall(tab)
+            else
+                svc:ResetOverall("gathering", tab)
+            end
+            self:Refresh()
+        end)
+    else
+        AW().Confirm(string.format(LT("LOOT_RESET_SESSION_CONFIRM", "Clear this session's loot for %s?"), tabName),
+            yes, function()
+                svc:ResetSessionForTab(tab)
+                self:Refresh()
+            end)
+    end
+end
+
+local function ResetTooltipOnEnter(btn)
+    GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+    if LootHistoryUI.activeMode == "overall" then
+        GameTooltip:SetText(LT("LOOT_RESET_OVERALL_TT", "Permanently deletes saved history for this tab."), 1, 1, 1, 1, true)
+    else
+        GameTooltip:SetText(LT("LOOT_RESET_SESSION_TT", "Clears this tab's session loot. History is kept."), 1, 1, 1, 1, true)
+    end
+    GameTooltip:Show()
+end
+
+-- ── Build ──
+
+--- Build the window once (hidden); Show presents it.
+function LootHistoryUI:Build()
+    local W = AW()
+    local live = 0
+    local f = W.Create({
+        name = "ArtisanNexusLootHistoryFrame",
+        title = LT("HUB_RAIL_SESSION_LOOT", "Session Loot"),
+        posKey = "lootHistoryFrame",
+        width = WIN_W,
+        height = WIN_H,
+        minW = MIN_W,
+        minH = MIN_H,
+        maxW = MAX_W,
+        maxH = MAX_H,
+        tileSiblings = true,
+        -- Live drag: cheap reflow only; the repaint is debounced (PlansTrackerWindow.lua:2636-2676).
+        onLive = function()
+            LootHistoryUI:LayoutBody()
+            live = live + 1
+            local token = live
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.15, function()
+                    if token == live and LootHistoryUI.main and LootHistoryUI.main:IsShown() then
+                        LootHistoryUI:Refresh()
+                    end
+                end)
+            end
+        end,
+        onCommit = function()
+            live = live + 1
+            LootHistoryUI:LayoutBody()
+            if LootHistoryUI.main:IsShown() then
+                LootHistoryUI:Refresh()
+            end
+        end,
+    })
+    self.main = f
+
+    -- Header (right to left): close, settings, Artisan Hub, Recipe Matcher, loot overlay toggle,
+    -- overload tracker toggle (Herbalism / Mining only).
+    W.AddHeaderButton(f, {
+        icon = "settings",
+        tooltip = LT("SETTINGS_TAB_TITLE", SETTINGS or "Settings"),
+        onClick = function()
+            ns.OpenAddonSettings()
+        end,
+    })
+    W.AddHeaderButton(f, {
+        texture = "Interface\\AddOns\\ArtisanNexus\\Media\\anlogo",
+        tooltip = LT("HUB_WINDOW_TITLE", "Artisan Hub"),
+        desc = LT("LOOT_OPEN_HUB_DESC", "Profit, queue, orders, market and ledger."),
+        onClick = function()
+            W.ShowHubBeside(f)
+        end,
+    })
+    W.AddHeaderButton(f, {
+        texture = "Interface\\Icons\\INV_Misc_Book_09",
+        tooltip = LT("HUB_RAIL_RECIPE_MATCHER", "Recipe Matcher"),
+        desc = LT("LOOT_OPEN_RECIPES_DESC", "Recipes craftable from your bags."),
+        onClick = function()
+            if ns.RecipeMatcherUI then
+                ns.RecipeMatcherUI:Show({ tileAfter = f })
+            end
+        end,
+    })
+    self.lootOverlayBtn = W.AddHeaderButton(f, {
+        texture = "Interface\\Icons\\INV_Misc_Note_06",
+        tooltip = LT("LOOT_OVERLAY_BTN", "Loot pickup overlay"),
+        desc = LT("LOOT_OVERLAY_BTN_DESC", "Toggle loot toasts."),
+        onClick = function()
+            if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.Toggle then
+                ns.SessionLootOverlayUI:Toggle()
+            end
+            LootHistoryUI:UpdateLootOverlayToggle()
+        end,
+    })
+    self.overloadTrackerBtn = W.AddHeaderButton(f, {
+        texture = "Interface\\Icons\\Spell_Shaman_StaticShock",
+        tooltip = LT("LOOT_OVERLOAD_TRACKER_BTN", "Overload Tracker"),
+        desc = LT("LOOT_OVERLOAD_TRACKER_BTN_DESC",
+            "Floating overload cooldown. Needs Herbalism or Mining."),
+        onClick = function()
+            local p = ns.db and ns.db.profile
+            if not p then
+                return
+            end
+            p.overloadTrackerHudEnabled = not (p.overloadTrackerHudEnabled ~= false)
+            if ns.GatheringOverloadIndicator and ns.GatheringOverloadIndicator.RefreshTracker then
+                ns.GatheringOverloadIndicator:RefreshTracker()
+            end
+            LootHistoryUI:UpdateOverloadTrackerToggle()
+            if ns.RefreshAddonSettings then
+                ns.RefreshAddonSettings()
+            end
+        end,
+    })
+
+    local ca = f.contentArea
+
+    -- Profession tabs + Session / Overall switch (WN sub-tab bars).
+    local tabs = {}
+    for i = 1, #TAB_ORDER do
+        local key = TAB_ORDER[i]
+        tabs[i] = { key = key, label = ns.GetGatheringTabDisplayName(key), hideIcon = true }
+    end
+    local tabBar = CreateBar(ca, tabs, self.activeTab, function(key)
+        LootHistoryUI:SetTab(key)
+    end)
+    tabBar:SetPoint("TOPLEFT", ca, "TOPLEFT", 0, 0)
+    tabBar:SetPoint("TOPRIGHT", ca, "TOPRIGHT", 0, 0)
+    self.tabBar = tabBar
+
+    local modeBar = CreateBar(ca, {
+        { key = "session", label = LT("LOOT_MODE_SESSION", "Session"), hideIcon = true },
+        { key = "overall", label = LT("LOOT_MODE_OVERALL", "Overall"), hideIcon = true },
+    }, self.activeMode, function(key)
+        LootHistoryUI:SetMode(key)
+    end)
+    modeBar:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -BLOCK_GAP)
+    modeBar:SetPoint("TOPRIGHT", tabBar, "BOTTOMRIGHT", 0, -BLOCK_GAP)
+    self.modeBar = modeBar
+
+    -- Catalog heading: "Catalog" left, gross total right.
+    local refRow = CreateFrame("Frame", nil, ca)
+    refRow:SetHeight(SECTION_ROW_H)
+    refRow:SetPoint("TOPLEFT", modeBar, "BOTTOMLEFT", 0, -BLOCK_GAP)
+    refRow:SetPoint("TOPRIGHT", modeBar, "BOTTOMRIGHT", 0, -BLOCK_GAP)
+    local FM = ns.FontManager
+    local labTotal = FM:CreateFontString(refRow, "body", "OVERLAY")
+    labTotal:SetPoint("RIGHT", refRow, "RIGHT", 0, 0)
+    labTotal:SetJustifyH("RIGHT")
+    ns.UI_SetTextColorRole(labTotal, "Normal")
+    labTotal:SetFormattedText(LT("LOOT_SECTION_TOTAL_GROSS_FMT", "Total (gross): %s"), FormatGross(0))
+    self.catalogTotalLabel = labTotal
+    local labRef = FM:CreateFontString(refRow, "subtitle", "OVERLAY")
+    labRef:SetPoint("LEFT", refRow, "LEFT", 0, 0)
+    labRef:SetPoint("RIGHT", labTotal, "LEFT", -8, 0)
+    labRef:SetJustifyH("LEFT")
+    labRef:SetWordWrap(false)
+    labRef:SetText(LT("LOOT_SECTION_REFERENCE", "Catalog"))
+    ns.UI_SetTextColorRole(labRef, "Bright")
+    self.catalogSectionLabel = labRef
+
+    -- Footer: small reset button (left) + session rate status (right).
+    local footer = CreateFrame("Frame", nil, ca)
+    footer:SetPoint("BOTTOMLEFT", ca, "BOTTOMLEFT", 0, 0)
+    footer:SetPoint("BOTTOMRIGHT", ca, "BOTTOMRIGHT", -FOOTER_RIGHT_RESERVE, 0)
+    local resetBtn = ns.UI_CreateThemedButton(footer, LT("LOOT_RESET_SESSION", "Reset session"), RESET_BTN_W)
+    resetBtn:SetPoint("BOTTOMLEFT", footer, "BOTTOMLEFT", 0, 0)
+    resetBtn:SetScript("OnClick", OnResetClick)
+    resetBtn:HookScript("OnEnter", ResetTooltipOnEnter)
+    resetBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    footer:SetHeight(resetBtn:GetHeight() or 32)
+    self.resetBtn = resetBtn
+    local status = FM:CreateFontString(footer, "small", "OVERLAY")
+    status:SetPoint("LEFT", resetBtn, "RIGHT", BLOCK_GAP, 0)
+    status:SetPoint("RIGHT", footer, "RIGHT", 0, 0)
+    status:SetJustifyH("RIGHT")
+    status:SetWordWrap(false)
+    status:SetMaxLines(1)
+    ns.UI_SetTextColorRole(status, "Dim")
+    self.footerStatus = status
+
+    -- Pickup list viewport (fixed share of the height) + its heading.
+    local sesVp = W.CreateScrollViewport(f, ca)
+    sesVp.shell:SetPoint("BOTTOMLEFT", footer, "TOPLEFT", 0, BLOCK_GAP)
+    sesVp.shell:SetPoint("RIGHT", ca, "RIGHT", 0, 0)
+    sesVp.shell:SetHeight(SESSION_MIN_H)
+    self.sessionVp = sesVp
+    self.sessionContent = sesVp.scrollChild
+
+    local sessionRow = CreateFrame("Frame", nil, ca)
+    sessionRow:SetHeight(SECTION_ROW_H)
+    sessionRow:SetPoint("BOTTOMLEFT", sesVp.shell, "TOPLEFT", 0, 2)
+    sessionRow:SetPoint("BOTTOMRIGHT", sesVp.shell, "TOPRIGHT", 0, 2)
+    local labSes = FM:CreateFontString(sessionRow, "subtitle", "OVERLAY")
+    labSes:SetPoint("LEFT", sessionRow, "LEFT", 0, 0)
+    labSes:SetPoint("RIGHT", sessionRow, "RIGHT", 0, 0)
+    labSes:SetJustifyH("LEFT")
+    labSes:SetWordWrap(false)
+    labSes:SetMaxLines(1)
+    ns.UI_SetTextColorRole(labSes, "Bright")
+    self.sessionSectionLabel = labSes
+
+    -- Catalog viewport fills the band between its heading and the pickup heading.
+    local catVp = W.CreateScrollViewport(f, ca)
+    catVp.shell:SetPoint("TOPLEFT", refRow, "BOTTOMLEFT", 0, -2)
+    catVp.shell:SetPoint("TOPRIGHT", refRow, "BOTTOMRIGHT", 0, -2)
+    catVp.shell:SetPoint("BOTTOM", sessionRow, "TOP", 0, BLOCK_GAP)
+    self.catalogVp = catVp
+    self.catalogContent = catVp.scrollChild
+
+    self:LayoutBody()
+end
+
+--- Restore the saved size / anchor (profile.lootHistoryFrame) — profile switch.
+function LootHistoryUI:ApplySavedFrameSize(f)
+    f = f or self.main
+    if not f then
+        return
+    end
+    if not AW().RestorePosition(f) then
+        f:ClearAllPoints()
+        f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    end
+    self:LayoutBody()
+end
+
+--- Open the Session Loot window (open world only; elsewhere a chat line says why).
+---@param which string|nil tab key or alias ("herb", "fishing", "crafted", ...)
+---@param opts table|nil `{ tileAfter = Frame }`: the window this was opened from stays open and
+---   the Session Loot window tiles beside it when the screen has room.
+function LootHistoryUI:Show(which, opts)
     if ns.IsOpenWorld and not ns.IsOpenWorld() then
         if self.main and self.main:IsShown() then
             self.main:Hide()
         end
+        ArtisanNexus:Print(LT("LOOT_OPEN_WORLD_ONLY", "Session Loot is available in the open world only."))
         return
     end
     local w = NormalizeShowArg(which)
     if w then
-        if IsValidTab(w) then
-            self.activeTab = w
-            if ns.db and ns.db.profile then
-                ns.db.profile.lootHistoryActiveTab = w
-            end
-        else
-            local order = GetVisibleTabOrder()
-            local pick = order[1] or w
-            self.activeTab = pick
-            if ns.db and ns.db.profile then
-                ns.db.profile.lootHistoryActiveTab = pick
-            end
+        local pick = IsValidTab(w) and w or GetVisibleTabOrder()[1]
+        self.activeTab = pick
+        if ns.db and ns.db.profile then
+            ns.db.profile.lootHistoryActiveTab = pick
         end
     end
-    if self.main then
-        --- Guard against a collapsed frame only; never stomp a legal user resize
-        --- (resize floor is LOOT_FRAME_MIN_*, well under the default WINDOW_*).
-        local minW = LOOT_MIN_W or LAYOUT.LOOT_FRAME_MIN_WIDTH or 360
-        local minH = LOOT_MIN_H or LAYOUT.LOOT_FRAME_MIN_HEIGHT or 440
-        if (self.main:GetWidth() or 0) < minW - 16 or (self.main:GetHeight() or 0) < minH - 16 then
-            self.main:SetSize(LAYOUT.WINDOW_WIDTH or 600, LAYOUT.WINDOW_HEIGHT or 720)
-        end
-        if ns.UI_PresentCraftWindow then
-            ns.UI_PresentCraftWindow(self.main, "loot")
-        else
-            if ns.UI_CloseSiblingCraftWindows then
-                ns.UI_CloseSiblingCraftWindows("loot")
-            end
-            self.main:Show()
-        end
-        if self.sessionHost then
-            local fh = self.main:GetHeight() or LAYOUT.WINDOW_HEIGHT or 640
-            self.sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))
-        end
-        self:LayoutTabs()
-        self:LayoutModeBtns()
-        self:LayoutLootBodyChrome()
-        self:LayoutLootScrollChrome()
-        self:LayoutLootCatalogHost()
-        self:Refresh()
-        self:ScheduleDeferredRefresh()
-        return
+    if not self.main then
+        self:Build()
+        if not self.main then return end
     end
-
-    local f = CreateFrame("Frame", "ArtisanNexusLootHistoryFrame", UIParent, "BackdropTemplate")
-    f._anPosKey = "lootHistoryFrame"
-    f:SetSize(LAYOUT.WINDOW_WIDTH, LAYOUT.WINDOW_HEIGHT)
-    LootHistoryUI:ApplySavedFrameSize(f)
-    f:SetFrameStrata("DIALOG")
-    f:SetFrameLevel(100)
-    f:SetMovable(true)
-    f:SetResizable(true)
-    f:EnableMouse(true)
-    local rbW, rbH = GetLootFrameBounds()
-    local Chrome = ns.LootHistoryUI_Chrome
-    if Chrome and Chrome.ApplyResizeBounds then
-        Chrome.ApplyResizeBounds(f, LOOT_MIN_W, LOOT_MIN_H, LOOT_MAX_W, LOOT_MAX_H)
-    elseif f.SetResizeBounds then
-        pcall(function()
-            f:SetResizeBounds(LOOT_MIN_W, LOOT_MIN_H, rbW, rbH)
-        end)
-    elseif f.SetMinResize then
-        f:SetMinResize(LOOT_MIN_W, LOOT_MIN_H)
-        f:SetMaxResize(rbW, rbH)
-    end
-    f:SetScript("OnSizeChanged", function()
-        LootHistoryUI:OnLootFrameSizeChanged()
-    end)
-    if ns.UI_ApplyMainWindowChrome then
-        ns.UI_ApplyMainWindowChrome(f)
-    else
-        ApplyPanelBackdrop(f)
-    end
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and f.SetClipsChildren then
-        f:SetClipsChildren(false)
-    end
-
-    local shell = ns.UI_CreateWindowHeader(f, {
-        title = (L and L["ADDON_NAME"]) or "Artisan Nexus",
-        dragFrame = f,
-        onDragStart = function()
-            LootHistoryUI._pauseLootFx = true
-            f:StartMoving()
-        end,
-        onDragStop = function()
-            f:StopMovingOrSizing()
-            LootHistoryUI._pauseLootFx = false
-            LootHistoryUI:SaveFrameSize()
-            LootHistoryUI:Refresh()
-        end,
-        onClose = function()
-            f:Hide()
-        end,
-        showSettings = true,
-        onSettings = OpenAddonSettings,
-        settingsTooltip = {
-            title = (L and L["LOOT_SETTINGS_TOOLTIP"]) or "Artisan Nexus settings",
-        },
-        utilities = {
-            {
-                texture = "Interface\\Icons\\INV_Misc_Book_09",
-                onClick = function()
-                    if ns.RecipeMatcherUI and ns.RecipeMatcherUI.Show then
-                        ns.RecipeMatcherUI:Show()
-                    end
-                end,
-                title = (L and L["LOOT_OPEN_RECIPES"]) or "Recipes",
-                desc = (L and L["LOOT_OPEN_RECIPES_DESC"]) or "",
-            },
-            {
-                texture = "Interface\\Icons\\INV_Misc_Coin_01",
-                onClick = function()
-                    if ns.ArtisanHubUI and ns.ArtisanHubUI.Show then
-                        ns.ArtisanHubUI:Show()
-                    end
-                end,
-                title = (L and L["LOOT_OPEN_HUB"]) or "Hub",
-                desc = (L and L["LOOT_OPEN_HUB_DESC"]) or "",
-            },
-        },
-    })
-    self.shell = shell
-    self.headerBar = shell.bar
-    self.headerLogo = shell.logo
-    self.headerTitle = shell.title
-    self.settingsBtn = shell.settings
-    self.recipesBtn = shell.utilities[1]
-    self.hubBtn = shell.utilities[2]
-
-    local lootOverlayBtn = CreateFrame("Button", nil, shell.bar)
-    lootOverlayBtn:SetSize(26, 26)
-    local overlayAnchor = shell.utilities[2] or shell.settings or shell.close
-    lootOverlayBtn:SetPoint("RIGHT", overlayAnchor, "LEFT", -2, 0)
-    lootOverlayBtn:SetNormalTexture("Interface\\Icons\\INV_Misc_Bag_10")
-    lootOverlayBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
-    lootOverlayBtn:SetScript("OnClick", function()
-        if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.Toggle then
-            ns.SessionLootOverlayUI:Toggle()
-        end
-        LootHistoryUI:UpdateLootOverlayToggle()
-    end)
-    lootOverlayBtn:SetScript("OnEnter", function(btn)
-        GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
-        if GameTooltip.ClearLines then
-            GameTooltip:ClearLines()
-        end
-        local title = (L and L["LOOT_OVERLAY_BTN"]) or "Session loot overlay"
-        local desc = (L and L["LOOT_OVERLAY_BTN_DESC"]) or "Toggle on-screen loot toasts (icon, name, price)."
-        GameTooltip:AddLine(title, 1, 1, 1)
-        GameTooltip:AddLine(desc, 0.85, 0.85, 0.85, true)
-        GameTooltip:Show()
-    end)
-    lootOverlayBtn:SetScript("OnLeave", function()
-        GameTooltip:Hide()
-    end)
-    self.lootOverlayBtn = lootOverlayBtn
-
-    local overloadTrackerBtn = CreateFrame("Button", nil, shell.bar)
-    overloadTrackerBtn:SetSize(26, 26)
-    local overloadAnchor = lootOverlayBtn
-    overloadTrackerBtn:SetPoint("RIGHT", overloadAnchor, "LEFT", -2, 0)
-    overloadTrackerBtn:SetNormalTexture("Interface\\Icons\\Spell_Shaman_StaticShock")
-    overloadTrackerBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
-    overloadTrackerBtn:SetScript("OnClick", function()
-        if not ns.db or not ns.db.profile then
-            return
-        end
-        ns.db.profile.overloadTrackerHudEnabled = not (ns.db.profile.overloadTrackerHudEnabled ~= false)
-        if ns.GatheringOverloadIndicator and ns.GatheringOverloadIndicator.RefreshTracker then
-            ns.GatheringOverloadIndicator:RefreshTracker()
-        end
-        LootHistoryUI:UpdateOverloadTrackerToggle()
-    end)
-    overloadTrackerBtn:SetScript("OnEnter", function(btn)
-        GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
-        if GameTooltip.ClearLines then
-            GameTooltip:ClearLines()
-        end
-        local title = (L and L["LOOT_OVERLOAD_TRACKER_BTN"]) or "Overload tracker"
-        local desc = (L and L["LOOT_OVERLOAD_TRACKER_BTN_DESC"]) or "Show or hide the floating overload cooldown tracker (Herbalism / Mining)."
-        GameTooltip:AddLine(title, 1, 1, 1)
-        GameTooltip:AddLine(desc, 0.85, 0.85, 0.85, true)
-        GameTooltip:Show()
-    end)
-    overloadTrackerBtn:SetScript("OnLeave", function()
-        GameTooltip:Hide()
-    end)
-    self.overloadTrackerBtn = overloadTrackerBtn
-    self.shellRightClip = lootOverlayBtn
-    if shell.bar then
-        shell.bar._anShellExtraRight = { lootOverlayBtn, overloadTrackerBtn }
-    end
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_StyleClassicToolButton then
-        ns.UI_StyleClassicToolButton(lootOverlayBtn)
-        ns.UI_StyleClassicToolButton(overloadTrackerBtn)
-    end
-    LootHistoryUI:UpdateLootOverlayToggle()
-    if ns.UI_LayoutModernShellHeader and shell.bar then
-        ns.UI_LayoutModernShellHeader(shell.bar)
-    end
-    LootHistoryUI:ApplyHeaderTitleClip()
-
-    local function LootTabLabel(key)
-        if ns.GetGatheringTabDisplayName then
-            return ns.GetGatheringTabDisplayName(key)
-        end
-        local map = {
-            fishing = "LOOT_TAB_FISHING",
-            herb = "LOOT_GATHER_HERB",
-            mine = "LOOT_GATHER_MINE",
-            leather = "LOOT_GATHER_LEATHER",
-            disenchant = "LOOT_GATHER_DE",
-            others = "LOOT_GATHER_OTHERS",
-            crafted = "LOOT_TAB_CRAFTED",
-        }
-        local fallbacks = {
-            fishing = "Fishing",
-            herb = "Herbalism",
-            mine = "Mining",
-            leather = "Leatherworking",
-            disenchant = "Enchanting",
-            others = "Others",
-            crafted = "Crafted",
-        }
-        local lk = map[key]
-        if lk and ns.SafeLocaleString then
-            local s = ns.SafeLocaleString(lk, nil)
-            if s then
-                return s
-            end
-        end
-        return fallbacks[key] or ns.CoerceUiString(key, "?")
-    end
-
-    local labels = {
-        fishing = LootTabLabel("fishing"),
-        herb = LootTabLabel("herb"),
-        mine = LootTabLabel("mine"),
-        leather = LootTabLabel("leather"),
-        disenchant = LootTabLabel("disenchant"),
-        others = LootTabLabel("others"),
-        crafted = LootTabLabel("crafted"),
-    }
-
-    local classicLoot = ns.UI_IsClassicUi and ns.UI_IsClassicUi()
-    local btnTemplate = (ns.UI_ClassicButtonTemplate and ns.UI_ClassicButtonTemplate()) or "BackdropTemplate"
-
-    local function AssignLootButtonLabel(btn, text)
-        if classicLoot then
-            btn._anClassicNativePanel = true
-            if ns.UI_SetNativePanelButtonText then
-                ns.UI_SetNativePanelButtonText(btn, text)
-            elseif btn.SetText then
-                btn:SetText(text)
-            end
-        else
-            local t = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            --- Stretch-row tabs get narrow (7 tabs at min width); never wrap/overflow.
-            t:SetPoint("LEFT", btn, "LEFT", 2, 0)
-            t:SetPoint("RIGHT", btn, "RIGHT", -2, 0)
-            t:SetJustifyH("CENTER")
-            t:SetWordWrap(false)
-            t:SetMaxLines(1)
-            t:SetText(text)
-            btn:SetFontString(t)
-        end
-    end
-
-    local tabBar = CreateFrame("Frame", nil, f)
-    self.tabBar = tabBar
-    tabBar:SetHeight(LOOT_TAB_BAR_H)
-
-    self.tabButtons = {}
-    for i = 1, #TAB_ORDER do
-        local key = TAB_ORDER[i]
-        local b = CreateFrame("Button", nil, tabBar, btnTemplate)
-        b:SetParent(tabBar)
-        b:SetHeight(LOOT_TAB_H)
-        AssignLootButtonLabel(b, labels[key] or key)
-        if classicLoot and ns.UI_StyleClassicTabButton then
-            ns.UI_StyleClassicTabButton(b, key == self.activeTab)
-        end
-        b:Show()
-        b:SetScript("OnClick", function()
-            LootHistoryUI:SetTab(key)
-        end)
-        self.tabButtons[key] = b
-    end
-
-    local modeBar = CreateFrame("Frame", nil, f)
-    modeBar:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -8)
-    modeBar:SetPoint("TOPRIGHT", tabBar, "BOTTOMRIGHT", 0, -8)
-    modeBar:SetHeight(LOOT_TAB_H)
-    self.modeBar = modeBar
-
-    local modeLabels = {
-        session = (L and L["LOOT_MODE_SESSION"]) or "Session",
-        overall = (L and L["LOOT_MODE_OVERALL"]) or "Overall",
-    }
-    self.modeButtons = {}
-    for _, key in ipairs({ "session", "overall" }) do
-        local mb = CreateFrame("Button", nil, modeBar, btnTemplate)
-        mb:SetParent(modeBar)
-        mb:SetHeight(LOOT_TAB_H)
-        AssignLootButtonLabel(mb, modeLabels[key] or key)
-        mb:SetScript("OnClick", function()
-            LootHistoryUI:SetMode(key)
-        end)
-        if classicLoot and ns.UI_StyleClassicTabButton then
-            ns.UI_StyleClassicTabButton(mb, key == self.activeMode)
-        end
-        mb:Show()
-        self.modeButtons[key] = mb
-    end
-
-    local resetRow = CreateFrame("Frame", nil, f)
-    resetRow:SetPoint("TOPLEFT", modeBar, "BOTTOMLEFT", 0, -4)
-    resetRow:SetPoint("TOPRIGHT", modeBar, "BOTTOMRIGHT", 0, -4)
-    resetRow:SetHeight(LOOT_TAB_H)
-    self.resetRow = resetRow
-
-    local resetSessionBtn = CreateFrame("Button", nil, resetRow, btnTemplate)
-    resetSessionBtn:SetHeight(LOOT_TAB_H)
-    resetSessionBtn:SetPoint("TOPLEFT", resetRow, "TOPLEFT", 0, 0)
-    resetSessionBtn:SetPoint("TOPRIGHT", resetRow, "TOPRIGHT", 0, 0)
-    AssignLootButtonLabel(resetSessionBtn, (L and L["LOOT_RESET_SESSION"]) or "Reset session")
-    if resetSessionBtn.GetFontString then
-        self.resetText = resetSessionBtn:GetFontString()
-    end
-    self.resetSessionBtn = resetSessionBtn
-    resetSessionBtn:SetScript("OnClick", function()
-        local svc = ns.SessionLootService
-        if not svc then
-            return
-        end
-        if LootHistoryUI.activeMode == "overall" then
-            if LootHistoryUI.activeTab == "fishing" then
-                svc:ResetOverall("fishing")
-            elseif LootHistoryUI.activeTab == "crafted" then
-                svc:ResetOverall("crafted")
-            else
-                svc:ResetOverall("gathering", LootHistoryUI.activeTab)
-            end
-        else
-            svc:ResetSessionForTab(LootHistoryUI.activeTab)
-        end
-        LootHistoryUI:Refresh()
-    end)
-    if classicLoot and ns.UI_StyleClassicPanelButton then
-        ns.UI_StyleClassicPanelButton(resetSessionBtn)
-    elseif not classicLoot and ns.UI_StylePanelButton then
-        ns.UI_StylePanelButton(resetSessionBtn)
-    end
-
-    --- Bottom panel: larger share of height (SESSION_FRAC); explicit height so scroll works.
-    local sessionHost = CreateFrame("Frame", nil, f)
-    local bodyHInset = BodyHInset()
-    --- Bottom-right corner needs BOTH axes cleared of the border art; take
-    --- whichever clearance (grip footprint vs. border-safe inset) is larger.
-    local bodyBottomClearance = math.max(LOOT_BOTTOM_CLEARANCE, bodyHInset)
-    sessionHost:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -bodyHInset, bodyBottomClearance)
-    sessionHost:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", bodyHInset, bodyBottomClearance)
-    do
-        local fh = f:GetHeight() or LAYOUT.WINDOW_HEIGHT or 640
-        sessionHost:SetHeight(math.max(140, math.floor(fh * SESSION_FRAC)))
-    end
-    self.sessionHost = sessionHost
-
-    local sessionPanel = CreateFrame("Frame", nil, sessionHost, "BackdropTemplate")
-    self.sessionPanel = sessionPanel
-    ApplyLootInsetToHost(sessionPanel, sessionHost)
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(sessionPanel)
-    end
-
-    local labSes = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    --- Split row: left / right halves so efficiency text never overlaps the session heading at narrow widths.
-    labSes:SetPoint("BOTTOMLEFT", sessionHost, "TOPLEFT", 4, 5)
-    labSes:SetPoint("BOTTOMRIGHT", sessionHost, "TOP", -4, 5)
-    labSes:SetJustifyH("LEFT")
-    labSes:SetWordWrap(false)
-    labSes:SetMaxLines(1)
-    labSes:SetTextColor(COLORS.textBright[1], COLORS.textBright[2], COLORS.textBright[3])
-    self.sessionSectionLabel = labSes
-    do
-        local fmt = (L and L["LOOT_SECTION_SESSION_FMT"]) or "Last %d pickups"
-        labSes:SetFormattedText(fmt, GetLastLootListCap())
-    end
-    local labEff = f:CreateFontString(nil, "OVERLAY", (ns.UI_FONTS and ns.UI_FONTS.WINDOW_META) or "GameFontHighlightSmall")
-    labEff:SetPoint("BOTTOMLEFT", sessionHost, "TOP", 4, 5)
-    labEff:SetPoint("BOTTOMRIGHT", sessionHost, "TOPRIGHT", -4, 5)
-    labEff:SetJustifyH("RIGHT")
-    labEff:SetWordWrap(false)
-    labEff:SetMaxLines(1)
-    labEff:SetText("")
-    labEff:SetTextColor(COLORS.textDim[1], COLORS.textDim[2], COLORS.textDim[3], 1)
-    self.sessionEfficiencyLabel = labEff
-
-    local refRow = CreateFrame("Frame", nil, f)
-    refRow:SetPoint("TOPLEFT", resetRow, "BOTTOMLEFT", 0, -4)
-    refRow:SetPoint("TOPRIGHT", resetRow, "BOTTOMRIGHT", 0, -4)
-    refRow:SetHeight(22)
-    self.refRow = refRow
-
-    local labRef = refRow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    labRef:SetPoint("LEFT", refRow, "LEFT", 0, 0)
-    labRef:SetJustifyH("LEFT")
-    labRef:SetText((L and L["LOOT_SECTION_REFERENCE"]) or "Catalog")
-    labRef:SetTextColor(COLORS.textBright[1], COLORS.textBright[2], COLORS.textBright[3])
-    self.catalogSectionLabel = labRef
-
-    local labTotal = refRow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    labTotal:SetPoint("RIGHT", refRow, "RIGHT", 0, 0)
-    labTotal:SetJustifyH("RIGHT")
-    labTotal:SetTextColor(COLORS.textBright[1], COLORS.textBright[2], COLORS.textBright[3])
-    local totalFmt = (L and L["LOOT_SECTION_TOTAL_FMT"]) or "Total: %s"
-    labTotal:SetFormattedText(totalFmt, "0c")
-    labRef:SetPoint("RIGHT", labTotal, "LEFT", -8, 0)
-    self.catalogTotalLabel = labTotal
-
-    local catalogHost = CreateFrame("Frame", nil, f)
-    catalogHost:SetPoint("TOPLEFT", refRow, "BOTTOMLEFT", 0, -4)
-    catalogHost:SetPoint("TOPRIGHT", refRow, "BOTTOMRIGHT", 0, -4)
-    catalogHost:SetPoint("BOTTOM", sessionHost, "TOP", 0, LOOT_SESSION_LABEL_BAND)
-    self.catalogHost = catalogHost
-
-    local catalogPanel = CreateFrame("Frame", nil, catalogHost, "BackdropTemplate")
-    self.catalogPanel = catalogPanel
-    ApplyLootInsetToHost(catalogPanel, catalogHost)
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(catalogPanel)
-    end
-
-    local catScroll, catContent = ns.UI_AttachThemedScroll(catalogPanel, LootScrollAttachOpts(catalogHost, catalogPanel))
-    self.catalogScroll = catScroll
-    self.catalogContent = catContent
-    self:HookLootScrollWidthSync()
-
-    local sesScroll, sesContent = ns.UI_AttachThemedScroll(sessionPanel, LootScrollAttachOpts(sessionHost, sessionPanel))
-    self.sessionScroll = sesScroll
-    self.sessionContent = sesContent
-    self.sessionPanel = sessionPanel
-
-    local grip = CreateFrame("Button", nil, f)
-    grip:SetFrameLevel(f:GetFrameLevel() + 20)
-    grip:SetSize(LOOT_GRIP_SIZE, LOOT_GRIP_SIZE)
-    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -LOOT_GRIP_INSET_X, LOOT_GRIP_INSET_Y)
-    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
-    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
-    grip:SetScript("OnMouseDown", function()
-        LootHistoryUI._isLootFrameSizing = true
-        LootHistoryUI._pauseLootFx = true
-        f:StartSizing("BOTTOMRIGHT")
-        f:SetScript("OnUpdate", LootFrameSizingPoll)
-    end)
-    grip:SetScript("OnMouseUp", function()
-        f:StopMovingOrSizing()
-        FinishLootFrameSizing()
-    end)
-    self.resizeGrip = grip
-
-    self.main = f
-    f:SetScript("OnShow", function()
-        local rbW, rbH = GetLootFrameBounds()
-        if f.SetResizeBounds then
-            pcall(function()
-                f:SetResizeBounds(LOOT_MIN_W, LOOT_MIN_H, rbW, rbH)
-            end)
-        elseif f.SetMaxResize then
-            f:SetMaxResize(rbW, rbH)
-        end
-        LootHistoryUI:LayoutTabs()
-        LootHistoryUI:LayoutModeBtns()
-        LootHistoryUI:LayoutLootBodyChrome()
-        LootHistoryUI:RefreshTabButtonVisuals()
-        LootHistoryUI:RefreshModeButtonVisuals()
-        if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-            LootHistoryUI:RefreshClassicChrome()
-        end
-        LootHistoryUI:LayoutLootCatalogHost()
-        LootHistoryUI:LayoutLootScrollChrome()
-        LootHistoryUI:Refresh()
-        LootHistoryUI:ScheduleDeferredRefresh()
-    end)
-    LootHistoryUI:LayoutLootBodyChrome()
-    LootHistoryUI:LayoutTabs()
-    LootHistoryUI:LayoutModeBtns()
-    self:RefreshClassicChrome()
-    self:LayoutLootCatalogHost()
-    self:LayoutLootScrollChrome()
-    if ns.UI_PresentCraftWindow then
-        ns.UI_PresentCraftWindow(f, "loot")
-    else
-        f:Show()
-    end
+    AW().Present(self.main, opts)
+    self:LayoutBody()
     self:Refresh()
     self:ScheduleDeferredRefresh()
 end
 
 function LootHistoryUI:Hide()
-    self._isLootFrameSizing = false
-    self._pauseLootFx = false
-    self._nextLootTabLayoutTime = nil
-    if self.main then
-        self.main:SetScript("OnUpdate", nil)
-    end
-    if self._sizeSaveTimer and self._sizeSaveTimer.Cancel then
-        pcall(function()
-            self._sizeSaveTimer:Cancel()
-        end)
-        self._sizeSaveTimer = nil
-    end
     if self.main then
         self.main:Hide()
     end

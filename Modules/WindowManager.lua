@@ -1,0 +1,534 @@
+--[[
+    Warband Nexus - Window Manager
+    Centralized window lifecycle management for all addon frames.
+
+    Responsibilities:
+    - Hierarchical ESC close: popups first, then floating windows, then main window.
+    - Combat safety: hide all windows on PLAYER_REGEN_DISABLED, restore on PLAYER_REGEN_ENABLED.
+    - Frame strata tiers + example windows: see PRIORITY/strata contract after `STRATA` in this file (`MAIN_SHELL` chrome is orthogonal—layout only).
+    - Single ESC key handler pattern (avoids UISpecialFrames taint issues).
+    - ToggleGameMenu: use hooksecurefunc ONLY — never replace the global with addon Lua; that
+      taints ESC and Blizzard’s ToggleGameMenu then fails on protected calls (e.g. SpellStopCasting).
+
+    Usage:
+        ns.WindowManager:Register(frame, priority, closeFunc)
+        ns.WindowManager:Unregister(frame)
+        ns.WindowManager:InstallESCHandler(frame)
+
+    Priority levels (higher = closes first on ESC):
+        MAIN     = 10   -- Main addon window
+        FLOATING = 20   -- Companion/detail windows (ProfessionInfo, RecipeCompanion, PlansTracker)
+        POPUP    = 30   -- Dialogs, popups (GoldManagement, InformationDialog, TryCountPopup, etc.)
+]]
+
+local ADDON_NAME, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
+
+local WindowManager = {}
+ns.WindowManager = WindowManager
+
+local IsDebugModeEnabled = ns.IsDebugModeEnabled
+
+---Chat debug (Lua 5.1): only when profile debugMode is on (matches ns.DebugPrint / Modules/UI.lua).
+local function DebugWarbandEsc(msg, ...)
+    if not IsDebugModeEnabled or not IsDebugModeEnabled() then return end
+    local W = ns.ArtisanNexus
+    if not (W and W.Print) then return end
+    local text
+    if select("#", ...) > 0 then
+        local ok, s = pcall(string.format, msg, ...)
+        text = ok and s or tostring(msg)
+    else
+        text = tostring(msg)
+    end
+    W:Print("|cff00ccff[WN ESC]|r " .. text)
+end
+
+-- Priority constants
+WindowManager.PRIORITY = {
+    MAIN     = 10,
+    FLOATING = 20,
+    POPUP    = 30,
+}
+
+-- Recommended strata/level per priority tier
+-- WoW strata order: FULLSCREEN_DIALOG > FULLSCREEN > DIALOG > HIGH > MEDIUM > LOW > BACKGROUND
+-- MAIN uses MEDIUM so default Blizzard panels (same strata) and HIGH-strata windows (bags, bank)
+-- can stack above the addon when focused — avoids trapping the UI under a DIALOG-layer main frame.
+-- FLOATING sits in HIGH so it stays above MAIN without needing FULLSCREEN_DIALOG.
+WindowManager.STRATA = {
+    [10] = { strata = "MEDIUM",             level = 50 },
+    [20] = { strata = "HIGH",               level = 120 },
+    [30] = { strata = "FULLSCREEN_DIALOG", level = 300 },
+}
+
+--[[============================================================================
+PRIORITY VS STRATA (addon contract — keep new windows consistent)
+
+Who wins on ESC (`CloseTopWindow`): **only** the numeric PRIORITY tier (POPUP >
+FLOATING > MAIN). Tie-breakers: higher `FrameLevel`, then later registration index.
+
+**Drawing order:** **`FrameStrata` first**, then `FrameLevel`. `ApplyStrata`
+implements the tier defaults below; callers may bump `FrameLevel` after `ApplyStrata`
+(e.g. settings panel stacks above other HIGH frames).
+
+Rough map (grep `WindowManager:ApplyStrata` / `:Register` for the live list):
+
+- **MAIN (`PRIORITY.MAIN`):** MEDIUM @ 50 — main Warband Nexus window (`Modules/UI.lua`).
+- **FLOATING (`PRIORITY.FLOATING`):** HIGH @ 120 — detached companions /
+  workspaces that must sit above the main window without blocking the whole UI:
+  Recipe Companion, Profession Info, Plans Tracker (`Modules/UI/*Window.lua`).
+- **POPUP (`PRIORITY.POPUP`):** FULLSCREEN_DIALOG @ 300 — blocking / modal-ish
+  dialogs that should chew ESC before lower tiers: `WindowFactory` dialogs
+  (`Modules/UI/WindowFactory.lua`), InformationDialog, reminder alert shell,
+  schema reload (`Core.lua`), Try Count popup (`UI_ShowTryCountPopup`).
+
+**Mixed case — Settings (`SettingsUI.lua`):** `ApplyStrata(..., FLOATING)` so the
+panel stays **HIGH** (does not obscure other FULLSCREEN_DIALOG content), but
+`Register(..., POPUP)` so ESC ordering still treats closing it like other
+high-priority UI; **keyboard capture stays off** (`EnableKeyboard(false)`) —
+see comments there.
+
+**Outside this registry:** Vault / Saved Instances menus, changelog backdrop, and
+similar frames may choose their own strata and ESC path (`UISpecialFrames` hooks,
+opaque backdrop, etc.) without `Register` — they are intentionally not stacked by
+the hierarchy above.
+============================================================================]]
+
+-- Internal registry: { { frame, priority, closeFunc, wasVisibleBeforeCombat } }
+local registry = {}
+
+-- REGISTRATION
+
+--[[
+    Register a window with the manager.
+
+    @param frame      Frame   - The window frame
+    @param priority   number  - Priority level (use WindowManager.PRIORITY constants)
+    @param closeFunc  function|nil - Custom close function (default: frame:Hide())
+]]
+function WindowManager:Register(frame, priority, closeFunc)
+    if not frame then return end
+    -- Remove existing entry for same frame (re-registration)
+    self:Unregister(frame)
+    registry[#registry + 1] = {
+        frame    = frame,
+        priority = priority or self.PRIORITY.FLOATING,
+        closeFunc = closeFunc,
+        wasVisibleBeforeCombat = false,
+    }
+end
+
+function WindowManager:Unregister(frame)
+    if not frame then return end
+    for i = #registry, 1, -1 do
+        if registry[i].frame == frame then
+            table.remove(registry, i)
+        end
+    end
+end
+
+-- ESC HIERARCHY
+
+--[[
+    Close the highest-priority visible window.
+    @return boolean - true if a window was closed, false if nothing to close
+]]
+function WindowManager:CloseTopWindow()
+    -- Dropdown flyouts (Columns, sort, char picker, settings comboboxes) close before any registered window.
+    if ns.UI_CloseOpenDropdownMenus and ns.UI_CloseOpenDropdownMenus() then
+        return true
+    end
+    -- Pick the topmost visible window: highest priority, then highest FrameLevel,
+    -- then latest registration index (typical "opened last" among equal strata).
+    local best = nil
+    local bestPriority = -1
+    local bestLevel = -1
+    local bestIndex = 0
+    for i = 1, #registry do
+        local entry = registry[i]
+        local frame = entry.frame
+        if frame and frame:IsShown() then
+            local p = entry.priority
+            local lvl = frame:GetFrameLevel() or 0
+            if p > bestPriority
+                or (p == bestPriority and lvl > bestLevel)
+                or (p == bestPriority and lvl == bestLevel and i > bestIndex) then
+                best = entry
+                bestPriority = p
+                bestLevel = lvl
+                bestIndex = i
+            end
+        end
+    end
+    if best then
+        if best.frame and best.frame.GetName and best.frame:GetName() == "ArtisanNexusSettingsPanel" then
+            DebugWarbandEsc("[H3] CloseTopWindow picked ArtisanNexusSettingsPanel (pri=%s)", tostring(best.priority))
+        end
+        if best.closeFunc then
+            best.closeFunc()
+        else
+            best.frame:Hide()
+        end
+        return true
+    end
+    return false
+end
+
+--[[
+    Install the standardized ESC key handler on a frame.
+    This replaces UISpecialFrames and individual OnKeyDown handlers.
+
+    The handler calls CloseTopWindow() which respects the priority hierarchy:
+    - If a popup is open, ESC closes the popup (not the floating/main window)
+    - If only the main window is open, ESC closes the main window
+    - If nothing is open, ESC propagates to the game (opens Game Menu)
+]]
+function WindowManager:InstallESCHandler(frame)
+    if not frame then return end
+    if not InCombatLockdown() then
+        frame:EnableKeyboard(true)
+        frame:SetPropagateKeyboardInput(true)
+    end
+    frame:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            -- Consume ESC first, then close. If nothing closed, re-propagate.
+            if not InCombatLockdown() then self:SetPropagateKeyboardInput(false) end
+            local closed = ns.WindowManager:CloseTopWindow()
+            if closed then
+                -- Block the parallel Blizzard ESC path (ToggleGameMenu / CloseAllWindows hooks)
+                -- from closing a second frame on the same ESC press.
+                ns._wnEscJustHandled = true
+                C_Timer.After(0, function() ns._wnEscJustHandled = nil end)
+            end
+            if not InCombatLockdown() then
+                if closed then
+                    -- Leaving propagate false on the key receiver (e.g. main window) breaks
+                    -- further ESC / bindings. Restore next frame even if this frame hid itself.
+                    C_Timer.After(0, function()
+                        if self and self.SetPropagateKeyboardInput and not InCombatLockdown() then
+                            self:SetPropagateKeyboardInput(true)
+                        end
+                    end)
+                else
+                    self:SetPropagateKeyboardInput(true)
+                end
+            end
+        else
+            if not InCombatLockdown() then self:SetPropagateKeyboardInput(true) end
+        end
+    end)
+end
+
+-- STRATA / LEVEL HELPERS
+
+--[[
+    Apply the recommended strata and level for a given priority.
+    @param frame    Frame  - The window frame
+    @param priority number - Priority level (MAIN, FLOATING, POPUP)
+]]
+function WindowManager:ApplyStrata(frame, priority)
+    if not frame then return end
+    local config = self.STRATA[priority]
+    if config then
+        frame:SetFrameStrata(config.strata)
+        frame:SetFrameLevel(config.level)
+    end
+end
+
+-- COMBAT HIDE / RESTORE
+
+local combatFrame = CreateFrame("Frame")
+combatFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+combatFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+combatFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_REGEN_DISABLED" then
+        -- Combat started: hide all visible addon windows, remember state
+        for i = 1, #registry do
+            local entry = registry[i]
+            if entry.frame and entry.frame:IsShown() then
+                entry.wasVisibleBeforeCombat = true
+                entry.frame:Hide()
+            else
+                entry.wasVisibleBeforeCombat = false
+            end
+        end
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        -- Combat ended: restore windows that were visible before combat
+        for i = 1, #registry do
+            local entry = registry[i]
+            if entry.wasVisibleBeforeCombat and entry.frame then
+                entry.frame:Show()
+                -- Re-enable keyboard after combat restore (EnableKeyboard is not sticky across Hide/Show).
+                -- Settings panel intentionally keeps keyboard off so the game binding stack keeps working.
+                if not InCombatLockdown() then
+                    local skipKb = entry.frame.GetName and entry.frame:GetName() == "ArtisanNexusSettingsPanel"
+                    if not skipKb then
+                        if entry.frame.EnableKeyboard then
+                            entry.frame:EnableKeyboard(true)
+                        end
+                        if entry.frame.SetPropagateKeyboardInput then
+                            entry.frame:SetPropagateKeyboardInput(true)
+                        end
+                    elseif entry.frame.EnableKeyboard then
+                        entry.frame:EnableKeyboard(false)
+                    end
+                end
+                entry.wasVisibleBeforeCombat = false
+            end
+        end
+    end
+end)
+
+-- DRAG PROTECTION HELPER
+
+local function StartScaledDrag(dragFrame, moveFrame)
+    local left = moveFrame:GetLeft()
+    local top = moveFrame:GetTop()
+    if not left or not top then return end
+
+    local frameScale = moveFrame:GetEffectiveScale() or 1
+    if frameScale <= 0 then frameScale = 1 end
+
+    local cx, cy = GetCursorPosition()
+    local leftPx = left * frameScale
+    local topPx = top * frameScale
+
+    dragFrame._wnDragState = {
+        moveFrame = moveFrame,
+        frameScale = frameScale,
+        offsetX = cx - leftPx,
+        offsetY = cy - topPx,
+    }
+
+    dragFrame:SetScript("OnUpdate", function(self)
+        local state = self._wnDragState
+        if not state then
+            self:SetScript("OnUpdate", nil)
+            return
+        end
+        local x, y = GetCursorPosition()
+        local newLeft = (x - state.offsetX) / state.frameScale
+        local newTop = (y - state.offsetY) / state.frameScale
+        state.moveFrame:ClearAllPoints()
+        state.moveFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", newLeft, newTop)
+    end)
+end
+
+local function StopScaledDrag(dragFrame)
+    dragFrame._wnDragState = nil
+    dragFrame:SetScript("OnUpdate", nil)
+end
+
+--[[
+    Install combat-safe, scale-correct drag handlers on a header/drag frame.
+    Keeps cursor-grab point stable at any UI/frame scale.
+
+    @param dragFrame Frame - The frame that receives drag events
+    @param moveFrame Frame - The frame to move (usually the parent window)
+    @param onDragStop function|nil - Optional callback after drag stops
+]]
+function WindowManager:InstallDragHandler(dragFrame, moveFrame, onDragStop)
+    if not dragFrame or not moveFrame then return end
+    dragFrame:EnableMouse(true)
+    dragFrame:RegisterForDrag("LeftButton")
+    dragFrame:SetScript("OnDragStart", function()
+        if not InCombatLockdown() then
+            StartScaledDrag(dragFrame, moveFrame)
+        end
+    end)
+    dragFrame:SetScript("OnDragStop", function()
+        StopScaledDrag(dragFrame)
+        if onDragStop then
+            onDragStop(moveFrame)
+        end
+    end)
+end
+
+-- POSITION PERSISTENCE (per-window, keyed by a stable name)
+--
+-- Central store so any dialog/popup keeps its last dragged position instead of
+-- re-centering on every open. Floating companions and the main window keep their
+-- own dedicated persistence (db.global.*Tracker / db.profile.windowPosition); this
+-- covers the shared WindowFactory dialogs and standalone popups keyed by name.
+-- Coordinate convention mirrors the proven main-window path (UI.lua
+-- SaveWindowGeometry / RestoreWindowPosition): store GetLeft/GetTop and re-anchor
+-- with TOPLEFT -> UIParent BOTTOMLEFT so a single anchor family survives drag.
+
+local function GetWindowPositionStore()
+    local W = ns.ArtisanNexus
+    local profile = W and W.db and W.db.profile
+    if not profile then return nil end
+    if not profile.windowPositions then
+        profile.windowPositions = {}
+    end
+    return profile.windowPositions
+end
+
+--[[
+    Persist a window's current on-screen position under a stable key.
+    @param frame Frame  - The window frame (must be shown / laid out)
+    @param key   string - Stable identifier (usually the frame's global name)
+]]
+function WindowManager:SavePosition(frame, key)
+    if not frame or not key or not frame.GetLeft then return end
+    local left = frame:GetLeft()
+    local top = frame:GetTop()
+    if left == nil or top == nil then return end
+    local store = GetWindowPositionStore()
+    if not store then return end
+    local slot = store[key]
+    if not slot then
+        slot = {}
+        store[key] = slot
+    end
+    slot.point = "TOPLEFT"
+    slot.relativePoint = "BOTTOMLEFT"
+    slot.x = left
+    slot.y = top
+end
+
+--[[
+    Restore a window's saved position (on-screen clamped).
+    @param frame Frame  - The window frame
+    @param key   string - Stable identifier used by SavePosition
+    @return boolean - true if a saved position was applied, false otherwise
+]]
+function WindowManager:RestorePosition(frame, key)
+    if not frame or not key then return false end
+    local store = GetWindowPositionStore()
+    if not store then return false end
+    local pos = store[key]
+    if not pos or not pos.x or not pos.y then return false end
+
+    -- Clamp into the visible area so an off-screen save can't strand the window.
+    local frameScale = frame:GetEffectiveScale() or 1
+    local parentScale = UIParent:GetEffectiveScale() or 1
+    if frameScale <= 0 then frameScale = 1 end
+    if parentScale <= 0 then parentScale = 1 end
+
+    local screenW = UIParent:GetWidth() or 0
+    local screenH = UIParent:GetHeight() or 0
+    local screenWInFrame = (screenW * parentScale) / frameScale
+    local screenHInFrame = (screenH * parentScale) / frameScale
+
+    local frameW = frame:GetWidth() or 0
+    local frameH = frame:GetHeight() or 0
+
+    local x = math.max(0, math.min(pos.x, screenWInFrame - frameW * 0.25))
+    local y = math.max(frameH * 0.25, math.min(pos.y, screenHInFrame))
+
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x, y)
+    return true
+end
+
+-- ESC BINDING (ToggleGameMenu) — works without frame keyboard focus
+--
+-- NEVER assign _G.ToggleGameMenu = function() ... prev() end from addon code: that taints the
+-- binding path and Blizzard’s implementation can hit ADDON_ACTION_FORBIDDEN on protected
+-- calls (e.g. SpellStopCasting in UIParent). hooksecurefunc runs *after* the secure original,
+-- so the Blizzard function keeps a clean execution path; we then apply the same hierarchy
+-- as frame OnKeyDown (CloseTopWindow) and dismiss the game menu if we closed an addon window.
+
+local toggleGameMenuEscHooked = false
+
+local function DismissGameMenuIfOpen()
+    local gf = _G.GameMenuFrame
+    if not gf or not gf.IsShown or not gf:IsShown() then return end
+    if HideUIPanel then
+        pcall(HideUIPanel, gf)
+    elseif gf.Hide then
+        pcall(function() gf:Hide() end)
+    end
+end
+
+local function InstallToggleGameMenuEscPostHook()
+    if toggleGameMenuEscHooked or type(hooksecurefunc) ~= "function" then return end
+    if type(_G.ToggleGameMenu) ~= "function" then return end
+    toggleGameMenuEscHooked = true
+    hooksecurefunc("ToggleGameMenu", function()
+        -- Settings panel: close explicitly first (registry / priority edge cases in some builds).
+        local sp = _G.ArtisanNexusSettingsPanel
+        if sp and sp:IsShown() then
+            DebugWarbandEsc("ToggleGameMenu post-hook: Hide ArtisanNexusSettingsPanel")
+            sp:Hide()
+            DismissGameMenuIfOpen()
+            return
+        end
+        -- Main frame's InstallESCHandler already consumed this ESC and closed a window in the
+        -- same key event. Don't let the fallback close another frame on the same ESC press.
+        if ns._wnEscJustHandled then
+            DismissGameMenuIfOpen()
+            return
+        end
+        if WindowManager:CloseTopWindow() then
+            DismissGameMenuIfOpen()
+        end
+    end)
+end
+
+local function TryInstallToggleGameMenuHook()
+    if toggleGameMenuEscHooked then return true end
+    InstallToggleGameMenuEscPostHook()
+    return toggleGameMenuEscHooked
+end
+
+-- ESC stack (e.g. 11.x): may call CloseAllWindows / CloseWindows without ToggleGameMenu when a
+-- FULLSCREEN_DIALOG panel is up — still close our settings panel after Blizzard runs theirs.
+local closeAllWindowsEscHooked = false
+local closeWindowsEscHooked = false
+
+local function EscBootstrapHooksComplete()
+    return toggleGameMenuEscHooked and closeAllWindowsEscHooked and closeWindowsEscHooked
+end
+
+local function InstallCloseStackEscHooks()
+    if type(hooksecurefunc) ~= "function" then return end
+    local function afterCloseStack()
+        if ns._wnEscJustHandled then return end
+        local sp = _G.ArtisanNexusSettingsPanel
+        if sp and sp:IsShown() then
+            DebugWarbandEsc("CloseAllWindows/CloseWindows post-hook: Hide ArtisanNexusSettingsPanel")
+            sp:Hide()
+            DismissGameMenuIfOpen()
+        end
+    end
+    if not closeAllWindowsEscHooked and type(_G.CloseAllWindows) == "function" then
+        closeAllWindowsEscHooked = true
+        hooksecurefunc("CloseAllWindows", afterCloseStack)
+    end
+    if not closeWindowsEscHooked and type(_G.CloseWindows) == "function" then
+        closeWindowsEscHooked = true
+        hooksecurefunc("CloseWindows", afterCloseStack)
+    end
+end
+
+-- Install as soon as ToggleGameMenu exists; retry across events so /reload and load order never miss it.
+TryInstallToggleGameMenuHook()
+InstallCloseStackEscHooks()
+C_Timer.After(0, function()
+    TryInstallToggleGameMenuHook()
+    InstallCloseStackEscHooks()
+end)
+C_Timer.After(1, function()
+    TryInstallToggleGameMenuHook()
+    InstallCloseStackEscHooks()
+end)
+
+local escHookBootstrap = CreateFrame("Frame")
+escHookBootstrap:RegisterEvent("PLAYER_LOGIN")
+escHookBootstrap:RegisterEvent("PLAYER_ENTERING_WORLD")
+escHookBootstrap:RegisterEvent("ADDON_LOADED")
+escHookBootstrap:SetScript("OnEvent", function()
+    -- If load-order timers already installed everything, skip redundant work on PEW
+    if EscBootstrapHooksComplete() then
+        escHookBootstrap:UnregisterAllEvents()
+        return
+    end
+    InstallCloseStackEscHooks()
+    if TryInstallToggleGameMenuHook() then
+        escHookBootstrap:UnregisterAllEvents()
+    end
+end)

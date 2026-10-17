@@ -24,8 +24,16 @@ local GatheringOverloadActionButton = {}
 local BUTTON_NAME = "ArtisanNexusOverloadActionButton"
 local BUTTON_SIZE = 52
 
-local button, icon, cooldown, countText
+local button, icon, cooldown
 local currentDisplaySID
+local refreshPending = false
+
+--- Left button only ("*" = any modifier, so a SHIFT-/CTRL- key binding still resolves):
+--- right-click hides the button and must never resolve a cast action. Resolution order
+--- per SecureButton_GetModifiedAttribute, verified 2026-10-15, wow-ui-source-live
+--- Blizzard_FrameXML/SecureTemplates.lua:101-137.
+local ATTR_TYPE = "*type1"
+local ATTR_SPELL = "*spell1"
 
 -- ---------------------------------------------------------------------------
 -- Selection logic
@@ -100,7 +108,6 @@ local function GetSpellIconSafe(sid)
             return info.iconID or info.originalIconID
         end
     end
-    if GetSpellTexture then return GetSpellTexture(sid) end
     return nil
 end
 
@@ -170,7 +177,7 @@ local function Refresh()
 
     if sid ~= currentDisplaySID then
         currentDisplaySID = sid
-        button:SetAttribute("spell", sid)
+        button:SetAttribute(ATTR_SPELL, sid)
         local tex = GetSpellIconSafe(sid)
         if tex and icon then icon:SetTexture(tex) end
     end
@@ -193,10 +200,10 @@ local function OnEnter(self)
     if currentDisplaySID and GameTooltip.SetSpellByID then
         GameTooltip:SetSpellByID(currentDisplaySID)
     else
-        GameTooltip:AddLine("Overload")
+        GameTooltip:AddLine((ns.L and ns.L["OVERLOAD_BTN_FALLBACK"]) or "Overload")
     end
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine("|cff9e9e9eShift+Drag to move. Right-click to hide.|r", 1, 1, 1, true)
+    GameTooltip:AddLine((ns.L and ns.L["FLOAT_BTN_HINT"]) or "Shift+drag to move. Right-click to hide.", 0.62, 0.62, 0.62, true)
     GameTooltip:Show()
 end
 
@@ -215,8 +222,10 @@ local function EnsureButton()
     button:SetSize(BUTTON_SIZE, BUTTON_SIZE)
     button:SetFrameStrata("MEDIUM")
     button:SetClampedToScreen(true)
+    -- Down clicks too: with ActionButtonUseKeyDown=1 a CLICK binding acts on key-down only
+    -- (verified 2026-10-15, SecureTemplates.lua:813-814); mouse presses act on release.
     button:RegisterForClicks("AnyUp", "AnyDown")
-    button:SetAttribute("type", "spell")
+    button:SetAttribute(ATTR_TYPE, "spell")
 
     -- Icon
     icon = button:CreateTexture(nil, "ARTWORK")
@@ -254,12 +263,16 @@ local function EnsureButton()
             local db = GetDB()
             if db then db.hidden = true end
             self:Hide()
+            if ns.RefreshAddonSettings then ns.RefreshAddonSettings() end
+            if ns.ArtisanNexus and ns.ArtisanNexus.Print then
+                ns.ArtisanNexus:Print((ns.L and ns.L["FLOAT_BTN_HIDDEN"]) or "Button hidden. Turn it back on in /an config.")
+            end
             return
         end
         -- Left-click: make sure we're casting the current best spell, not a stale one.
         local sid = ResolveBestSpell()
-        if sid then
-            self:SetAttribute("spell", sid)
+        if sid and sid ~= currentDisplaySID then
+            self:SetAttribute(ATTR_SPELL, sid)
             currentDisplaySID = sid
         end
     end)
@@ -284,11 +297,34 @@ end
 -- Public API
 -- ---------------------------------------------------------------------------
 
+--- Event-driven refresh: the OnUpdate ticker stops once the button is hidden, so a Hide at
+--- OnInitialize (spellbook not loaded yet) or before the profession is learned would
+--- otherwise last the session. Coalesced to one Refresh per frame; Refresh is a no-op in
+--- combat and PLAYER_REGEN_ENABLED re-runs it.
+local function QueueRefresh()
+    if refreshPending then return end
+    refreshPending = true
+    C_Timer.After(0, function()
+        refreshPending = false
+        Refresh()
+    end)
+end
+
 function GatheringOverloadActionButton:Init()
     if self._inited then return end
     self._inited = true
     EnsureButton()
     Refresh()
+
+    -- verified 2026-10-15, src/docs: SPELLS_CHANGED + LEARNED_SPELL_IN_SKILL_LINE
+    -- (SpellBookDocumentation.lua), SKILL_LINES_CHANGED (SkillInfoDocumentation.lua),
+    -- PLAYER_REGEN_ENABLED (UnitDocumentation.lua).
+    local owner = ns.NewEventOwner("GatheringOverloadActionButton")
+    self._eventOwner = owner
+    owner:RegisterEvent("SPELLS_CHANGED", QueueRefresh)
+    owner:RegisterEvent("LEARNED_SPELL_IN_SKILL_LINE", QueueRefresh)
+    owner:RegisterEvent("SKILL_LINES_CHANGED", QueueRefresh)
+    owner:RegisterEvent("PLAYER_REGEN_ENABLED", QueueRefresh)
 
     -- Binding UI label (Key Bindings > Artisan Nexus)
     local L = ns.L
@@ -310,15 +346,6 @@ function GatheringOverloadActionButton:Hide()
     -- Protected frame: defer the actual Hide() out of combat; Refresh honors
     -- db.hidden on the next out-of-combat tick.
     if button and not InCombatLockdown() then button:Hide() end
-end
-
-function GatheringOverloadActionButton:Toggle()
-    local db = GetDB()
-    if db and db.hidden then
-        self:Show()
-    else
-        self:Hide()
-    end
 end
 
 ns.GatheringOverloadActionButton = GatheringOverloadActionButton

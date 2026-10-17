@@ -17,11 +17,11 @@
       entries = { { spellID, target, progress, tier?, note? }, ... }
 
     Public API:
-      CraftingQueueService:Add(spellID, target, tier?)
+      CraftingQueueService:Add(spellID, target, tier?)  -- re-adding sums the target; tier? overwrites
       CraftingQueueService:Remove(spellID)
+      CraftingQueueService:Clear()
       CraftingQueueService:Move(spellID, dir)        -- dir = -1 up / +1 down
       CraftingQueueService:SetTarget(spellID, n)
-      CraftingQueueService:SetTier(spellID, tier)
       CraftingQueueService:MarkOneCrafted(spellID)
       CraftingQueueService:Reset(spellID)
       CraftingQueueService:GetQueue()
@@ -30,7 +30,7 @@
 
 local ADDON_NAME, ns = ...
 
-local E = ns.Constants and ns.Constants.EVENTS
+local E = ns.Constants.EVENTS
 
 local CraftingQueueService = {}
 
@@ -53,9 +53,7 @@ local function FindIndex(entries, spellID)
 end
 
 local function Notify()
-    if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage and E and E.CRAFT_QUEUE_UPDATED then
-        ns.ArtisanNexus:SendMessage(E.CRAFT_QUEUE_UPDATED)
-    end
+    ns.ArtisanNexus:SendMessage(E.CRAFT_QUEUE_UPDATED)
 end
 
 function CraftingQueueService:Add(spellID, target, tier)
@@ -81,6 +79,14 @@ function CraftingQueueService:Remove(spellID)
     Notify()
 end
 
+function CraftingQueueService:Clear()
+    local store = Store(); if not store then return end
+    if #store.entries == 0 then return end
+    wipe(store.entries)
+    Notify()
+end
+
+
 function CraftingQueueService:Move(spellID, dir)
     local store = Store(); if not store then return end
     local idx = FindIndex(store.entries, spellID)
@@ -91,6 +97,7 @@ function CraftingQueueService:Move(spellID, dir)
     Notify()
 end
 
+--- Set the total crafts wanted for a recipe (n <= 0 removes it; unknown recipes are appended).
 function CraftingQueueService:SetTarget(spellID, n)
     if (n or 0) <= 0 then return self:Remove(spellID) end
     local store = Store(); if not store then return end
@@ -101,12 +108,6 @@ function CraftingQueueService:SetTarget(spellID, n)
         store.entries[#store.entries + 1] = { spellID = spellID, target = n, progress = 0 }
     end
     Notify()
-end
-
-function CraftingQueueService:SetTier(spellID, tier)
-    local store = Store(); if not store then return end
-    local idx = FindIndex(store.entries, spellID)
-    if idx then store.entries[idx].tier = tier; Notify() end
 end
 
 function CraftingQueueService:MarkOneCrafted(spellID)
@@ -186,17 +187,46 @@ local function ResolveQueuedSpellFromResult(data)
         return nil
     end
     local store = Store()
-    local rs = ns.RecipeService
-    if not store or not rs or not rs.GetOutputItem then
+    if not store then
         return nil
     end
+    --- Base output or any quality-tier output (qualityItemIDs) of a queued recipe.
     for i = 1, #store.entries do
         local sid = store.entries[i].spellID
-        if rs:GetOutputItem(sid) == resultID then
-            return sid
+        if CraftResultMatchesRecipe(sid, data) then
+            local rs = ns.RecipeService
+            local outID = rs and rs.GetOutputItem and rs:GetOutputItem(sid)
+            local tierHit = CraftEventService and CraftEventService.IsQualityItemOfRecipe
+                and CraftEventService:IsQualityItemOfRecipe(sid, resultID)
+            if outID == resultID or tierHit then
+                return sid
+            end
         end
     end
     return nil
+end
+
+--- operationIDs already credited: one cast = one operation, however many result events it
+--- fires (multicraft, bonus, first-craft rewards). Bounded; pruned on every insert.
+local creditedOps = {}
+local creditedOpsCount = 0
+
+local function MarkOperationCredited(data)
+    local opID = type(data) == "table" and tonumber(data.operationID) or 0
+    if not opID or opID == 0 then
+        return
+    end
+    if creditedOpsCount > 200 then
+        wipe(creditedOps)
+        creditedOpsCount = 0
+    end
+    creditedOps[opID] = true
+    creditedOpsCount = creditedOpsCount + 1
+end
+
+local function IsOperationCredited(data)
+    local opID = type(data) == "table" and tonumber(data.operationID) or 0
+    return opID ~= nil and opID ~= 0 and creditedOps[opID] == true
 end
 
 local function OnTradeSkillCraftBegin(recipeSpellID)
@@ -224,10 +254,22 @@ local function OnTradeSkillItemCraftedResult(data)
         return
     end
 
-    if spellID and not pendingCraftHandled and FindIndex(store.entries, spellID) then
+    if type(data) == "table" and (data.bonusCraft or data.firstCraftReward) then
+        --- Extra yield / first-craft reward of a cast that is credited by its primary result.
+        return
+    end
+    if IsOperationCredited(data) then
+        return
+    end
+    local opID = type(data) == "table" and tonumber(data.operationID) or 0
+
+    if spellID and (not pendingCraftHandled or (opID and opID ~= 0)) and FindIndex(store.entries, spellID) then
+        --- With operationIDs every cast of a multi-cast ("Craft All") is its own operation,
+        --- so each one credits; without them only the first result after CRAFT_BEGIN does.
         if CraftResultMatchesRecipe(spellID, data) then
             CraftingQueueService:MarkOneCrafted(spellID)
             pendingCraftHandled = true
+            MarkOperationCredited(data)
         end
         return
     end
@@ -241,6 +283,7 @@ local function OnTradeSkillItemCraftedResult(data)
     local resolved = ResolveQueuedSpellFromResult(data)
     if resolved and FindIndex(store.entries, resolved) then
         CraftingQueueService:MarkOneCrafted(resolved)
+        MarkOperationCredited(data)
     end
     ClearPendingCraft()
 end

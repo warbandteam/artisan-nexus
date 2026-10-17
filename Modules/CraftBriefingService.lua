@@ -7,16 +7,10 @@
 
 local ADDON_NAME, ns = ...
 
-local E = ns.Constants and ns.Constants.EVENTS
+local E = ns.Constants.EVENTS
 local CraftBriefingService = { _enabled = false }
 
-local function L(key, fallback)
-    local loc = ns.L
-    if loc and loc[key] then
-        return loc[key]
-    end
-    return fallback
-end
+local L = ns.SafeLocaleString
 
 local function Profile()
     return ns.db and ns.db.profile
@@ -30,22 +24,8 @@ local function BriefingStore()
     return ns.db.global.craftBriefing
 end
 
-local function FormatCopper(c)
-    c = tonumber(c)
-    if not c then
-        return nil
-    end
-    local gold = math.floor(c / 10000)
-    local silver = math.floor((c % 10000) / 100)
-    local copper = c % 100
-    if gold > 0 then
-        return string.format("%dg %02ds", gold, silver)
-    end
-    if silver > 0 then
-        return string.format("%ds %02dc", silver, copper)
-    end
-    return string.format("%dc", copper)
-end
+--- Chat lines use the shared money formatter (coin icons; nil for 0).
+local FormatCopper = ns.FormatCopper
 
 local function Notify(msg)
     local addon = ns.ArtisanNexus
@@ -77,8 +57,8 @@ local function ProactiveAlert(topRow, store, scanKind)
     store.lastAlertAt = time()
     local profit = FormatCopper(topRow.margin) or "?"
     Notify(string.format(
-        L("CRAFT_BRIEFING_ALERT_FMT", "|cffd4af37Craft alert:|r %s (%s) - %s profit. /an hub"),
-        topRow.name or ("Recipe " .. tostring(topRow.spellID)),
+        L("CRAFT_BRIEFING_ALERT_FMT", "|cffd4af37Craft alert:|r %s (%s) - %s profit. /an"),
+        topRow.name or string.format(L("RECIPE_ID_FMT", "Recipe %s"), tostring(topRow.spellID)),
         topRow.profession or "?",
         profit))
     if RaidNotice_AddMessage and RaidWarningFrame then
@@ -111,13 +91,19 @@ function CraftBriefingService:Rebuild(scanKind)
     local useAverage = p and p.craftBriefingPriceMode == "avg"
     local owned = rs:GetOwnedCraftProfessions()
     local compareConc = not p or p.craftBriefingConcentrationHints ~= false
+    local ownedOnly = (p and p.craftBriefingOwnedOnly ~= false)
     local listOpts = {
         harvestedOnly = true,
         useAverage = useAverage,
-        ownedProfessionsOnly = (p and p.craftBriefingOwnedOnly ~= false),
+        ownedProfessionsOnly = ownedOnly,
+        -- Owned-only briefings rank what THIS character can craft (ns.CharacterData:IsKnownByMe).
+        knownBy = ownedOnly and "me" or "any",
         compareConcentration = compareConc,
     }
 
+    -- Margins are EV-based and net of AH cut + expected deposit loss (CraftEVService). Reagents
+    -- priced from vendors count as priced; only required Basic slots can make a row "missing"
+    -- (optional / finishing slots never enter the cost, currency-only slots carry no gold price).
     local rows = ps:ListRecipes(listOpts)
     local top = {}
     for i = 1, #rows do
@@ -132,11 +118,11 @@ function CraftBriefingService:Rebuild(scanKind)
 
     local warnings = {}
     if #owned < 1 then
-        warnings[#warnings + 1] = L("CRAFT_BRIEFING_WARN_NO_PROF", "No craft professions detected on this character.")
+        warnings[#warnings + 1] = L("CRAFT_BRIEFING_WARN_NO_PROF", "No crafting professions on this character.")
     end
     local stats = rs.GetStats and rs:GetStats()
     if stats and stats.harvested < 1 then
-        warnings[#warnings + 1] = L("CRAFT_BRIEFING_WARN_HARVEST", "Open a Midnight profession window once to cache recipe schematics.")
+        warnings[#warnings + 1] = L("CRAFT_BRIEFING_WARN_HARVEST", "Open a profession window once to read recipes.")
     end
 
     local equipmentHints
@@ -153,15 +139,19 @@ function CraftBriefingService:Rebuild(scanKind)
         return
     end
     store.updatedAt = time()
-    store.scanKind = scanKind or "unknown"
+    local silent = (scanKind == "ops" or scanKind == "settings" or scanKind == "schematics")
+    store.scanKind = (silent and store.scanKind) or scanKind or "unknown"
     store.priceMode = useAverage and "avg" or "spot"
     store.ownedProfessions = owned
     store.top = top
     store.warnings = warnings
     store.equipmentHints = equipmentHints
 
-    if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage and E and E.CRAFT_BRIEFING_UPDATED then
-        ns.ArtisanNexus:SendMessage(E.CRAFT_BRIEFING_UPDATED, store)
+    ns.ArtisanNexus:SendMessage(E.CRAFT_BRIEFING_UPDATED, store)
+
+    -- Operation snapshots (every profession open), schematic harvests and settings tweaks refresh numbers silently.
+    if silent then
+        return
     end
 
     if #top > 0 then
@@ -173,17 +163,17 @@ function CraftBriefingService:Rebuild(scanKind)
     end
 
     if #top < 1 then
-        Notify(L("CRAFT_BRIEFING_NONE", "No profitable crafts with current AH prices and harvested recipes."))
+        Notify(L("CRAFT_BRIEFING_NONE", "No profitable crafts at current prices."))
         return
     end
 
-    Notify(L("CRAFT_BRIEFING_CHAT_HEADER", "Craft Briefing (after AH sync):"))
+    Notify(L("CRAFT_BRIEFING_CHAT_HEADER", "Top crafts:"))
     for i = 1, #top do
         local r = top[i]
         local profit = FormatCopper(r.margin) or "?"
         local line = string.format(
             L("CRAFT_BRIEFING_LINE_FMT", "%d. %s (%s) - %s profit"),
-            i, r.name or ("Recipe " .. tostring(r.spellID)), r.profession or "?", profit)
+            i, r.name or string.format(L("RECIPE_ID_FMT", "Recipe %s"), tostring(r.spellID)), r.profession or "?", profit)
         if r.recommendConcentration and r.concProfitDelta and r.concProfitDelta > 0 then
             line = line .. " " .. string.format(
                 L("CRAFT_BRIEFING_CONC_SUFFIX", "(+ %s with concentration)"),
@@ -199,7 +189,7 @@ function CraftBriefingService:Rebuild(scanKind)
             end
         end
     end
-    Notify(L("CRAFT_BRIEFING_CHAT_FOOTER", "Full list: /an hub"))
+    Notify(L("CRAFT_BRIEFING_CHAT_FOOTER", "Full list: /an"))
 end
 
 function CraftBriefingService:Enable()
@@ -224,6 +214,14 @@ function CraftBriefingService:Enable()
             local briefing = BriefingStore()
             if briefing and briefing.updatedAt then
                 CraftBriefingService:Rebuild("schematics")
+            end
+        end)
+    end
+    if E and E.CRAFT_OPS_UPDATED then
+        owner:RegisterMessage(E.CRAFT_OPS_UPDATED, function()
+            local briefing = BriefingStore()
+            if briefing and briefing.updatedAt then
+                CraftBriefingService:Rebuild("ops")
             end
         end)
     end
@@ -264,7 +262,14 @@ function CraftBriefingService:Enable()
 end
 
 function CraftBriefingService:Disable()
+    if not self._enabled then
+        return
+    end
     self._enabled = false
+    if self._eventOwner then
+        self._eventOwner:UnregisterAllEvents()
+        self._eventOwner:UnregisterAllMessages()
+    end
 end
 
 ns.CraftBriefingService = CraftBriefingService

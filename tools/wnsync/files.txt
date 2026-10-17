@@ -1,0 +1,39 @@
+# Warband Nexus UI framework files copied into Artisan Nexus (same relative path in both repos).
+# verbatim = wn_transform.py output, byte for byte; adapted = transform + Artisan Nexus edits
+# (tab list, launchers, settings panels, refresh routing). Order = WN load order.
+verbatim Modules/APIWrapper.lua
+verbatim Modules/Profiler.lua
+verbatim Modules/LoadingTracker.lua
+verbatim Modules/FontManager.lua
+verbatim Modules/SearchStateManager.lua
+verbatim Modules/WindowManager.lua
+verbatim Modules/UI/IconRegistry.lua
+verbatim Modules/UI/FormatHelpers.lua
+verbatim Modules/UI/ColumnOrderHelpers.lua
+verbatim Modules/UI/SharedWidgets_Pixel.lua
+verbatim Modules/UI/SharedWidgets_ClassicTheme.lua
+adapted  Modules/UI/SharedWidgets_Theme.lua
+verbatim Modules/UI/SharedWidgets_Layout.lua
+adapted  Modules/UI/SharedWidgets.lua
+verbatim Modules/UI/SharedWidgets_Icons.lua
+verbatim Modules/UI/SharedWidgets_Collapsible.lua
+verbatim Modules/UI/SharedWidgets_Factory_Chrome.lua
+verbatim Modules/UI/SharedWidgets_Factory.lua
+verbatim Modules/UI/SharedWidgets_RowPool.lua
+verbatim Modules/UI/SharedWidgets_TableKit.lua
+verbatim Modules/UI/SharedWidgets_Search.lua
+verbatim Modules/UI/SharedWidgets_EmptyState.lua
+verbatim Modules/UI/SharedWidgets_TitleToolbar.lua
+verbatim Modules/UI/LayoutCoordinator.lua
+verbatim Modules/UI/FramePoolFactory.lua
+verbatim Modules/UI/WindowFactory.lua
+verbatim Modules/UI/SearchBoxComponent.lua
+verbatim Modules/UI/TooltipFactory.lua
+verbatim Modules/UI/NotificationToastFactory.lua
+adapted  Modules/UI/SettingsUI_Shell.lua
+verbatim Modules/UI/SettingsUI_Keybind.lua
+adapted  Modules/UI/SettingsUI.lua
+adapted  Modules/UI/UI_RefreshRouter.lua
+adapted  Modules/UI.lua
+adapted  Modules/UI/UI_MainShell.lua
+adapted  Modules/UI/UI_TabHost.lua

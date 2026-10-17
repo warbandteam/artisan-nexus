@@ -23,7 +23,9 @@
 
 local ADDON_NAME, ns = ...
 
-local E = ns.Constants and ns.Constants.EVENTS
+local ACUITY_ITEM_ID = (ns.Constants and ns.Constants.ARTISANS_ACUITY_ITEM_ID) or 210814
+
+local E = ns.Constants.EVENTS
 
 local ShoppingListService = {}
 
@@ -45,10 +47,23 @@ local function FindEntry(entries, spellID)
     return nil
 end
 
+--- Per-frame Aggregate memo: one Shopping render calls Aggregate via TotalCost,
+--- GetFarmTargets and GetPurchaseShorts as well; GetTime() changes every frame.
+local aggMemo = { stamp = nil, results = {} }
+
+local function InvalidateAggregateMemo()
+    aggMemo.stamp = nil
+    aggMemo.results = {}
+end
+
 local function Notify()
-    if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage and E and E.SHOPPING_LIST_UPDATED then
-        ns.ArtisanNexus:SendMessage(E.SHOPPING_LIST_UPDATED)
-    end
+    InvalidateAggregateMemo()
+    ns.ArtisanNexus:SendMessage(E.SHOPPING_LIST_UPDATED)
+end
+
+--- Public re-broadcast (settings that change Aggregate output, e.g. shoppingIncludeFinishing / price provider).
+function ShoppingListService:Notify()
+    Notify()
 end
 
 function ShoppingListService:Add(spellID, count)
@@ -100,6 +115,7 @@ function ShoppingListService:Remove(spellID)
     Notify()
 end
 
+--- Set the craft count for a recipe (count <= 0 removes it; unknown recipes are appended).
 function ShoppingListService:SetCount(spellID, count)
     if (count or 0) <= 0 then return self:Remove(spellID) end
     local store = Store(); if not store then return end
@@ -152,14 +168,27 @@ function ShoppingListService:Aggregate(opts)
     opts = opts or {}
     local rs = ns.RecipeService
     if not rs then return {} end
+    local now = GetTime()
+    if aggMemo.stamp ~= now then
+        aggMemo.stamp = now
+        aggMemo.results = {}
+    end
+    local p = ns.ArtisanNexus and ns.ArtisanNexus.db and ns.ArtisanNexus.db.profile
+    local subtractAlts = p and p.shoppingSubtractAlts == true
+    local memoKey = tostring(opts.subtractBags ~= false) .. "|" .. tostring(opts.profession or "All") .. "|" .. tostring(subtractAlts)
+    local cached = aggMemo.results[memoKey]
+    if cached then
+        return cached
+    end
     local entries = FilterEntriesByProfession(self:GetEntries(), opts)
     local ahs = ns.AHPriceService
+    local withFinishing = p and p.shoppingIncludeFinishing == true
     local agg = {}
     for _, entry in ipairs(entries) do
         --- One requirement per mandatory slot: quality tiers are alternatives,
         --- so pick the cheapest priced candidate (else the first item candidate)
         --- instead of demanding every tier separately.
-        local slots = (rs.GetMandatorySlots and rs:GetMandatorySlots(entry.spellID)) or {}
+        local slots = (rs.GetMandatorySlots and rs:GetMandatorySlots(entry.spellID, withFinishing)) or {}
         for si = 1, #slots do
             local slot = slots[si]
             local pickID, pickPrice
@@ -184,10 +213,11 @@ function ShoppingListService:Aggregate(opts)
         end
     end
 
-    -- Bag counts (single source of truth: RecipeService:ScanBags); rank-grouped
+    -- Bag counts (RecipeService bucket-invalidated cache over ScanBags); rank-grouped
     -- so higher-tier mats in bags satisfy the requirement like craftability does.
     if opts.subtractBags ~= false then
-        local bag = (rs.ScanBags and rs:ScanBags()) or {}
+        local bag = (rs.GetBagCounts and rs:GetBagCounts()) or (rs.ScanBags and rs:ScanBags()) or {}
+        local chars = ns.CharacterData
         for itemID, row in pairs(agg) do
             if rs.EffectiveReagentCount then
                 row.have = rs:EffectiveReagentCount(itemID, bag)
@@ -195,34 +225,72 @@ function ShoppingListService:Aggregate(opts)
                 row.have = bag[itemID] or 0
             end
             row.short = math.max(0, row.needed - row.have)
-        end
-    end
 
-    -- Pricing
-    local svc = ns.AHPriceService
-    if svc and svc.GetPrice then
-        for _, row in pairs(agg) do
-            local p = svc:GetPrice(row.itemID)
-            if p then
-                row.unitPrice = p
-                local quantity = opts.subtractBags ~= false and row.short or row.needed
-                row.cost = p * quantity
+            -- Cross-character reagent inventory (Warband Nexus or AN-native snapshot).
+            -- Alts' stock is subtracted only when the player opts in (it must be mailed over first).
+            local counts = chars:GetItemCountsAcrossCharacters(itemID)
+            if counts then
+                row.altHave = counts.total or 0
+                row.altDetails = counts.chars
+                if subtractAlts and row.altHave > 0 then
+                    row.short = math.max(0, row.short - row.altHave)
+                end
             end
         end
     end
 
+    -- Pricing & Soulbound detection
+    local svc = ns.AHPriceService
+    for _, row in pairs(agg) do
+        local itemID = row.itemID
+        if itemID == ACUITY_ITEM_ID then
+            row.isAcuity = true
+            row.isSoulbound = true
+        elseif C_Item and C_Item.GetItemInfo then
+            -- bindType is GetItemInfo return 14 (GetItemInfoInstant has only 7); nil while uncached = unknown.
+            local bindType = select(14, C_Item.GetItemInfo(itemID))
+            if bindType == 1 then
+                row.isSoulbound = true
+            end
+        end
+
+        if svc and svc.GetPrice then
+            local unit = svc:GetPrice(itemID)
+            if unit then
+                row.unitPrice = unit
+                local quantity = opts.subtractBags ~= false and row.short or row.needed
+                -- Walk the stored commodity book: buying 200 units costs more than 200 x min.
+                local econ = ns.Economy
+                local total = econ and econ.BuyCost and econ:BuyCost(itemID, quantity)
+                row.cost = total or (unit * quantity)
+                if quantity > 0 and total then
+                    row.avgUnitCost = total / quantity
+                end
+            end
+        end
+    end
+
+    aggMemo.results[memoKey] = agg
     return agg
 end
 
---- Total copper cost of remaining reagents (after subtracting bags).
-function ShoppingListService:TotalCost()
-    local agg = self:Aggregate({ subtractBags = true })
-    local total, missing = 0, 0
+--- Total copper cost of remaining reagents (after subtracting bags), missing count, and acuity requirement.
+---@param opts table|nil profession?: string (same filter as the rows the Hub shows)
+function ShoppingListService:TotalCost(opts)
+    opts = opts or {}
+    local agg = self:Aggregate({ subtractBags = true, profession = opts.profession })
+    local total, missing, acuityNeeded = 0, 0, 0
     for _, row in pairs(agg) do
-        if row.cost then total = total + row.cost
-        elseif (row.short or 0) > 0 then missing = missing + 1 end
+        if row.cost then
+            total = total + row.cost
+        elseif (row.short or 0) > 0 and not row.isSoulbound then
+            missing = missing + 1
+        end
+        if row.isAcuity or row.itemID == ACUITY_ITEM_ID then
+            acuityNeeded = acuityNeeded + (row.short or 0)
+        end
     end
-    return total, missing
+    return total, missing, acuityNeeded
 end
 
 local FARM_TAB_ORDER = { herb = 1, mine = 2, leather = 3, fishing = 4, disenchant = 5 }

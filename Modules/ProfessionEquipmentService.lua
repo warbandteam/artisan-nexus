@@ -5,19 +5,14 @@
 
 local ADDON_NAME, ns = ...
 
-local E = ns.Constants and ns.Constants.EVENTS
+-- 12.1.5 removed the global item/coin fallbacks; bind the namespaced APIs.
+local GetItemInfo = C_Item.GetItemInfo
+local GetItemInfoInstant = C_Item.GetItemInfoInstant
+
+local E = ns.Constants.EVENTS
 local ProfessionEquipmentService = { _enabled = false, _lastHints = nil }
 
-local function L(key, fallback)
-    if ns.SafeLocaleString then
-        return ns.SafeLocaleString(key, fallback) or fallback
-    end
-    local loc = ns.L
-    if loc and loc[key] then
-        return loc[key]
-    end
-    return fallback
-end
+local L = ns.SafeLocaleString
 
 local function CharStore()
     if not ns.db or not ns.db.char then
@@ -122,9 +117,6 @@ local function ScanBagProfessionGear()
         return candidates
     end
     local bags = { 0, 1, 2, 3, 4, 5 }
-    if REAGENTBANK_CONTAINER then
-        bags[#bags + 1] = REAGENTBANK_CONTAINER
-    end
     for b = 1, #bags do
         local bag = bags[b]
         local slots = C_Container.GetContainerNumSlots(bag) or 0
@@ -159,6 +151,39 @@ local function MaxEquippedIlvl(equipped)
     return maxIlvl
 end
 
+--- Base profession skill line of a profession gear item (C_TradeSkillUI.GetSkillLineForGear,
+--- verified 2026-10-14 in TradeSkillUIDocumentation 12.1.5). The returned line may be an
+--- expansion variant, so normalize through ProfessionInfo.parentProfessionID.
+local function GearBaseSkillLine(itemRef)
+    if not (itemRef and C_TradeSkillUI and C_TradeSkillUI.GetSkillLineForGear) then
+        return nil
+    end
+    local ok, sl = pcall(C_TradeSkillUI.GetSkillLineForGear, itemRef)
+    if not ok or not sl then return nil end
+    if C_TradeSkillUI.GetProfessionInfoBySkillLineID then
+        local okI, info = pcall(C_TradeSkillUI.GetProfessionInfoBySkillLineID, sl)
+        if okI and type(info) == "table" and info.parentProfessionID and info.parentProfessionID > 0 then
+            return info.parentProfessionID
+        end
+    end
+    return sl
+end
+
+--- Base skill lines of the character's professions (GetProfessions / GetProfessionInfo return 7).
+local function OwnedBaseSkillLines()
+    local set = {}
+    if not (GetProfessions and GetProfessionInfo) then return set end
+    local idxs = { GetProfessions() }
+    for i = 1, 5 do
+        local profIdx = idxs[i]
+        if profIdx then
+            local ok, _, _, _, _, _, _, skillLine = pcall(GetProfessionInfo, profIdx)
+            if ok and skillLine then set[skillLine] = true end
+        end
+    end
+    return set
+end
+
 function ProfessionEquipmentService:BuildHints()
     local rs = ns.RecipeService
     local owned = (rs and rs.GetOwnedCraftProfessions and rs:GetOwnedCraftProfessions()) or {}
@@ -183,12 +208,33 @@ function ProfessionEquipmentService:BuildHints()
         end
     end
 
-    local bestUpgrade
+    -- Compare like with like: same profession and same gear kind (tool vs accessory).
+    -- An accessory competes with the weakest equipped accessory of that profession;
+    -- a kind with nothing equipped is an "empty slot" upgrade at any ilvl.
+    local ownedLines = OwnedBaseSkillLines()
+    local equippedByKey = {}
+    for _, item in pairs(equipped) do
+        item.skillLine = item.skillLine or GearBaseSkillLine(item.itemID)
+        local key = tostring(item.skillLine) .. "|" .. tostring(item.equipLoc)
+        local cur = equippedByKey[key]
+        if not cur or (item.ilvl or 0) < cur then
+            equippedByKey[key] = item.ilvl or 0
+        end
+    end
+    local bestUpgrade, bestGain
     for i = 1, #bagGear do
         local g = bagGear[i]
-        if g.ilvl > maxEquipped then
-            if not bestUpgrade or g.ilvl > bestUpgrade.ilvl then
-                bestUpgrade = g
+        g.skillLine = GearBaseSkillLine(g.itemID)
+        local relevant = (g.skillLine == nil) or ownedLines[g.skillLine] or next(ownedLines) == nil
+        if relevant then
+            local key = tostring(g.skillLine) .. "|" .. tostring(g.equipLoc)
+            local baseline = equippedByKey[key]
+            if g.skillLine == nil then
+                baseline = maxEquipped -- unknown profession: legacy ilvl-only comparison
+            end
+            local gain = (g.ilvl or 0) - (baseline or 0)
+            if (baseline == nil or gain > 0) and (not bestGain or gain > bestGain) then
+                bestUpgrade, bestGain = g, gain
             end
         end
     end
@@ -213,9 +259,7 @@ function ProfessionEquipmentService:BuildHints()
     end
     self._lastHints = hints
 
-    if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage and E and E.PROFESSION_EQUIPMENT_UPDATED then
-        ns.ArtisanNexus:SendMessage(E.PROFESSION_EQUIPMENT_UPDATED, hints)
-    end
+    ns.ArtisanNexus:SendMessage(E.PROFESSION_EQUIPMENT_UPDATED, hints)
     return hints
 end
 
@@ -240,16 +284,24 @@ function ProfessionEquipmentService:Enable()
     if not addon or not addon.RegisterEvent then
         return
     end
+    --- One pending rebuild per burst (login + SHOW + snapshot often coincide).
     local function schedule()
+        if ProfessionEquipmentService._refreshPending then
+            return
+        end
         if addon.ScheduleTimer then
+            ProfessionEquipmentService._refreshPending = true
             addon:ScheduleTimer(function()
-                ProfessionEquipmentService:Refresh()
+                ProfessionEquipmentService._refreshPending = false
+                if ProfessionEquipmentService._enabled then
+                    ProfessionEquipmentService:Refresh()
+                end
             end, 0.3)
         else
             ProfessionEquipmentService:Refresh()
         end
     end
-    local owner = ns.NewEventOwner("ProfessionEquipmentService")
+    local owner = self._eventOwner or ns.NewEventOwner("ProfessionEquipmentService")
     self._eventOwner = owner
     owner:RegisterEvent("PLAYER_ENTERING_WORLD", schedule)
     owner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED", function(_, slotID)
@@ -270,7 +322,14 @@ function ProfessionEquipmentService:Enable()
 end
 
 function ProfessionEquipmentService:Disable()
+    if not self._enabled then
+        return
+    end
     self._enabled = false
+    if self._eventOwner then
+        self._eventOwner:UnregisterAllEvents()
+        self._eventOwner:UnregisterAllMessages()
+    end
 end
 
 ns.ProfessionEquipmentService = ProfessionEquipmentService

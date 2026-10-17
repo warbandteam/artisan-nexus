@@ -1,16 +1,15 @@
 --[[
-    Artisan Nexus — AceAddon bootstrap (Midnight 12.0.1).
-    Data → Service → View: services use SendMessage; UI subscribes (see .cursor/rules).
+    Artisan Nexus — AceAddon bootstrap (Midnight 12.1.5).
+    Data → Service → View: services use SendMessage; UI subscribes (see README "Developer guide").
 ]]
 
 local ADDON_NAME, ns = ...
 
----@class ArtisanNexus : AceAddon, AceEvent-3.0, AceConsole-3.0, AceHook-3.0, AceTimer-3.0, AceBucket-3.0
+---@class ArtisanNexus : AceAddon, AceEvent-3.0, AceConsole-3.0, AceTimer-3.0, AceBucket-3.0
 local ArtisanNexus = LibStub("AceAddon-3.0"):NewAddon(
     ADDON_NAME,
     "AceEvent-3.0",
     "AceConsole-3.0",
-    "AceHook-3.0",
     "AceTimer-3.0",
     "AceBucket-3.0"
 )
@@ -18,37 +17,79 @@ local ArtisanNexus = LibStub("AceAddon-3.0"):NewAddon(
 ns.ArtisanNexus = ArtisanNexus
 
 local L = LibStub("AceLocale-3.0"):GetLocale("ArtisanNexus")
+--- Warband Nexus UI framework convention (Modules/UI/*): `ns.L[key]` is nil for a missing key and
+--- the caller supplies the English fallback. AceLocale's read metatable returns the key itself
+--- (plus a warning) instead, so drop it once every locale file has loaded.
+setmetatable(L, nil)
 ns.L = L
 
 local E = ns.Constants.EVENTS
 
---- Maps ADDON_VERSION x.y.z to locale key CHANGELOG_Vxyz (WN parity).
-local function VersionToChangelogKey(version)
-    if not version or type(version) ~= "string" then
-        return nil
-    end
-    local a, b, c = version:match("^(%d+)%.(%d+)%.(%d+)")
-    if not a then
-        return nil
-    end
-    return "CHANGELOG_V" .. a .. b .. c
-end
-
 local defaults = {
     profile = {
-        enabled = true,
         --- One line in chat on load so the addon is discoverable without a window yet.
         showLoginChat = true,
-        --- "dark" | "light" — see `Modules/UI/ArtisanTheme.lua`.
-        themeMode = "dark",
-        --- "modern" | "classic" — classic uses plain Blizzard panel/button templates (no themed chrome).
-        uiMode = "modern",
-        --- Accent preset for modern themed chrome: default | violet | gold | teal | rose | cobalt | custom
-        accentPreset = "default",
-        --- RGB when accentPreset == "custom" (0–1).
-        accentCustom = { 0.44, 0.32, 0.58 },
-        --- When true, accent (and derived tab/border tones) follows the logged-in character's class color.
+        -- Warband Nexus UI framework settings (keys, shapes and defaults as in warband-nexus Core.lua).
+        -- Display settings
+        scrollSpeed = 1.0,         -- Scroll speed multiplier (1.0 = default 28px per step)
+        uiScale = 1.0,            -- Global UI scale for the entire addon window (0.6 - 1.5)
+        --- "standard" | "compact" --- tighter resize mins + modest default footprints (`API_*` geometry wrappers).
+        mainWindowDensity = "standard",
+        --- Main window nav: vertical "rail" icon column (left) | horizontal "top" strip (Settings; /reload).
+        mainNavLayout = "rail",
+        --- Settings tab: in-content category (`SettingsUI_Shell`); not a main-window tab id.
+        settingsPanel = "general",
+        -- Theme Colors (RGB 0-1 format) - All calculated from master color
+        themeColors = {
+            accent = {0.40, 0.20, 0.58},      -- Master theme color (purple)
+            accentDark = {0.28, 0.14, 0.41},  -- Darker variation (0.7x)
+            border = {0.20, 0.20, 0.25},      -- Desaturated border
+            tabActive = {0.20, 0.12, 0.30},   -- Active tab background (0.5x)
+            tabHover = {0.24, 0.14, 0.35},    -- Hover tab background (0.6x)
+        },
+        -- When true, UI accent (and derived tab/border tones) follows the logged-in character's class color; falls back to themeColors.accent if class is unavailable.
         useClassColorAccent = false,
+        uiTheme = "modern",  -- "modern" | "classic" — UI chrome family (Settings > Theme)
+        themeMode = "dark",  -- "dark" | "light" — Modern surface palette only
+        modernColorMode = "dark",  -- last Modern dark/light choice (restored when leaving Classic)
+        shellBackgroundOpacity = 1.0,  -- Main window shell fill alpha (0.2-1.0; Settings > Theme)
+        -- Keybinding (override binding, saved in addon DB)
+        toggleKeybind = nil,  -- e.g. "CTRL-SHIFT-N" or nil = unbound
+        -- Font Management (Resolution-aware scaling)
+        fonts = {
+            fontFace = "Expressway",  -- LSM key; bundled default font
+            scalePreset = "normal",            -- Preset: tiny/small/normal/large/xlarge
+            scaleCustom = 1.0,                 -- Custom scale multiplier
+            useCustomScale = false,            -- Use custom scale instead of preset
+            antiAliasing = "OUTLINE",          -- AA flags: none/OUTLINE/THICKOUTLINE
+            usePixelNormalization = true,      -- Enable resolution-aware scaling
+            baseSizes = {
+                header = 16,    -- Section headers, tab labels
+                title = 14,     -- Card titles, character names
+                subtitle = 12,  -- Type badges, progress labels
+                body = 12,      -- Description text, source info
+                small = 10,     -- Requirements, tooltips, fine print
+            },
+        },
+        debugVerbose = false,      -- When true, show cache/scan/tooltip logs; when false, only critical debug
+        -- Profiler (dev/perf): persisted so /reload keeps measurement + optional dev HUD.
+        -- Defaults keep everything off for production installs.
+        profilerPersist = {
+            measuring = false,
+            liveOutput = false,
+            frameTracking = false,
+            devMode = false,
+            tabPerfMonitor = false, -- /wn profiler tabperf on — main-tab switch ms lines (not debugVerbose)
+            traceVerbose = false,   -- /wn profiler verbose on — phase splits (GearOpen, profiler START/STOP)
+            devWindowVisible = false,
+            point = "CENTER",
+            relPoint = "CENTER",
+            x = 0,
+            y = 0,
+            width = 400,
+            height = 260,
+            docked = false,
+        },
         debugMode = false,
         modulesEnabled = {
             fishing = true,
@@ -66,20 +107,12 @@ local defaults = {
             x = nil,
             y = nil,
         },
-        --- Session loot window + loot-driven UI (catalog, auto-open). Slash /an loot still works when off.
+        --- Session loot window + loot-driven UI (catalog, auto-open). /an history still opens it when off.
         lootHistoryEnabled = true,
         --- Open Session loot window when fishing or gathering records a pickup (per-tab); requires lootHistoryEnabled.
         lootHistoryAutoOpen = false,
         --- Last Session loot tab (fishing / herb / mine / …); restored on reload + auto-open.
         lootHistoryActiveTab = nil,
-        --- Artisan Hub window anchor (nil = first open centered; else last-left position).
-        hubFrame = {
-            point = nil,
-            relativePoint = nil,
-            relativeTo = nil,
-            x = nil,
-            y = nil,
-        },
         --- Recipes (matcher) window anchor (nil = first open centered; else last-left position).
         recipeMatcherFrame = {
             point = nil,
@@ -88,20 +121,22 @@ local defaults = {
             x = nil,
             y = nil,
         },
-        --- Settings window anchor (nil = first open centered; else last-left position).
-        settingsFrame = {
-            point = nil,
-            relativePoint = nil,
-            relativeTo = nil,
-            x = nil,
-            y = nil,
-        },
-        --- Artisan Hub (/an hub): profit | shop | queue; restored when reopening the hub.
-        hubActiveTab = nil,
-        --- When true, Profitability tab lists only recipes craftable from current session loot (not bags).
+        --- When true, the Hub Crafting page lists only recipes craftable from current session loot (not bags).
         hubSessionOnly = false,
         --- Artisan Hub profession filter ("All" or Midnight craft profession name from catalog).
         hubProfessionFilter = "All",
+        --- Hub Crafting page sort: "margin" or "concentration" (gold per concentration point).
+        hubProfitSort = "margin",
+        --- Hub Crafting page: list recipes known by "me" (current character) or "any" tracked character.
+        hubKnownBy = "any",
+        --- Crafting page price basis: "spot" (current AH) or "avg" (7-day average) for outputs and reagents.
+        hubPriceBasis = "spot",
+        --- Ledger tab period in days (7 or 30).
+        hubLedgerDays = 7,
+        --- When true, Shopping list also counts Finishing slots (e.g. Cooking "Secret Ingredient" / Bazaar Bites).
+        shoppingIncludeFinishing = false,
+        --- When true, alt stock (ns.CharacterData: Warband Nexus or AN snapshot) is subtracted from Shopping "short" (it still has to be mailed over).
+        shoppingSubtractAlts = false,
         --- When true, RecipeService:ScanBags includes warband bank tabs (AccountBankTab_1..5).
         includeWarbandBank = true,
         --- Floating secure button: craft next queued recipe (requires profession window).
@@ -152,6 +187,10 @@ local defaults = {
         },
         --- AH cache freshness window (seconds). Used by AH scans / profitability staleness.
         ahFreshTTL = 60 * 60 * 6,
+        --- Market price data provider: "auto" (AN -> Auctionator -> TSM), "an" (Artisan Nexus only), "tsm" (TSM dbmarket prioritized), "auctionator" (Auctionator prioritized).
+        priceSourceProvider = "auto",
+        --- TSM price source read when TSM supplies prices (Settings > Auction House).
+        tsmPriceSource = "dbmarket",
         --- Post-AH-scan craft briefing (owned professions, harvested recipes).
         craftBriefingEnabled = true,
         craftBriefingChatNotify = true,
@@ -168,11 +207,66 @@ local defaults = {
         --- Show profession equipment advisor hints in briefing.
         craftBriefingEquipmentHints = true,
         --- PostingHelperService strategy knobs (see PostingHelperService.lua).
+        --- Economy engine tunables (Modules/Economy/EconomyCore.lua). Fee figures are fallbacks only:
+        --- live values come from C_AuctionHouse.Calculate*Deposit and mail invoice consignment.
+        economy = {
+            --- AH house cut on sale; replaced by the ledger-observed rate once invoices exist.
+            ahCutRate = 0.05,
+            --- Post duration index for deposit estimates: 1 = 12h, 2 = 24h, 3 = 48h.
+            postDuration = 2,
+            --- Share of postings expected to sell before expiry (deposit amortization).
+            sellThroughRate = 0.7,
+            --- Average extra output per multicraft proc as a fraction of base yield (calibrated from crafts).
+            multicraftExtraFactor = 0.5,
+            --- Average reagent share returned per resourcefulness proc (calibrated from crafts).
+            resourcefulnessSaveFactor = 0.3,
+            --- Average concentration share refunded per ingenuity proc (calibrated from crafts).
+            ingenuityRefundFactor = 0.5,
+            --- Copper value of one concentration point; 0 = derive from the best plan (shadow price).
+            concentrationValue = 0,
+            --- Copper value assigned to one Knowledge point / one Moxie (patron order rewards).
+            knowledgePointValue = 0,
+            moxieValue = 0,
+            --- Value self-gathered / owned reagents at net sell value instead of purchase price.
+            ownedReagentsAtSellValue = true,
+            --- Use intermediate crafted reagents' craft cost when cheaper than buying (make vs buy).
+            makeVsBuy = true,
+            --- Concentration planner horizon (days of regen + current pool to allocate).
+            plannerHorizonDays = 2,
+            --- Market deals: current min at or below this share of the 7-day mean.
+            dealRatio = 0.7,
+        },
+        --- One chat line per day when a tracked concentration pool is capped or caps within 12h.
+        concentrationOverflowAlert = true,
+        --- One chat line per day listing profession cooldowns that are ready.
+        cooldownReadyReminder = true,
         posting = {
+            --- "undercut" | "average" | "max" (cycled from the posting helper panel).
             strategy = "undercut",
-            undercutBy = 0.01,
             averageMul = 1.0,
             floorMul = 0.5,
+            --- Commodities: "auto" (match a deep wall, else undercut one step), "match", "undercut".
+            commodityMode = "auto",
+            --- Wall is "deep" when it holds this share of the visible book (no demand data)...
+            wallShare = 0.3,
+            --- ...or covers this many post durations of estimated demand.
+            wallDurations = 1.0,
+        },
+        --- Item tooltip lines (Modules/Economy/TooltipService.lua). Shift shows the detailed block.
+        tooltip = {
+            enabled = true,
+            compactMode = true,
+            hideInCombat = false,
+            showAhMin = true,
+            showAvg7d = true,
+            showListedQty = true,
+            showVendorSell = true,
+            showVendorBuy = true,
+            showNetAfterCut = true,
+            showStock = true,
+            showAltStock = true,
+            showAvgBuyCost = true,
+            showCraft = true,
         },
         --- Overload secure action button visibility + anchor (GatheringOverloadActionButton.lua).
         overloadActionButton = {
@@ -184,7 +278,6 @@ local defaults = {
         },
     },
     global = {
-        dataVersion = ns.Constants.DB_VERSION,
         -- NOTE: _schemaVersion / addonVersion are intentionally NOT in defaults:
         -- AceDB strips stored values equal to defaults at logout, which would make
         -- the version stamps unreadable. MigrationService stamps them explicitly.
@@ -215,13 +308,17 @@ local defaults = {
         --- [guid] = { name, realm, class, lastSeen } — GUID-keyed character registry
         --- (GUID survives renames/realm transfers; display names resolved from here).
         charRegistry = {},
-        --- [guid] = { profession, skillLineID, concCurrent, concMax, knowledgeUnspent, at }
+        --- AN-native concentration snapshots (written only while Warband Nexus does not cover them):
+        --- [guid][baseSkillLineID] = { catalogKey, childSkillLineID, concCurrent, concMax, concCycleMS, concPerCycle, concAt, at, ... }
         professionSnapshots = {},
     },
     char = {
         professionEquipmentHints = {},
     },
 }
+
+--- Single source of SavedVariables defaults; services read fallbacks from here instead of re-declaring.
+ns.DEFAULTS = defaults
 
 function ArtisanNexus:OnInitialize()
     self.db = LibStub("AceDB-3.0"):New("ArtisanNexusDB", defaults, true)
@@ -231,60 +328,9 @@ function ArtisanNexus:OnInitialize()
     self.db.RegisterCallback(self, "OnProfileCopied", "OnProfileChanged")
     self.db.RegisterCallback(self, "OnProfileReset", "OnProfileChanged")
 
-    if ns.MigrationService then
-        ns.MigrationService:CheckAddonVersion(self.db, self)
-        local didReset = ns.MigrationService:RunMigrations(self.db)
-        if didReset then
-            for k, v in pairs(defaults.global) do
-                if self.db.global[k] == nil then
-                    if type(v) == "table" then
-                        self.db.global[k] = {}
-                    else
-                        self.db.global[k] = v
-                    end
-                end
-            end
-            for k, v in pairs(defaults.char) do
-                if self.db.char[k] == nil then
-                    if type(v) == "table" then
-                        self.db.char[k] = {}
-                    else
-                        self.db.char[k] = v
-                    end
-                end
-            end
-        end
-    end
-
-    do
-        local p = self.db.profile
-        if not p._gatherLogRemoved202606 then
-            p._gatherLogRemoved202606 = true
-            --- Clear only the orphan SV left by our removed module; never touch a
-            --- standalone GatherLog addon's SavedVariables.
-            local gatherLogLoaded = C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("GatherLog")
-            if not gatherLogLoaded and _G.GatherLogDB and wipe then
-                wipe(_G.GatherLogDB)
-            end
-        end
-        if not p._settingsAlwaysEnabled202606 then
-            p._settingsAlwaysEnabled202606 = true
-            p.enabled = true
-        end
-        if not p._mapOverlayRemoved202606 then
-            p._mapOverlayRemoved202606 = true
-            p.routeHeatmapEnabled = nil
-            p.minimapGatherPinsEnabled = nil
-            p.farmTargetHighlightEnabled = nil
-            p.gatherLootAutoWaypoint = nil
-            p.farmTargetAutoWaypoint = nil
-            local g = self.db.global
-            if g then
-                g.gatherRoutePoints = nil
-                g.farmTargetRoutePoints = nil
-            end
-        end
-    end
+    --- Migrations transform in place and never reset (MigrationService:RunMigrations).
+    ns.MigrationService:CheckAddonVersion(self.db, self)
+    ns.MigrationService:RunMigrations(self.db)
 
     self:RegisterChatCommand("an", "SlashCommand")
     self:RegisterChatCommand("artisan", "SlashCommand")
@@ -294,6 +340,26 @@ function ArtisanNexus:OnInitialize()
     end
 
     self:InitializeMinimapButton()
+
+    -- Create hidden button for keybind toggle (override binding target)  [WN Core.lua]
+    if not _G["ArtisanNexusToggleButton"] then
+        local btn = CreateFrame("Button", "ArtisanNexusToggleButton", UIParent)
+        btn:Hide()
+        btn:SetScript("OnClick", function()
+            if ArtisanNexus and ArtisanNexus.ToggleMainWindow then
+                ArtisanNexus:ToggleMainWindow()
+            end
+        end)
+    end
+
+    -- Apply saved keybind (override binding)
+    self:ApplyToggleKeybind()
+    -- WN Core.lua OnCombatEnd: keybind apply requested during combat was deferred (protected calls).
+    self:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+        if self._pendingToggleKeybindApply and self.ApplyToggleKeybind then
+            self:ApplyToggleKeybind()
+        end
+    end)
 
     self:RegisterMessage(E.FISHING_CHANNEL_STARTED, "OnMessageFishingChannelStarted")
     self:RegisterMessage(E.FISHING_CHANNEL_STOPPED, "OnMessageFishingChannelStopped")
@@ -309,9 +375,6 @@ function ArtisanNexus:OnInitialize()
     if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.Init then
         ns.SessionLootOverlayUI:Init()
     end
-    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.Init then
-        ns.ArtisanSettingsUI:Init()
-    end
     if ns.GatheringOverloadIndicator and ns.GatheringOverloadIndicator.Init then
         ns.GatheringOverloadIndicator:Init()
     end
@@ -324,31 +387,95 @@ function ArtisanNexus:OnInitialize()
     end
 end
 
+--- Warband Nexus Core.lua RefreshTheme (verbatim body, frame global renamed), plus AN's THEME_CHANGED
+--- message for the standalone windows that repaint their own chrome.
 function ArtisanNexus:RefreshTheme()
+    local wasClassic = ns._wnThemeWasClassic
+    local isClassic = ns.UI_IsClassicMode and ns.UI_IsClassicMode()
+    local chromeKindChanged = (wasClassic ~= isClassic)
+    ns._wnThemeWasClassic = isClassic
+
+    local mf = _G.ArtisanNexusFrame
+    if chromeKindChanged and mf then
+        if mf._wnRebuildCloseButton then
+            mf._wnRebuildCloseButton()
+        end
+        if mf._wnRebuildNavButtons then
+            mf._wnRebuildNavButtons()
+        end
+        if ns.UI_RefreshMainShellChrome then
+            ns.UI_RefreshMainShellChrome(mf)
+        end
+    end
+
+    -- Refresh colors (handled by SharedWidgets.RefreshColors)
     if ns.UI_RefreshColors then
         ns.UI_RefreshColors()
     end
-    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.RefreshIfShown then
-        ns.ArtisanSettingsUI:RefreshIfShown()
+
+    -- Full content rebuild when widget class changes (Blizzard vs custom nav/cards).
+    if mf and mf:IsShown() and ArtisanNexus.PopulateContent then
+        if chromeKindChanged or (mf.currentTab == "settings") then
+            ArtisanNexus:PopulateContent(true)
+        end
     end
+
     if E and E.THEME_CHANGED then
         self:SendMessage(E.THEME_CHANGED)
     end
 end
 
-function ArtisanNexus:RefreshUiMode()
-    if ns.UI_ResetMainWindowsForUiMode then
-        ns.UI_ResetMainWindowsForUiMode()
+--- Warband Nexus Core.lua ApplyToggleKeybind (verbatim; toggle button global renamed).
+---Apply (or clear) the toggle keybind from db.profile.toggleKeybind using override binding.
+---Safe to call multiple times; clears previous binding first.
+function ArtisanNexus:ApplyToggleKeybind()
+    local btn = _G["ArtisanNexusToggleButton"]
+    if not btn then return end
+
+    -- Override bindings are protected in combat: ClearOverrideBindings /
+    -- SetOverrideBindingClick would be blocked and taint the binding system
+    -- (action bars stop updating for the rest of the fight). Defer to
+    -- OnCombatEnd instead.
+    if InCombatLockdown() then
+        self._pendingToggleKeybindApply = true
+        return
     end
-    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.RefreshIfShown then
-        ns.ArtisanSettingsUI:RefreshIfShown()
+    self._pendingToggleKeybindApply = nil
+
+    ClearOverrideBindings(btn)
+
+    local key = self.db and self.db.profile and self.db.profile.toggleKeybind
+    if key then
+        local normalized = tostring(key):upper()
+        if normalized == "ESC" or normalized == "ESCAPE" or normalized == "ESCAPEKEY" then
+            -- Safety migration: ESC is reserved for game menu / close flows.
+            self.db.profile.toggleKeybind = nil
+            if self.Print then
+                self:Print("|cffff6600Esc cannot be the toggle key; binding removed.|r")
+            end
+            return
+        end
     end
-    if E and E.THEME_CHANGED then
-        self:SendMessage(E.THEME_CHANGED)
+    if key and key ~= "" and not InCombatLockdown() then
+        SetOverrideBindingClick(btn, true, key, "ArtisanNexusToggleButton")
     end
+end
+
+--- Warband Nexus Core.lua IsStillOnTab (verbatim).
+function ArtisanNexus:IsStillOnTab(expectedTab)
+    if not self.UI or not self.UI.mainFrame then return false end
+    local mf = self.UI.mainFrame
+    return mf:IsShown() and mf.currentTab == expectedTab
 end
 
 function ArtisanNexus:OnProfileChanged()
+    --- The new profile carries its own window scale (WN ApplyUIScale) and fonts (FontManager).
+    if self.ApplyUIScale and self.db and self.db.profile then
+        self:ApplyUIScale(self.db.profile.uiScale or 1.0)
+    end
+    if ns.FontManager and ns.FontManager.RefreshAllFonts then
+        ns.FontManager:RefreshAllFonts()
+    end
     if ns.UI_RefreshColors then
         ns.UI_RefreshColors()
     end
@@ -358,26 +485,58 @@ function ArtisanNexus:OnProfileChanged()
             ns.LootHistoryUI:Refresh()
         end
     end
-    if ns.ArtisanSettingsUI and ns.ArtisanSettingsUI.RefreshIfShown then
-        ns.ArtisanSettingsUI:RefreshIfShown()
-    end
     if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ApplySettingsAnchor then
         ns.SessionLootOverlayUI:ApplySettingsAnchor()
     end
     if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.ApplySettingsScale then
         ns.SessionLootOverlayUI:ApplySettingsScale()
     end
+    if self.RefreshMinimapButton then
+        self:RefreshMinimapButton()
+    end
+    --- profile.economy is a different table now: economy services drop their cached results.
+    --- No key payload = every economy setting may have changed.
+    if E and E.ECONOMY_CONFIG_CHANGED then
+        self:SendMessage(E.ECONOMY_CONFIG_CHANGED)
+    end
     if E and E.THEME_CHANGED then
         self:SendMessage(E.THEME_CHANGED)
     end
+    -- WN Core.lua OnProfileChanged: repaint the main window from the new profile.
+    if E and E.UI_MAIN_REFRESH_REQUESTED then
+        self:SendMessage(E.UI_MAIN_REFRESH_REQUESTED, { skipCooldown = true })
+    end
 end
 
+--- Economy engine services (Modules/Economy/*): enabled in this order, disabled in reverse.
+--- Missing modules are skipped, so a service can ship without touching Core.lua.
+local ECONOMY_SERVICES = {
+    "VendorPriceService",
+    "CraftOpsService",
+    "CraftLedgerService",
+    "SalesLedgerService",
+    "OwnedAuctionsService",
+    "CooldownService",
+    "ConcentrationPlannerService",
+    "CraftingOrdersService",
+    "MarketIntelService",
+    "TooltipService",
+}
+
 function ArtisanNexus:OnEnable()
-    if ns.Utilities and ns.Utilities.TouchCharRegistry then
-        ns.Utilities:TouchCharRegistry()
+    -- Apply the persisted theme (accent + light/dark surfaces) now that the DB is
+    -- loaded: SharedWidgets builds its palette at file load, before SavedVariables
+    -- exist, so light mode would otherwise only apply after a manual re-theme.  [WN Core.lua OnEnable]
+    if ns.UI_RefreshColors then
+        ns.UI_RefreshColors()
     end
+    ns._wnThemeWasClassic = ns.UI_IsClassicMode and ns.UI_IsClassicMode()
+
+    --- Character data backends (Warband Nexus or AN-native) are picked before any collector starts.
+    ns.WarbandNexusBridge:Init()
+    ns.CharacterData:Enable()
     local modules = self.db.profile.modulesEnabled or {}
-    if self.db.profile.enabled and modules.fishing ~= false then
+    if modules.fishing ~= false then
         if ns.FishingService then
             ns.FishingService:Enable()
         end
@@ -385,7 +544,7 @@ function ArtisanNexus:OnEnable()
             ns.FishingLootService:Enable()
         end
     end
-    if self.db.profile.enabled and modules.gathering ~= false then
+    if modules.gathering ~= false then
         if ns.GatheringLootService then
             ns.GatheringLootService:Enable()
         end
@@ -393,29 +552,35 @@ function ArtisanNexus:OnEnable()
             ns.GatheringOverloadService:Enable()
         end
     end
-    if self.db.profile.enabled and ns.BagPressureGuard then
+    if ns.BagPressureGuard then
         ns.BagPressureGuard:Enable()
     end
-    if self.db.profile.enabled and ns.RecipeService then
+    if ns.RecipeService then
         ns.RecipeService:Enable()
     end
-    if self.db.profile.enabled and ns.CraftLootService then
+    if ns.CraftLootService then
         ns.CraftLootService:Enable()
     end
-    if self.db.profile.enabled and ns.ProfessionSnapshotService then
+    if ns.ProfessionSnapshotService then
         ns.ProfessionSnapshotService:Enable()
     end
-    if self.db.profile.enabled and ns.CraftBriefingService then
+    if ns.CraftBriefingService then
         ns.CraftBriefingService:Enable()
     end
-    if self.db.profile.enabled and ns.ProfessionEquipmentService then
+    if ns.ProfessionEquipmentService then
         ns.ProfessionEquipmentService:Enable()
     end
-    if self.db.profile.enabled and ns.ProfessionSidecarUI then
+    if ns.ProfessionSidecarUI then
         ns.ProfessionSidecarUI:Enable()
     end
-    if self.db.profile.enabled and ns.CraftQueueActionButton then
+    if ns.CraftQueueActionButton then
         ns.CraftQueueActionButton:Enable()
+    end
+    for i = 1, #ECONOMY_SERVICES do
+        local svc = ns[ECONOMY_SERVICES[i]]
+        if svc and svc.Enable then
+            svc:Enable()
+        end
     end
     self:SendMessage(E.LOADING_COMPLETE)
 
@@ -438,9 +603,6 @@ function ArtisanNexus:OnPlayerEnteringWorld(_, isInitialLogin, isReloadingUi)
 end
 
 function ArtisanNexus:OnModuleToggled(_, moduleKey, enabled)
-    if not self.db.profile.enabled then
-        return
-    end
     local on = enabled ~= false
     if moduleKey == "fishing" then
         if on then
@@ -496,174 +658,56 @@ function ArtisanNexus:OnDisable()
     if ns.FishingService then
         ns.FishingService:Disable()
     end
+    if ns.CraftLootService and ns.CraftLootService.Disable then
+        ns.CraftLootService:Disable()
+    end
+    if ns.ProfessionSnapshotService and ns.ProfessionSnapshotService.Disable then
+        ns.ProfessionSnapshotService:Disable()
+    end
+    if ns.CraftBriefingService and ns.CraftBriefingService.Disable then
+        ns.CraftBriefingService:Disable()
+    end
+    if ns.ProfessionEquipmentService and ns.ProfessionEquipmentService.Disable then
+        ns.ProfessionEquipmentService:Disable()
+    end
+    if ns.ProfessionSidecarUI and ns.ProfessionSidecarUI.Disable then
+        ns.ProfessionSidecarUI:Disable()
+    end
+    if ns.CraftQueueActionButton and ns.CraftQueueActionButton.Disable then
+        ns.CraftQueueActionButton:Disable()
+    end
+    for i = #ECONOMY_SERVICES, 1, -1 do
+        local svc = ns[ECONOMY_SERVICES[i]]
+        if svc and svc.Disable then
+            svc:Disable()
+        end
+    end
+    ns.CharacterData:Disable()
 end
 
+--- Three commands only; everything else lives in the Hub rail, Settings or the AH/profession windows.
+---   /an          toggle the Artisan Hub
+---   /an history  toggle the session loot history
+---   /an config   open Settings
 function ArtisanNexus:SlashCommand(input)
     input = (input or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    if input == "debug" then
-        self.db.profile.debugMode = not self.db.profile.debugMode
-        self:Print("Debug: " .. (self.db.profile.debugMode and "on" or "off"))
-        if ns.UI_RefreshAllViewportDebugChrome then
-            ns.UI_RefreshAllViewportDebugChrome()
-        end
+    if input == "" then
+        self:ToggleMainWindow()
         return
     end
-    if input == "version" or input == "ver" then
-        local ver = (ns.Constants and ns.Constants.ADDON_VERSION) or "?"
-        self:Print((L and L["ADDON_NAME"]) or ADDON_NAME .. " " .. ver)
-        return
-    end
-    if input == "changelog" or input == "whatsnew" or input == "news" then
-        local ver = (ns.Constants and ns.Constants.ADDON_VERSION) or "0.1.0"
-        local key = VersionToChangelogKey(ver)
-        local text = key and L and L[key]
-        if text and text ~= "" then
-            for line in text:gmatch("[^\n]+") do
-                self:Print(line)
-            end
-        else
-            self:Print("No in-game changelog for v" .. ver .. ". See CHANGELOG.md.")
-        end
-        return
-    end
-    if input == "help" or input == "?" or input == "" then
-        self:Print((L and L["SLASH_HELP_HEADER"]) or "Commands:")
-        self:Print((L and L["SLASH_HELP_LINE"]) or "/an debug, /an version")
-        if L and L["SLASH_HELP_LINE2"] and L["SLASH_HELP_LINE2"] ~= "" then
-            self:Print(L["SLASH_HELP_LINE2"])
-        end
-        return
-    end
-    if input == "config" or input == "settings" or input == "options" then
-        if ns.OpenAddonSettings then
-            ns.OpenAddonSettings()
-        end
-        return
-    end
-    if input == "minimap" or input == "minimapbutton" or input == "icon" then
-        self:ToggleMinimapButton()
-        return
-    end
-    if input == "fish" then
-        if ns.LootHistoryUI then
-            ns.LootHistoryUI:Show("fishing")
-        end
-        return
-    end
-    if input == "gather" or input == "gathering" or input == "herb" then
-        if ns.LootHistoryUI then
-            ns.LootHistoryUI:Show("herb")
-        end
-        return
-    end
-    if input == "mine" or input == "mining" or input == "ore" then
-        if ns.LootHistoryUI then
-            ns.LootHistoryUI:Show("mine")
-        end
-        return
-    end
-    if input == "leather" or input == "skinning" or input == "skin" then
-        if ns.LootHistoryUI then
-            ns.LootHistoryUI:Show("leather")
-        end
-        return
-    end
-    if input == "disenchant" or input == "de" or input == "enchant" then
-        if ns.LootHistoryUI then
-            ns.LootHistoryUI:Show("disenchant")
-        end
-        return
-    end
-    if input == "others" or input == "other" or input == "mote" or input == "shared" then
-        if ns.LootHistoryUI then
-            ns.LootHistoryUI:Show("others")
-        end
-        return
-    end
-    if input == "history" or input == "loot" then
+    if input == "history" then
         if ns.LootHistoryUI then
             ns.LootHistoryUI:Toggle()
         end
         return
     end
-    if input == "overlay" or input == "lootoverlay" or input == "loothud"
-        or input:match("^overlay%s+")
-        or input:match("^lootoverlay%s+")
-        or input:match("^loothud%s+") then
-        local O = ns.SessionLootOverlayUI
-        if not O then
-            self:Print((L and L["SLASH_OVERLAY_UNAVAILABLE"]) or "Session loot overlay is unavailable.")
-            return
-        end
-        local sub = input:match("^%S+%s+(.+)$") or ""
-        sub = sub:match("^%s*(.-)%s*$") or ""
-        if sub == "move" or sub == "position" or sub == "pos" then
-            if O.TogglePositionEdit then
-                O:TogglePositionEdit()
-            end
-            return
-        end
-        if sub ~= "" then
-            return
-        end
-        local on
-        if O.Toggle then
-            on = O:Toggle()
-        end
-        if on then
-            self:Print((L and L["SLASH_OVERLAY_ON"]) or "Session loot overlay shown.")
-        else
-            self:Print((L and L["SLASH_OVERLAY_OFF"]) or "Session loot overlay hidden.")
+    if input == "config" then
+        if ns.OpenAddonSettings then
+            ns.OpenAddonSettings()
         end
         return
     end
-    if input == "recipe" or input == "recipes" or input == "craft" or input == "matcher" then
-        if ns.RecipeMatcherUI then
-            ns.RecipeMatcherUI:Toggle()
-        end
-        return
-    end
-    if input == "scanrecipes" or input == "harvest" then
-        if ns.RecipeService then
-            local svc = ns.RecipeService
-            if svc.IsHarvestChunkActive and svc:IsHarvestChunkActive() then
-                self:Print("Recipe scan already in progress.")
-                return
-            end
-            if svc.HarvestOpenProfessionChunked then
-                svc:HarvestOpenProfessionChunked(function(n)
-                    self:Print(string.format("Harvested %d recipe schematics.", n))
-                end)
-            else
-                local n = svc:HarvestOpenProfession()
-                self:Print(string.format("Harvested %d recipe schematics.", n))
-            end
-        end
-        return
-    end
-    if input == "ah" or input == "ahprice" or input == "ahscan" then
-        if ns.AHPriceService and ns.AHPriceService.StartScan then
-            --- force + full catalog (same as AH window “Sync AH Prices” button)
-            ns.AHPriceService:StartScan(true, true)
-        else
-            self:Print("AH price scan is unavailable.")
-        end
-        return
-    end
-    if input == "hub" or input == "profit" or input == "profitability" or input == "shop" or input == "shopping" or input == "queue" then
-        if ns.ArtisanHubUI then
-            if input == "hub" then
-                ns.ArtisanHubUI:Toggle()
-            else
-                --- Route the alias straight to its tab (Show normalizes the key).
-                ns.ArtisanHubUI:Show(input)
-            end
-        else
-            self:Print("Artisan Hub is unavailable.")
-        end
-        return
-    end
-    self:Print((L and L["SLASH_HELP_LINE"]) or "/an help")
+    self:Print((L and L["SLASH_HELP_LINE"]) or "|cff00ccff/an|r Artisan Hub  ·  |cff00ccff/an history|r Session Loot  ·  |cff00ccff/an config|r Settings")
 end
 
 function ArtisanNexus:Print(msg)

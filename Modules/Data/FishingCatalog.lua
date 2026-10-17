@@ -48,6 +48,12 @@ local ENTRIES = {
     { note = "Many-Eyed Flounder", ranks = { 279100 } },
     { note = "Twin-Headed Snipefish", ranks = { 279105 } },
     { note = "Loathsome Anglerfish", ranks = { 279106 } },
+
+    --- Candidates NOT listed (source unconfirmed, checked 2026-10-15): Coiled Isle starfish
+    --- 274595 Pristine Polygon, 274596 Beached Asteroid, 274597 Bulbous Benthos — ItemSparse
+    --- 12.1.5 only says "starfish from the Coiled Isle" (Trade Goods / Other), and no real
+    --- SavedVariables catch or DB2 link confirms they are fished. Add them once a catch
+    --- (fishing loot window) is observed in-game.
 }
 
 ---@return table[]

@@ -158,14 +158,4 @@ function GatheringNodeOverloadRegistry.Resolve(lines)
     return nil, nil, nil
 end
 
---- For options / debug: expose read-only counts (optional).
-function GatheringNodeOverloadRegistry.GetExactNameCount()
-    BuildExactNameMap()
-    local n = 0
-    for _ in pairs(EXACT_NAME_MAP) do
-        n = n + 1
-    end
-    return n
-end
-
 ns.GatheringNodeOverloadRegistry = GatheringNodeOverloadRegistry

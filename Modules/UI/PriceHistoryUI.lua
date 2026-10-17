@@ -1,67 +1,75 @@
 --[[
-    Artisan Nexus — Price History sparkline.
+    Artisan Nexus — Price History popup + sparkline.
 
     Public API:
       PriceHistoryUI:CreateSparkline(parent, width, height) -> Frame
         :Update(itemID, windowSec)
         :Clear()
 
-      PriceHistoryUI:ShowPopup(itemID, anchor, anchorPoint?)
-        Toggle a small floating window with the sparkline + stats for an
-        item. Used by Hub rows and the AH sync button on right-click.
+      PriceHistoryUI:ShowPopup(itemID, anchor, anchorPoint?, relativePoint?, xOfs?, yOfs?)
+        Small popup with the 7-day sparkline + stats for an item (Hub Crafting detail
+        "Price history" button). PriceHistoryUI:HidePopup() closes it.
 
-    Sparkline rendering: bars drawn as 1px-wide texture columns under the
-    sample line; the sample line itself is a series of thin diagonal
-    textures connecting consecutive points. Cheap (no LibGraph dependency).
+    Popup = Warband Nexus external window (WindowFactory.lua CreateExternalWindow, as
+    GoldManagementPopup.lua:91 / MailDetailsPopup.lua:559 use it): title band, close button,
+    ESC + combat hide (WindowManager POPUP tier), click outside closes, body below the band.
+    Built once (persistent shell) and re-anchored beside the opener on every show.
+
+    Chart: the viewport surface of the WN floating windows (ns.ArtisanWindow.ApplyViewportShellChrome)
+    with accent bars and a step line drawn from plain textures (no LibGraph dependency).
 ]]
 
 local ADDON_NAME, ns = ...
-
-local L = ns.L
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
 
 local PriceHistoryUI = {}
 local POPUP_FRAME = nil
---- Last ShowPopup args so a theme-change rebuild can restore the popup in place.
-local LAST_ITEMID, LAST_ANCHOR, LAST_POINT = nil, nil, nil
+--- Last ShowPopup args so a theme change can repaint the visible popup in place.
+local LAST_ITEMID, LAST_ANCHOR, LAST_POINT, LAST_REL, LAST_X, LAST_Y = nil, nil, nil, nil, nil, nil
 
---- Live palette — resolve at call time (UI_RefreshColors swaps sub-tables).
-local function C()
-    return ns.UI_COLORS or {}
+local WEEK = 7 * 24 * 3600
+
+-- Popup geometry (MailDetailsPopup.lua LAYOUT pattern: one pad, body stacked top-down).
+local POPUP_W = 360
+local PAD = 12
+local ITEM_ROW_H = 24
+local ITEM_ICON = 22
+local BLOCK_GAP = 8
+local CHART_H = 104
+-- Sparkline insets: stats line on top, min label at the bottom, plot area between.
+local SPARK_PAD = 6
+local SPARK_TOP = 20
+local SPARK_BOTTOM = 18
+local LINE_W = 2
+
+local function L(key, fallback)
+    return (ns.L and ns.L[key]) or fallback
 end
 
-local function Font(role)
-    local f = ns.UI_FONTS
-    if f and role and f[role] then
-        return f[role]
+local function COLORS()
+    return ns.UI_COLORS or { accent = { 0.5, 0.4, 0.7 }, accentDark = { 0.25, 0.2, 0.35 } }
+end
+
+--- WN text-role / semantic inline colors (RecipeCompanionWindow.lua TextRoleHex pattern).
+local function RoleHex(role)
+    local raw = (ns.UI_GetTextRoleHexRaw and ns.UI_GetTextRoleHexRaw(role)) or "ffffff"
+    return "|cff" .. raw
+end
+
+local function GreenHex()
+    return (ns.UI_GetSemanticGreenHex and ns.UI_GetSemanticGreenHex()) or "|cff44ff44"
+end
+
+local function RedHex()
+    if ns.UI_GetSemanticRedColor then
+        local r, g, b = ns.UI_GetSemanticRedColor()
+        return string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
     end
-    return (f and f.WINDOW_BODY) or "GameFontNormal"
+    return "|cffff6666"
 end
 
---- Skin-branching surface styler: classic tooltip-border inset vs modern pixel
---- chrome. Bare UI_ApplyVisuals is a NO-OP in Classic — this popup used to
---- render as floating bars over nothing there.
-local function Apply(frame, bg, border)
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(frame, bg, border)
-    elseif ns.UI_ApplyVisuals then
-        ns.UI_ApplyVisuals(frame, bg, border)
-    elseif frame.SetBackdrop then
-        frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
-        frame:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
-    end
-end
-
---- Semantic hex from the live palette (trend arrows / % tint).
-local function HexRole(text, kind)
-    local hex = ns.UI_GetSemanticHex and ns.UI_GetSemanticHex(kind)
-    if not hex then
-        return text
-    end
-    return "|cff" .. hex .. text .. "|r"
-end
-
---- Shared helpers (Modules/Utilities.lua; loads before this file per TOC).
---- This UI shows "-" for missing values, so wrap the nil-returning shared formatter.
+--- Shared money formatter (Modules/Utilities.lua); "-" for missing values.
 local function FormatCopper(c)
     return ns.FormatCopper(c) or "-"
 end
@@ -69,145 +77,154 @@ end
 local ItemName = ns.GetItemDisplayName
 local ItemIcon = ns.GetItemIconFileID
 
+--- Chart surface: WN floating-window viewport shell (panel fill + card border).
+local function SkinSparkline(f)
+    local W = ns.ArtisanWindow
+    if W and W.ApplyViewportShellChrome then
+        W.ApplyViewportShellChrome(f)
+    end
+    ns.UI_SetTextColorRole(f._title, "Normal")
+    ns.UI_SetTextColorRole(f._lo, "Muted")
+    ns.UI_SetTextColorRole(f._hi, "Muted")
+end
+
+local function HideAll(list)
+    for i = 1, #list do list[i]:Hide() end
+end
+
+local function AcquireTexture(f, list, i, layer)
+    local tex = list[i]
+    if not tex then
+        tex = f:CreateTexture(nil, layer)
+        list[i] = tex
+    end
+    tex:ClearAllPoints()
+    return tex
+end
+
 --- Build a reusable sparkline frame.
 function PriceHistoryUI:CreateSparkline(parent, width, height)
     local f = CreateFrame("Frame", nil, parent)
     f:SetSize(width or 240, height or 72)
-    local rowBg = C().rowBg or { 0.05, 0.05, 0.07, 0.85 }
-    local grid = C().sparkGrid or { 0.30, 0.26, 0.36, 1 }
-    Apply(f, { rowBg[1], rowBg[2], rowBg[3], 0.95 }, { grid[1], grid[2], grid[3], 0.85 })
     f._lines = {}
     f._bars = {}
-    f._labels = {}
 
-    local title = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_BODY"))
-    title:SetPoint("TOPLEFT", 6, -4)
+    local FontManager = ns.FontManager
+    local title = FontManager:CreateFontString(f, "small", "OVERLAY")
+    title:SetPoint("TOPLEFT", SPARK_PAD, -SPARK_PAD + 1)
+    title:SetPoint("RIGHT", f, "RIGHT", -SPARK_PAD, 0)
+    title:SetJustifyH("LEFT")
+    title:SetWordWrap(false)
     f._title = title
 
-    local muted = C().textMuted or { 0.72, 0.69, 0.78, 1 }
-    local lo = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
-    lo:SetPoint("BOTTOMLEFT", 6, 4)
-    lo:SetTextColor(muted[1], muted[2], muted[3])
+    local lo = FontManager:CreateFontString(f, "small", "OVERLAY")
+    lo:SetPoint("BOTTOMLEFT", SPARK_PAD, SPARK_PAD - 2)
+    lo:SetJustifyH("LEFT")
     f._lo = lo
 
-    local hi = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
-    hi:SetPoint("TOPRIGHT", -6, -4)
-    hi:SetTextColor(muted[1], muted[2], muted[3])
+    local hi = FontManager:CreateFontString(f, "small", "OVERLAY")
+    hi:SetPoint("BOTTOMRIGHT", -SPARK_PAD, SPARK_PAD - 2)
+    hi:SetJustifyH("RIGHT")
     f._hi = hi
+    SkinSparkline(f)
 
     f.Update = function(self, itemID, windowSec)
-        --- Re-resolve surface/label chrome per render: embedded instances can
-        --- outlive a theme toggle when their host window doesn't rebuild.
-        local rowBg2 = C().rowBg or { 0.05, 0.05, 0.07, 0.85 }
-        local grid2 = C().sparkGrid or { 0.30, 0.26, 0.36, 1 }
-        Apply(self, { rowBg2[1], rowBg2[2], rowBg2[3], 0.95 }, { grid2[1], grid2[2], grid2[3], 0.85 })
-        local muted2 = C().textMuted or { 0.72, 0.69, 0.78, 1 }
-        self._lo:SetTextColor(muted2[1], muted2[2], muted2[3])
-        self._hi:SetTextColor(muted2[1], muted2[2], muted2[3])
-        local lines = self._lines
-        for i = 1, #lines do lines[i]:Hide() end
-        local bars = self._bars
-        for i = 1, #bars do bars[i]:Hide() end
+        -- Re-resolve chrome per render: embedded instances can outlive a theme toggle.
+        SkinSparkline(self)
+        HideAll(self._lines)
+        HideAll(self._bars)
         local svc = ns.PriceHistoryService
         local samples = svc and svc:GetSamples(itemID) or {}
         local stats = svc and svc:GetStats(itemID, windowSec) or { count = 0 }
         if not samples or #samples < 2 or stats.count < 2 then
-            self._title:SetText((L and L["PRICE_HISTORY_NO_HISTORY"]) or "|cff888888no history|r")
+            ns.UI_SetTextColorRole(self._title, "Muted")
+            self._title:SetText(L("PRICE_HISTORY_NO_HISTORY", "No price history yet."))
             self._lo:SetText("")
             self._hi:SetText("")
             return
         end
 
-        local w = self:GetWidth() - 12
-        local h = self:GetHeight() - 32
-        local x0, y0 = 6, 18
-
-        local mn = stats.min or samples[1].p
-        local mx = stats.max or samples[#samples].p
-        local pad = math.max(1, math.floor((mx - mn) * 0.05))
-        mn = math.max(0, mn - pad); mx = mx + pad
-        local span = math.max(1, mx - mn)
-
         -- Filter to window
-        local cutoff = time() - (windowSec or (7 * 24 * 3600))
+        local cutoff = time() - (windowSec or WEEK)
         local pts = {}
         for si = 1, #samples do
             local s = samples[si]
             if s.t and s.t >= cutoff and s.p and s.p > 0 then pts[#pts + 1] = s end
         end
         if #pts < 2 then
-            self._title:SetText((L and L["PRICE_HISTORY_NOT_ENOUGH"]) or "|cff888888not enough data|r")
-            self._lo:SetText(""); self._hi:SetText("")
+            ns.UI_SetTextColorRole(self._title, "Muted")
+            self._title:SetText(L("PRICE_HISTORY_NOT_ENOUGH", "Not enough data in the last 7 days."))
+            self._lo:SetText("")
+            self._hi:SetText("")
             return
         end
 
+        local w = self:GetWidth() - SPARK_PAD * 2
+        local h = self:GetHeight() - SPARK_TOP - SPARK_BOTTOM
+        local x0, y0 = SPARK_PAD, SPARK_BOTTOM
+
+        local mn = stats.min or pts[1].p
+        local mx = stats.max or pts[#pts].p
+        local pad = math.max(1, math.floor((mx - mn) * 0.05))
+        mn = math.max(0, mn - pad); mx = mx + pad
+        local span = math.max(1, mx - mn)
+
         local tMin = pts[1].t
-        local tMax = pts[#pts].t
-        local tSpan = math.max(1, tMax - tMin)
+        local tSpan = math.max(1, pts[#pts].t - tMin)
 
         local function XAt(i) return x0 + ((pts[i].t - tMin) / tSpan) * w end
         local function YAt(i) return y0 + ((pts[i].p - mn) / span) * h end
 
-        -- Draw bars (subtle backdrop columns); color per render — theme may change
-        local barCol = C().sparkBar or { 0.30, 0.26, 0.36, 1 }
+        local ac = COLORS().accent
+        -- Sample columns: accent wash under every point.
         for i = 1, #pts do
-            local bar = self._bars[i]
-            if not bar then
-                bar = self:CreateTexture(nil, "BACKGROUND")
-                self._bars[i] = bar
-            end
-            bar:SetColorTexture(barCol[1], barCol[2], barCol[3], 0.25)
-            local x = XAt(i)
+            local bar = AcquireTexture(self, self._bars, i, "BACKGROUND")
+            bar:SetDrawLayer("BACKGROUND", 2)
+            bar:SetColorTexture(ac[1], ac[2], ac[3], 0.25)
             local y = YAt(i)
-            bar:SetPoint("BOTTOMLEFT", x - 1, y0)
+            bar:SetPoint("BOTTOMLEFT", self, "BOTTOMLEFT", XAt(i) - 1, y0)
             bar:SetSize(2, math.max(2, y - y0))
             bar:Show()
         end
 
-        -- Draw line as connected segments (thin diagonal textures)
-        local lineCol = C().sparkLine or { 0.85, 0.65, 1.0, 1 }
+        -- Step line: horizontal run at the previous price, vertical riser at the next sample.
+        local n = 0
+        local function Segment(x, y, sw, sh)
+            n = n + 1
+            local seg = AcquireTexture(self, self._lines, n, "ARTWORK")
+            seg:SetColorTexture(ac[1], ac[2], ac[3], 0.95)
+            seg:SetPoint("BOTTOMLEFT", self, "BOTTOMLEFT", x, y)
+            seg:SetSize(math.max(LINE_W, sw), math.max(LINE_W, sh))
+            seg:Show()
+        end
         for i = 1, #pts - 1 do
-            local seg = self._lines[i]
-            if not seg then
-                seg = self:CreateTexture(nil, "ARTWORK")
-                self._lines[i] = seg
-            end
             local x1, y1 = XAt(i), YAt(i)
             local x2, y2 = XAt(i + 1), YAt(i + 1)
-            local dx, dy = x2 - x1, y2 - y1
-            local len = math.max(1, math.sqrt(dx * dx + dy * dy))
-            -- Approximate the segment as a thick textured bar; rotation isn't
-            -- worth the cost for a 60-sample chart, so we tile horizontally.
-            seg:ClearAllPoints()
-            seg:SetPoint("BOTTOMLEFT", math.min(x1, x2), math.min(y1, y2))
-            seg:SetSize(math.max(1, math.abs(dx)), math.max(2, math.abs(dy) + 2))
-            seg:SetColorTexture(lineCol[1], lineCol[2], lineCol[3], 0.85)
-            seg:Show()
+            Segment(x1, y1 - LINE_W / 2, x2 - x1, LINE_W)
+            if math.abs(y2 - y1) >= 1 then
+                Segment(x2 - LINE_W / 2, math.min(y1, y2) - LINE_W / 2, LINE_W, math.abs(y2 - y1) + LINE_W)
+            end
         end
 
         local trend, pct = svc:GetTrend(itemID, windowSec)
-        local arrow = (trend > 0 and HexRole("▲", "success"))
-            or (trend < 0 and HexRole("▼", "danger"))
-            or HexRole("•", "dim")
-        local pctHex = ns.UI_GetSemanticHex
-            and ("|cff" .. ns.UI_GetSemanticHex((pct >= 0) and "success" or "danger"))
-            or ((pct >= 0) and "|cff66ff66" or "|cffff6666")
+        local arrow = (trend > 0 and (GreenHex() .. "▲|r"))
+            or (trend < 0 and (RedHex() .. "▼|r"))
+            or (RoleHex("Dim") .. "•|r")
+        ns.UI_SetTextColorRole(self._title, "Normal")
         self._title:SetText(string.format(
-            (L and L["PRICE_HISTORY_TITLE_FMT"]) or "%s avg %s - last %s - %s%+.1f%%",
+            L("PRICE_HISTORY_TITLE_FMT", "%s avg %s - last %s - %s%+.1f%%"),
             arrow,
             FormatCopper(stats.avg),
             FormatCopper(stats.latest),
-            pctHex,
-            pct or 0))
-        self._lo:SetText(string.format((L and L["PRICE_HISTORY_MIN_FMT"]) or "min %s", FormatCopper(stats.min)))
-        self._hi:SetText(string.format((L and L["PRICE_HISTORY_MAX_FMT"]) or "max %s", FormatCopper(stats.max)))
+            ((pct or 0) >= 0) and GreenHex() or RedHex(),
+            pct or 0) .. "|r")
+        self._lo:SetText(string.format(L("PRICE_HISTORY_MIN_FMT", "min %s"), FormatCopper(stats.min)))
+        self._hi:SetText(string.format(L("PRICE_HISTORY_MAX_FMT", "max %s"), FormatCopper(stats.max)))
     end
 
     f.Clear = function(self)
-        local lines = self._lines
-        for i = 1, #lines do lines[i]:Hide() end
-        local bars = self._bars
-        for i = 1, #bars do bars[i]:Hide() end
+        HideAll(self._lines)
+        HideAll(self._bars)
         self._title:SetText("")
         self._lo:SetText("")
         self._hi:SetText("")
@@ -216,88 +233,109 @@ function PriceHistoryUI:CreateSparkline(parent, width, height)
     return f
 end
 
+--- External-window shell (WindowFactory CreateExternalWindow, persistent) + body.
 local function BuildPopup()
-    local f = CreateFrame("Frame", "ArtisanNexusPriceHistoryPopup", UIParent, "BackdropTemplate")
-    f:SetSize(336, 132)
-    --- Hover-detail popup over DIALOG-strata craft windows; TOOLTIP is
-    --- reserved (rule ceiling: FULLSCREEN_DIALOG for addon popups).
-    f:SetFrameStrata("FULLSCREEN_DIALOG")
-    f:SetClampedToScreen(true)
-    f:Hide()
-    local bg = C().bg or { 0.065, 0.062, 0.076, 0.97 }
-    local ac = C().accent or { 0.44, 0.32, 0.58, 1 }
-    Apply(f, { bg[1], bg[2], bg[3], 0.97 }, { ac[1], ac[2], ac[3], 0.9 })
+    local create = ns.UI_CreateExternalWindow
+    if not create then return nil end
+    local chartW = POPUP_W - PAD * 2
+    local headerH = (ns.UI_LAYOUT and ns.UI_LAYOUT.MAIN_SHELL and ns.UI_LAYOUT.MAIN_SHELL.HEADER_BAR_HEIGHT) or 40
+    local height = headerH + PAD + ITEM_ROW_H + BLOCK_GAP + CHART_H + PAD
+    local dialog, content = create({
+        name = "PriceHistoryPopup",
+        title = L("PRICE_HISTORY_POPUP_TITLE", "Price history"),
+        icon = "Interface\\Icons\\INV_Misc_Coin_01",
+        width = POPUP_W,
+        height = height,
+        preventDuplicates = false,
+        persistent = true,
+    })
+    if not dialog or not content then return nil end
 
-    local icon = f:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(22, 22); icon:SetPoint("TOPLEFT", 6, -6)
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    f._icon = icon
+    local FontManager = ns.FontManager
+    -- Item row: icon + name (MailDetailsPopup item rows: icon well + body text).
+    local iconFrame = ns.UI_CreateIcon(content, 134400, ITEM_ICON, false, nil, false)
+    iconFrame:SetPoint("TOPLEFT", content, "TOPLEFT", PAD, -PAD - (ITEM_ROW_H - ITEM_ICON) / 2)
+    iconFrame:Show()
+    dialog._anIcon = iconFrame
 
-    local name = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_SECTION"))
-    name:SetPoint("LEFT", icon, "RIGHT", 6, 0)
-    --- Bound to the popup edge: long localized item names must truncate, not
-    --- overflow the 336px frame.
-    name:SetPoint("RIGHT", f, "RIGHT", -8, 0)
+    local name = FontManager:CreateFontString(content, "title", "OVERLAY")
+    name:SetPoint("LEFT", iconFrame, "RIGHT", BLOCK_GAP, 0)
+    -- Long localized item names truncate inside the popup.
+    name:SetPoint("RIGHT", content, "RIGHT", -PAD, 0)
     name:SetJustifyH("LEFT")
     name:SetWordWrap(false)
     name:SetMaxLines(1)
-    local tb = C().textBright or { 0.96, 0.95, 0.97, 1 }
-    name:SetTextColor(tb[1], tb[2], tb[3])
-    f._name = name
+    ns.UI_SetTextColorRole(name, "Bright")
+    dialog._anName = name
 
-    local spark = PriceHistoryUI:CreateSparkline(f, 320, 88)
-    spark:SetPoint("BOTTOM", 0, 6)
-    f._spark = spark
-    return f
+    local spark = PriceHistoryUI:CreateSparkline(content, chartW, CHART_H)
+    spark:SetPoint("TOPLEFT", content, "TOPLEFT", PAD, -(PAD + ITEM_ROW_H + BLOCK_GAP))
+    dialog._anSpark = spark
+    return dialog
 end
 
-function PriceHistoryUI:ShowPopup(itemID, anchor, anchorPoint)
+local function SetItemIcon(iconFrame, itemID)
+    local tex = iconFrame and (iconFrame.texture or iconFrame.icon or iconFrame.Icon)
+    if tex and tex.SetTexture then
+        tex:SetTexture(ItemIcon(itemID))
+    end
+end
+
+function PriceHistoryUI:ShowPopup(itemID, anchor, anchorPoint, relativePoint, xOfs, yOfs)
     LAST_ITEMID, LAST_ANCHOR, LAST_POINT = itemID, anchor, anchorPoint
+    LAST_REL, LAST_X, LAST_Y = relativePoint, xOfs, yOfs
     if not POPUP_FRAME then POPUP_FRAME = BuildPopup() end
+    if not POPUP_FRAME then return end
     POPUP_FRAME:ClearAllPoints()
-    if anchor then
-        POPUP_FRAME:SetPoint(anchorPoint or "TOPLEFT", anchor, "TOPRIGHT", 8, 0)
+    if GameTooltip and GameTooltip:IsShown() and GameTooltip:GetOwner() == anchor then
+        POPUP_FRAME:SetPoint("TOPLEFT", GameTooltip, "BOTTOMLEFT", 0, -4)
+    elseif anchor then
+        POPUP_FRAME:SetPoint(anchorPoint or "TOPLEFT", anchor, relativePoint or "TOPRIGHT", xOfs or 8, yOfs or 0)
     else
         POPUP_FRAME:SetPoint("CENTER")
     end
-    POPUP_FRAME._icon:SetTexture(ItemIcon(itemID))
-    POPUP_FRAME._name:SetText(ItemName(itemID))
-    POPUP_FRAME._spark:Update(itemID, 7 * 24 * 3600)
+    SetItemIcon(POPUP_FRAME._anIcon, itemID)
+    POPUP_FRAME._anName:SetText(ItemName(itemID))
+    POPUP_FRAME._anSpark:Update(itemID, WEEK)
     POPUP_FRAME:Show()
+    if POPUP_FRAME.Raise then POPUP_FRAME:Raise() end
 end
 
 function PriceHistoryUI:HidePopup()
-    if POPUP_FRAME then POPUP_FRAME:Hide() end
-end
-
---- UI-mode switch: drop the cached popup so the next ShowPopup rebuilds with
---- the active skin (called from ns.UI_ResetMainWindowsForUiMode).
-function PriceHistoryUI:ResetForUiMode()
-    if POPUP_FRAME then
-        POPUP_FRAME:Hide()
-        --- Popup + embedded sparkline carry ApplyVisuals chrome — leave
-        --- BORDER_REGISTRY before discarding (theme rebuild path included).
-        if ns.UI_UnregisterVisuals then
-            ns.UI_UnregisterVisuals(POPUP_FRAME)
+    if POPUP_FRAME and POPUP_FRAME:IsShown() then
+        if POPUP_FRAME.Close then
+            POPUP_FRAME.Close()
+        else
+            POPUP_FRAME:Hide()
         end
-        POPUP_FRAME = nil
     end
 end
 
---- Theme change: colors are baked at build time, so drop the cached popup.
---- If it was visible, rebuild immediately with the same item + anchor.
+--- Theme change: re-skin the kept shell in place (WindowFactory RefreshExternalWindowChrome).
+function PriceHistoryUI:ResetForTheme()
+    if not POPUP_FRAME then return end
+    if ns.UI_RefreshExternalWindowChrome then
+        ns.UI_RefreshExternalWindowChrome(POPUP_FRAME)
+    end
+    ns.UI_SetTextColorRole(POPUP_FRAME._anName, "Bright")
+    SkinSparkline(POPUP_FRAME._anSpark)
+end
+
+--- Theme / font change: repaint the cached popup; a visible one re-renders with the same
+--- item and the full anchor (point, relativePoint, offsets).
 do
-    local E = ns.Constants and ns.Constants.EVENTS
-    if E and E.THEME_CHANGED and ns.NewEventOwner then
+    local E = ns.Constants.EVENTS
+    if E and ns.NewEventOwner then
         local owner = ns.NewEventOwner("PriceHistoryUI")
         PriceHistoryUI._eventOwner = owner
-        owner:RegisterMessage(E.THEME_CHANGED, function()
-            local wasShown = POPUP_FRAME and POPUP_FRAME:IsShown()
-            PriceHistoryUI:ResetForUiMode()
-            if wasShown and LAST_ITEMID then
-                PriceHistoryUI:ShowPopup(LAST_ITEMID, LAST_ANCHOR, LAST_POINT)
+        local function Repaint()
+            PriceHistoryUI:ResetForTheme()
+            if POPUP_FRAME and POPUP_FRAME:IsShown() and LAST_ITEMID then
+                PriceHistoryUI:ShowPopup(LAST_ITEMID, LAST_ANCHOR, LAST_POINT, LAST_REL, LAST_X, LAST_Y)
             end
-        end)
+        end
+        if E.THEME_CHANGED then owner:RegisterMessage(E.THEME_CHANGED, Repaint) end
+        if E.FONT_CHANGED then owner:RegisterMessage(E.FONT_CHANGED, Repaint) end
     end
 end
 

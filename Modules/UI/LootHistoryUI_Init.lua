@@ -6,7 +6,7 @@
 local ADDON_NAME, ns = ...
 
 local ArtisanNexus = ns.ArtisanNexus
-local E = ns.Constants and ns.Constants.EVENTS
+local E = ns.Constants.EVENTS
 local M = ns.LootHistoryUI
 
 assert(M and ArtisanNexus, "LootHistoryUI_Init: load LootHistoryUI.lua first")
@@ -161,6 +161,14 @@ local function OnThemeChanged()
     end
 end
 
+--- Font face / scale change (PlansTrackerWindow.lua:2737): re-wrap the tab bars and repaint.
+local function OnFontChanged()
+    if M.main and M.main:IsShown() then
+        M:LayoutBody()
+        M:Refresh()
+    end
+end
+
 function M:Init()
     local saved = ns.db and ns.db.profile and ns.db.profile.lootHistoryActiveTab
     if saved and self:IsValidTab(saved) then
@@ -188,5 +196,8 @@ function M:Init()
     end
     if E.THEME_CHANGED then
         owner:RegisterMessage(E.THEME_CHANGED, OnThemeChanged)
+    end
+    if E.FONT_CHANGED then
+        owner:RegisterMessage(E.FONT_CHANGED, OnFontChanged)
     end
 end

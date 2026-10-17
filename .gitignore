@@ -78,6 +78,11 @@ ArtisanNexus/
 !LICENSE
 !CHANGELOG.md
 !PUBLISHING.md
+!README.md
+
+# Maintainer tooling (excluded from the package by .pkgmeta).
+!tools/
+!tools/**
 
 !Modules/
 !Modules/**
@@ -91,6 +96,10 @@ ArtisanNexus/
 !Media/
 !Media/**
 
+# Bundled fonts (Warband Nexus FontManager: Expressway default + LSM registrations).
+!Fonts/
+!Fonts/**
+
 # Vendor meta (upstream Ace/lib changelogs — not runtime)
 libs/changelog.txt
 libs/CHANGES.txt
@@ -103,3 +112,6 @@ libs/embeds.xml
 libs/Bindings.xml
 libs/Ace3.lua
 libs/LibDeflate/.xml
+# LibSharedMedia-3.0 (embedded like Warband Nexus; the two patterns above would hide it).
+!libs/LibSharedMedia-3.0/
+!libs/LibSharedMedia-3.0/**

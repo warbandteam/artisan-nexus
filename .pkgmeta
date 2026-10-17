@@ -21,9 +21,9 @@ ignore:
   - libs/embeds.xml
   - libs/Bindings.xml
   - libs/Ace3.lua
-  - libs/LibDeflate/.xml
   - Locales/.tmp/
   - .github
   - _ignored
   - Pack-ArtisanNexus.ps1
   - PUBLISHING.md
+  - tools

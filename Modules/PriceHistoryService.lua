@@ -7,7 +7,9 @@
 
     Storage shape (ArtisanNexusDB.global.ahPriceHistory):
       [itemID] = {
-        samples = { { t = unix, p = copperPerUnit }, ... },  -- ordered ascending
+        samples = { { t = unix, p = copperPerUnit, q? = listed units, qs? = quantity source }, ... },  -- ordered ascending
+      qs: "b" browse totalQuantity | "c" commodity book (own excluded); nil on samples of older builds.
+      Quantities are only comparable within one source (MarketIntelService demand estimate).
       }
 
     Cap per item: HISTORY_MAX_SAMPLES (default 96 ≈ 4 days at 1h cadence).
@@ -31,7 +33,9 @@ end
 --- this service is loaded; safe to call manually.
 ---@param itemID number
 ---@param unitPrice number copper-per-unit
-function PriceHistoryService:Push(itemID, unitPrice)
+---@param qty number|nil listed units at sample time (market depth; feeds depletion estimates)
+---@param qsrc string|nil where qty came from ("b" browse, "c" commodity book)
+function PriceHistoryService:Push(itemID, unitPrice, qty, qsrc)
     if not itemID or type(unitPrice) ~= "number" or unitPrice <= 0 then return end
     local store = Store()
     if not store then return end
@@ -47,8 +51,10 @@ function PriceHistoryService:Push(itemID, unitPrice)
         -- Same window: keep the latest price (overwrite).
         last.t = now
         last.p = unitPrice
+        last.q = qty
+        last.qs = qty and qsrc or nil
     else
-        samples[#samples + 1] = { t = now, p = unitPrice }
+        samples[#samples + 1] = { t = now, p = unitPrice, q = qty, qs = qty and qsrc or nil }
     end
     while #samples > HISTORY_MAX_SAMPLES do
         table.remove(samples, 1)

@@ -1,0 +1,848 @@
+--[[
+    Warband Nexus - Frame Pooling System
+    
+    Performance optimization system that reuses UI frames instead of creating new ones
+    on every refresh. Dramatically reduces memory churn and GC pressure.
+
+    WN_FACTORY: Pool rows are native `CreateFrame("Button")` shells for hit-testing + row chrome;
+    keep creation out of SharedWidgets Factory (pool identity and reuse semantics).
+    
+    Provides pooling for:
+    - Character rows (CharactersUI)
+    - Reputation rows (ReputationUI)
+    - Currency rows (CurrencyUI)
+    - Item rows (ItemsUI)
+    - Storage rows (ItemsUI / DrawStorageResults)
+    
+    Extracted from SharedWidgets.lua (428 lines)
+    Location: Lines 1089-1517
+]]
+
+local ADDON_NAME, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
+
+local wipe = wipe
+local tinsert = table.insert
+local tremove = table.remove
+
+--- Pack one WoW API multi-return (e.g. GetChildren) into a reused array; single API invocation.
+local _poolChildScratch = {}
+local function PackVariadicInto(dest, ...)
+    wipe(dest)
+    local n = select("#", ...)
+    for i = 1, n do
+        dest[i] = select(i, ...)
+    end
+    return n
+end
+
+-- Debug print helper
+local DebugPrint = ns.DebugPrint
+local IsDebugModeEnabled = ns.IsDebugModeEnabled
+-- Import dependencies
+local UI_LAYOUT = ns.UI_LAYOUT
+local FontManager = ns.FontManager
+local TK = ns.UI_TableKit
+assert(TK and UI_LAYOUT and UI_LAYOUT.TABLE, "SharedWidgets_TableKit.lua must load before FramePoolFactory.lua")
+
+-- LIST ROW COLUMN MODEL (SharedWidgets_TableKit)
+-- One column model + one metric source (UI_LAYOUT.TABLE) for the pooled currency / item / storage rows.
+-- Resolved once without flex (base offsets): leading columns anchor LEFT at their x, the trailing column
+-- anchors RIGHT, and the flex name column spans between, so rows stay correct when a virtual list resizes them.
+-- Kit cell convention: text sits CELL_PAD_X inside its column; icon columns are ICON wide and CENTER-aligned.
+local TABLE = UI_LAYOUT.TABLE
+local CELL_PAD = TABLE.CELL_PAD_X
+local LIST_ROW_ICON = UI_LAYOUT.ROW_ICON_SIZE or TABLE.ICON
+--- Text-to-text distance between adjacent kit columns (pad | gap | pad).
+local LIST_ROW_TEXT_GAP = CELL_PAD + TABLE.COL_GAP + CELL_PAD
+
+local ITEM_ROW_COLS = {
+    { key = "qty",      width = 60,            align = "RIGHT" },
+    { key = "icon",     width = LIST_ROW_ICON, align = "CENTER", cell = "icon" },
+    { key = "name",     width = 0, flex = 1,   align = "LEFT" },
+    { key = "location", width = (UI_LAYOUT.LIST_ROW_LOCATION_MAX_WIDTH or 120) + CELL_PAD * 2, align = "RIGHT" },
+}
+local ITEM_ROW_WIDTHS, ITEM_ROW_OFFSETS = {}, {}
+TK.ResolveWidths(ITEM_ROW_COLS, nil, ITEM_ROW_WIDTHS, ITEM_ROW_OFFSETS, 0)
+
+-- Currency rows: optional badge + amount trail on the right (widths set per row by CurrencyUI).
+local CURRENCY_ROW_COLS = {
+    { key = "icon",   width = LIST_ROW_ICON, align = "CENTER", cell = "icon" },
+    { key = "name",   width = 0, flex = 1,   align = "LEFT" },
+    { key = "amount", width = 150,           align = "RIGHT" },
+}
+local CURRENCY_ROW_WIDTHS, CURRENCY_ROW_OFFSETS = {}, {}
+TK.ResolveWidths(CURRENCY_ROW_COLS, nil, CURRENCY_ROW_WIDTHS, CURRENCY_ROW_OFFSETS, CELL_PAD)
+
+--- Shared list-row geometry for callers that re-anchor pooled rows (CurrencyUI badge chain, ItemsUI relayout).
+ns.UI_LIST_ROW_COLUMNS = {
+    textGap = LIST_ROW_TEXT_GAP,
+    cellPad = CELL_PAD,
+    item = {
+        cols = ITEM_ROW_COLS, widths = ITEM_ROW_WIDTHS, offsets = ITEM_ROW_OFFSETS,
+        locationRightInset = UI_LAYOUT.LIST_ROW_LOCATION_RIGHT_INSET or 28,
+    },
+    currency = {
+        cols = CURRENCY_ROW_COLS, widths = CURRENCY_ROW_WIDTHS, offsets = CURRENCY_ROW_OFFSETS,
+        nameLeft = CURRENCY_ROW_OFFSETS[2] + CELL_PAD,
+        amountRightPad = CELL_PAD,
+    },
+}
+
+--- Item / storage row: qty | icon | name (flex) | location (RIGHT, inset from the scroll edge).
+local function LayoutItemListRow(row)
+    if not row then return end
+    local X, W = ITEM_ROW_OFFSETS, ITEM_ROW_WIDTHS
+    if row.qtyText then
+        row.qtyText:ClearAllPoints()
+        row.qtyText:SetPoint("LEFT", row, "LEFT", X[1] + CELL_PAD, 0)
+        row.qtyText:SetWidth(W[1] - CELL_PAD * 2)
+        row.qtyText:SetJustifyH("RIGHT")
+    end
+    if row.icon then
+        row.icon:ClearAllPoints()
+        row.icon:SetPoint("LEFT", row, "LEFT", X[2], 0)
+        row.icon:SetSize(LIST_ROW_ICON, LIST_ROW_ICON)
+    end
+    if row.locationText and row.nameText then
+        local inset = ns.UI_LIST_ROW_COLUMNS.item.locationRightInset
+        row.locationText:ClearAllPoints()
+        row.locationText:SetPoint("RIGHT", row, "RIGHT", -inset, 0)
+        row.locationText:SetWidth(W[4] - CELL_PAD * 2)
+        row.locationText:SetJustifyH("RIGHT")
+        row.nameText:ClearAllPoints()
+        row.nameText:SetPoint("LEFT", row, "LEFT", X[3] + CELL_PAD, 0)
+        row.nameText:SetPoint("RIGHT", row.locationText, "LEFT", -LIST_ROW_TEXT_GAP, 0)
+        row.nameText:SetJustifyH("LEFT")
+    end
+end
+ns.UI_LayoutItemListRow = LayoutItemListRow
+
+--- Currency row base geometry: icon | name (flex) | amount (RIGHT). CurrencyUI re-anchors name/badge/amount per row.
+local function LayoutCurrencyListRow(row)
+    if not row then return end
+    local X, W = CURRENCY_ROW_OFFSETS, CURRENCY_ROW_WIDTHS
+    if row.icon then
+        row.icon:ClearAllPoints()
+        row.icon:SetPoint("LEFT", row, "LEFT", X[1], 0)
+        row.icon:SetSize(LIST_ROW_ICON, LIST_ROW_ICON)
+    end
+    if row.amountText then
+        row.amountText:ClearAllPoints()
+        row.amountText:SetPoint("RIGHT", row, "RIGHT", -CELL_PAD, 0)
+        row.amountText:SetWidth(W[3] - CELL_PAD * 2)
+        row.amountText:SetJustifyH("RIGHT")
+    end
+    if row.nameText then
+        row.nameText:ClearAllPoints()
+        row.nameText:SetPoint("LEFT", row, "LEFT", X[2] + CELL_PAD, 0)
+        if row.amountText then
+            row.nameText:SetPoint("RIGHT", row.amountText, "LEFT", -LIST_ROW_TEXT_GAP, 0)
+        end
+        row.nameText:SetJustifyH("LEFT")
+    end
+end
+ns.UI_LayoutCurrencyListRow = LayoutCurrencyListRow
+
+-- FRAME POOL STORAGE
+
+local ItemRowPool = {}
+local StorageRowPool = {}
+local CurrencyRowPool = {}
+local CharacterRowPool = {}
+local ReputationRowPool = {}
+local ProfessionRowPool = {}
+
+--- Iterative stack walk (avoids deep recursion); reused across subtree releases.
+local _poolSubtreeStack = {}
+
+-- True while row is queued in its pool table (not yet acquired). Prevents double-insert when
+-- ReleaseAllPooledChildren runs twice on the same parent (e.g. PopulateContent + DrawCharacterList),
+-- which used to duplicate pool entries and hand the same frame to two layout slots.
+local function MarkRowOutOfPool(row)
+    if row then row._wnInFramePool = nil end
+end
+
+-- CHARACTER ROW POOLING
+
+---Get a character row from pool or create new
+---@return Frame row Pooled or new character row
+local function AcquireCharacterRow(parent)
+    local row = tremove(CharacterRowPool)
+    if row then
+        MarkRowOutOfPool(row)
+    end
+
+    if not row then
+        row = CreateFrame("Button", nil, parent)
+        row.isPooled = true
+        row.rowType = "character"
+        
+        -- Apply highlight effect (only on initial creation)
+        if ns.UI.Factory and ns.UI.Factory.ApplyHighlight then
+            ns.UI.Factory:ApplyHighlight(row)
+        end
+    end
+    
+    row:SetParent(parent)
+    row:Show()
+    
+    -- Reset alpha and stop animations to prevent invisible rows
+    row:SetAlpha(1)
+    if row.anim then row.anim:Stop() end
+    
+    return row
+end
+
+---Return character row to pool
+local function ReleaseCharacterRow(row)
+    if not row or not row.isPooled then return end
+    if row._wnInFramePool then return end
+
+    row:Hide()
+    row:ClearAllPoints()
+    
+    -- Only clear scripts that exist
+    if row.HasScript and row:HasScript("OnClick") then
+        row:SetScript("OnClick", nil)
+    end
+    if row.HasScript and row:HasScript("OnEnter") then
+        row:SetScript("OnEnter", nil)
+    end
+    if row.HasScript and row:HasScript("OnLeave") then
+        row:SetScript("OnLeave", nil)
+    end
+    
+    -- Note: Child elements (favButton, etc.) are kept and reused
+
+    row._wnInFramePool = true
+    tinsert(CharacterRowPool, row)
+end
+
+--- Release pooled character rows under a subtree before recycling section wrappers
+--- (PopulateContent only visits direct scrollChild children; nested rows must be freed explicitly).
+local function ReleaseCharacterRowsFromSubtree(root)
+    if not root then return end
+    local stack = _poolSubtreeStack
+    wipe(stack)
+    stack[1] = root
+    local sp = 1
+    while sp > 0 do
+        local f = stack[sp]
+        stack[sp] = nil
+        sp = sp - 1
+        if f then
+            local n = PackVariadicInto(_poolChildScratch, f:GetChildren())
+            for j = 1, n do
+                local ch = _poolChildScratch[j]
+                if ch and ch.isPooled and ch.rowType == "character" then
+                    ReleaseCharacterRow(ch)
+                elseif ch then
+                    sp = sp + 1
+                    stack[sp] = ch
+                end
+            end
+        end
+    end
+end
+
+-- REPUTATION ROW POOLING
+
+---Get a reputation row from pool or create new
+---Enhanced to support width/height and proper child element reset for reuse.
+---Child elements are lazy-created in ReputationUI and reused across pool cycles.
+---@return Frame row Pooled or new reputation row
+local function AcquireReputationRow(parent, width, rowHeight)
+    local row = tremove(ReputationRowPool)
+    if row then
+        MarkRowOutOfPool(row)
+    end
+
+    if not row then
+        row = CreateFrame("Button", nil, parent)
+        row:EnableMouse(true)
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        row.isPooled = true
+        row.rowType = "reputation"
+        
+        -- Apply highlight effect (only on initial creation)
+        if ns.UI.Factory and ns.UI.Factory.ApplyHighlight then
+            ns.UI.Factory:ApplyHighlight(row)
+        end
+    end
+    
+    -- Always set parent when acquiring from pool
+    row:SetParent(parent)
+    row:SetSize(width or 200, rowHeight or 26)
+    row:SetFrameLevel(parent:GetFrameLevel() + 1)
+    row:Show()
+    
+    -- Reset alpha and stop animations to prevent invisible rows
+    row:SetAlpha(1)
+    if row.anim then row.anim:Stop() end
+    
+    -- Reset all optional child elements from previous pool use
+    -- (Children are lazy-created in CreateReputationRow, here we just hide them)
+    if row.collapseBtn then row.collapseBtn:Hide() end
+    if row.paragonFrame then row.paragonFrame:Hide() end
+    if row.checkFrame then row.checkFrame:Hide() end
+    if row.badgeText then row.badgeText:Hide() end
+    if row.standingText then row.standingText:Hide() end
+    if row.separator then row.separator:Hide() end
+    if row.nameText then row.nameText:Hide() end
+    -- Progress bar is now lazy-created inline (_progressBar table with .bg frame)
+    if row._progressBar and row._progressBar.bg then row._progressBar.bg:Hide() end
+    if row.progressText then row.progressText:Hide() end
+    
+    return row
+end
+
+---Return reputation row to pool
+---Properly cleans up all child elements to prevent state leaks between reuses.
+local function ReleaseReputationRow(row)
+    if not row or not row.isPooled then return end
+    if row._wnInFramePool then return end
+
+    row:Hide()
+    row:ClearAllPoints()
+    
+    -- Clear all scripts
+    if row.HasScript then
+        if row:HasScript("OnClick") then row:SetScript("OnClick", nil) end
+        if row:HasScript("OnEnter") then row:SetScript("OnEnter", nil) end
+        if row:HasScript("OnLeave") then row:SetScript("OnLeave", nil) end
+        if row:HasScript("OnMouseDown") then row:SetScript("OnMouseDown", nil) end
+    end
+    
+    -- Hide all lazy-created child elements (they'll be reused on next acquire)
+    if row.collapseBtn then
+        row.collapseBtn:Hide()
+        if row.collapseBtn.HasScript and row.collapseBtn:HasScript("OnClick") then
+            row.collapseBtn:SetScript("OnClick", nil)
+        end
+    end
+    if row.paragonFrame then row.paragonFrame:Hide() end
+    if row.checkFrame then row.checkFrame:Hide() end
+    if row.badgeText then row.badgeText:Hide() end
+    if row.standingText then row.standingText:Hide() end
+    if row.separator then row.separator:Hide() end
+    if row.nameText then row.nameText:Hide() end
+    -- Progress bar is now lazy-created inline (_progressBar table with .bg frame)
+    if row._progressBar and row._progressBar.bg then row._progressBar.bg:Hide() end
+    if row.progressText then row.progressText:Hide() end
+    
+    -- Reset text content to prevent stale data showing on reuse
+    if row.standingText then row.standingText:SetText("") end
+    if row.nameText then row.nameText:SetText("") end
+    if row.badgeText then row.badgeText:SetText("") end
+    if row.progressText then row.progressText:SetText("") end
+
+    row._wnInFramePool = true
+    tinsert(ReputationRowPool, row)
+end
+
+--- Same pattern as ReleaseCharacterRowsFromSubtree for reputation rows nested under collapsible sections.
+local function ReleaseReputationRowsFromSubtree(root)
+    if not root then return end
+    local stack = _poolSubtreeStack
+    wipe(stack)
+    stack[1] = root
+    local sp = 1
+    while sp > 0 do
+        local f = stack[sp]
+        stack[sp] = nil
+        sp = sp - 1
+        if f then
+            local n = PackVariadicInto(_poolChildScratch, f:GetChildren())
+            for j = 1, n do
+                local ch = _poolChildScratch[j]
+                if ch and ch.isPooled and ch.rowType == "reputation" then
+                    ReleaseReputationRow(ch)
+                elseif ch then
+                    sp = sp + 1
+                    stack[sp] = ch
+                end
+            end
+        end
+    end
+end
+
+-- PROFESSION ROW POOLING
+
+---Get a profession row from pool or create new
+---@return Frame row Pooled or new profession row
+local function AcquireProfessionRow(parent)
+    local row = tremove(ProfessionRowPool)
+    if row then
+        MarkRowOutOfPool(row)
+    end
+    if not row then
+        -- Width comes from TOPLEFT/TOPRIGHT anchors in DrawProfessionRow (Characters tab parity).
+        row = CreateFrame("Button", nil, parent)
+        row.isPooled = true
+        row.rowType = "profession"
+        if ns.UI.Factory and ns.UI.Factory.ApplyHighlight then
+            ns.UI.Factory:ApplyHighlight(row)
+        end
+    end
+    row:SetParent(parent)
+    row:Show()
+    row:SetAlpha(1)
+    if row.anim then row.anim:Stop() end
+    return row
+end
+
+---Return profession row to pool
+---Resets scripts and hides lazy-created concentration bars to prevent stale visuals on reuse.
+local function ReleaseProfessionRow(row)
+    if not row or not row.isPooled then return end
+    if row._wnInFramePool then return end
+    row:Hide()
+    row:ClearAllPoints()
+    if row.HasScript and row:HasScript("OnClick") then row:SetScript("OnClick", nil) end
+    if row.HasScript and row:HasScript("OnEnter") then row:SetScript("OnEnter", nil) end
+    if row.HasScript and row:HasScript("OnLeave") then row:SetScript("OnLeave", nil) end
+
+    -- Reset concentration bars and hit-frames from previous use
+    local lineKeys = {"l1", "l2"}
+    for lk = 1, #lineKeys do
+        local lineKey = lineKeys[lk]
+        if row[lineKey .. "ConcBar"] then row[lineKey .. "ConcBar"]:Hide() end
+        if row[lineKey .. "SkillHit"] then row[lineKey .. "SkillHit"]:Hide() end
+        if row[lineKey .. "KnowWarn"] then row[lineKey .. "KnowWarn"]:Hide() end
+        if row[lineKey .. "Btn"] then
+            row[lineKey .. "Btn"]:Hide()
+            row[lineKey .. "Btn"]:SetScript("OnClick", nil)
+            row[lineKey .. "Btn"]:SetScript("OnEnter", nil)
+            row[lineKey .. "Btn"]:SetScript("OnLeave", nil)
+        end
+        if row.openBtn then
+            row.openBtn:Hide()
+            row.openBtn:SetScript("OnClick", nil)
+            row.openBtn:SetScript("OnEnter", nil)
+            row.openBtn:SetScript("OnLeave", nil)
+        end
+        if row[lineKey .. "InfoBtn"] then row[lineKey .. "InfoBtn"]:Hide() end
+        if row[lineKey .. "Icon"] then
+            row[lineKey .. "Icon"]:Hide()
+            if row[lineKey .. "Icon"].knowledgeBadge then row[lineKey .. "Icon"].knowledgeBadge:Hide() end
+            row[lineKey .. "Icon"]:SetScript("OnEnter", nil)
+            row[lineKey .. "Icon"]:SetScript("OnLeave", nil)
+        end
+    end
+
+    row._wnInFramePool = true
+    tinsert(ProfessionRowPool, row)
+end
+
+-- CURRENCY ROW POOLING
+
+---Get a currency row from pool or create new
+---@return Frame row Pooled or new currency row
+local function AcquireCurrencyRow(parent, width, rowHeight)
+    local row = tremove(CurrencyRowPool)
+    if row then
+        MarkRowOutOfPool(row)
+    end
+
+    if not row then
+        -- Create new button with all children
+        row = CreateFrame("Button", nil, parent)
+        row:EnableMouse(true)
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        
+        -- No background
+        
+        -- Icon | name | amount (positions: CURRENCY_ROW_COLS via LayoutCurrencyListRow)
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)  -- Padding for cleaner edges
+        -- Anti-flicker optimization
+        row.icon:SetSnapToPixelGrid(false)
+        row.icon:SetTexelSnappingBias(0)
+
+        row.nameText = FontManager:CreateFontString(row, "body", "OVERLAY")
+        row.nameText:SetWordWrap(false)
+
+        row.amountText = FontManager:CreateFontString(row, "body", "OVERLAY")
+        LayoutCurrencyListRow(row)
+
+        row.isPooled = true
+        row.rowType = "currency"  -- Mark as CurrencyRow
+        if row.SetClipsChildren then
+            row:SetClipsChildren(true)
+        end
+        
+        -- Apply highlight effect (only on initial creation)
+        if ns.UI.Factory and ns.UI.Factory.ApplyHighlight then
+            ns.UI.Factory:ApplyHighlight(row)
+        end
+    end
+    
+    -- Always set parent when acquiring from pool
+    row:SetParent(parent)
+    row:SetSize(width, rowHeight or TABLE.ROW_H.standard)
+    if row.SetClipsChildren then
+        row:SetClipsChildren(true)
+    end
+    row:SetFrameLevel(parent:GetFrameLevel() + 1)  -- Ensure proper z-order
+    row:Show()
+    
+    -- Reset alpha and stop animations to prevent invisible rows
+    row:SetAlpha(1)
+    if row.anim then row.anim:Stop() end
+    
+    return row
+end
+
+---Return currency row to pool
+local function ReleaseCurrencyRow(row)
+    if not row or not row.isPooled then return end
+    if row._wnInFramePool then return end
+
+    if row.amountText and ns.UI_UnbindSeasonProgressAmount then
+        ns.UI_UnbindSeasonProgressAmount(row.amountText)
+    end
+    row:Hide()
+    row:ClearAllPoints()
+    
+    -- Only clear scripts that exist
+    if row.HasScript and row:HasScript("OnEnter") then
+        row:SetScript("OnEnter", nil)
+    end
+    if row.HasScript and row:HasScript("OnLeave") then
+        row:SetScript("OnLeave", nil)
+    end
+    if row.HasScript and row:HasScript("OnClick") then
+        row:SetScript("OnClick", nil)
+    end
+    
+    -- Reset icon
+    if row.icon then
+        row.icon:SetTexture(nil)
+        row.icon:SetAlpha(1)
+    end
+    
+    -- Reset texts
+    if row.nameText then
+        row.nameText:SetText("")
+        ns.UI_SetTextColorRole(row.nameText, "Bright")
+    end
+    
+    if row.amountText then
+        row.amountText:SetText("")
+        ns.UI_SetTextColorRole(row.amountText, "Bright")
+    end
+    
+    -- Reset badge text (for Show All mode)
+    if row.badgeText then
+        row.badgeText:SetText("")
+        row.badgeText:Hide()
+    end
+    
+    -- Reset background removed (no backdrop)
+
+    row._wnInFramePool = true
+    tinsert(CurrencyRowPool, row)
+end
+
+--- Same pattern as ReleaseReputationRowsFromSubtree for currency rows nested under collapsible section bodies.
+local function ReleaseCurrencyRowsFromSubtree(root)
+    if not root then return end
+    local stack = _poolSubtreeStack
+    wipe(stack)
+    stack[1] = root
+    local sp = 1
+    while sp > 0 do
+        local f = stack[sp]
+        stack[sp] = nil
+        sp = sp - 1
+        if f then
+            local n = PackVariadicInto(_poolChildScratch, f:GetChildren())
+            for j = 1, n do
+                local ch = _poolChildScratch[j]
+                if ch and ch.isPooled and ch.rowType == "currency" then
+                    ReleaseCurrencyRow(ch)
+                elseif ch then
+                    sp = sp + 1
+                    stack[sp] = ch
+                end
+            end
+        end
+    end
+end
+
+-- ITEM ROW POOLING
+
+---Get an item row from pool or create new
+---@return Frame row Pooled or new item row
+--- Shared builder for the item/storage list rows. The two pools differ only in:
+--- background texture (item rows), rowType tag, default height (TABLE.ROW_H.standard) and
+--- the post-acquire child show-reset (Gear recommendations hide storage children).
+local function AcquireListRowFromPool(pool, parent, width, rowHeight, cfg)
+    local row = tremove(pool)
+    if row then
+        MarkRowOutOfPool(row)
+    end
+
+    if not row then
+        -- Create new button with all children (Button for hover effects)
+        row = CreateFrame("Button", nil, parent)
+        row:EnableMouse(true)
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+        if cfg.withBackground then
+            row.bg = row:CreateTexture(nil, "BACKGROUND")
+            row.bg:SetAllPoints()
+            -- Anti-flicker optimization
+            row.bg:SetSnapToPixelGrid(false)
+            row.bg:SetTexelSnappingBias(0)
+        end
+
+        -- qty | icon | name | location (positions: ITEM_ROW_COLS via LayoutItemListRow, run every acquire)
+        row.qtyText = FontManager:CreateFontString(row, "body", "OVERLAY")
+
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)  -- Padding for cleaner edges
+        -- Anti-flicker optimization
+        row.icon:SetSnapToPixelGrid(false)
+        row.icon:SetTexelSnappingBias(0)
+
+        row.nameText = FontManager:CreateFontString(row, "body", "OVERLAY")
+        row.nameText:SetWordWrap(false)
+
+        row.locationText = FontManager:CreateFontString(row, "body", "OVERLAY")
+
+        row.isPooled = true
+        row.rowType = cfg.rowType
+
+        -- Apply highlight effect (only on initial creation)
+        if ns.UI.Factory and ns.UI.Factory.ApplyHighlight then
+            ns.UI.Factory:ApplyHighlight(row)
+        end
+    end
+
+    row:SetParent(parent)
+    row:SetSize(width, rowHeight or cfg.defaultHeight)
+    row:SetFrameLevel(parent:GetFrameLevel() + 1)  -- Ensure proper z-order
+    row:Show()
+
+    -- Reset alpha and stop animations to prevent invisible rows
+    row:SetAlpha(1)
+    if row.anim then row.anim:Stop() end
+
+    -- Refresh column anchors every acquire (width changes + pooled rows from older layouts)
+    LayoutItemListRow(row)
+
+    -- Other tabs (e.g. Gear recommendations) may Hide qty/icon/location for a full-width name line.
+    if cfg.resetChildVisibility then
+        if row.qtyText and row.qtyText.Show then row.qtyText:Show() end
+        if row.icon and row.icon.Show then row.icon:Show() end
+        if row.nameText and row.nameText.Show then row.nameText:Show() end
+        if row.locationText and row.locationText.Show then row.locationText:Show() end
+    end
+
+    return row
+end
+
+local ITEM_ROW_CFG = { rowType = "item", withBackground = true, defaultHeight = TABLE.ROW_H.standard }
+
+local function AcquireItemRow(parent, width, rowHeight)
+    return AcquireListRowFromPool(ItemRowPool, parent, width, rowHeight, ITEM_ROW_CFG)
+end
+
+---Return item row to pool
+local function ReleaseItemRow(row)
+    if not row or not row.isPooled then return end
+    if row._wnInFramePool then return end
+
+    row:Hide()
+    row:ClearAllPoints()
+    row:SetScript("OnEnter", nil)
+    row:SetScript("OnLeave", nil)
+    -- Item rows register clicks (shift-link closures capture the item) — clear like
+    -- the other Release* functions so a recycled row can't fire a stale handler.
+    row:SetScript("OnClick", nil)
+    row:SetScript("OnMouseUp", nil)
+
+    -- Phase 2.5: Clear stale state on release
+    if row.icon then row.icon:SetTexture(nil) end
+    if row.nameText then row.nameText:SetText("") end
+    if row.qtyText then row.qtyText:SetText("") end
+    if row.locationText then row.locationText:SetText("") end
+
+    row._wnInFramePool = true
+    tinsert(ItemRowPool, row)
+end
+
+-- STORAGE ROW POOLING
+
+local STORAGE_ROW_CFG = { rowType = "storage", defaultHeight = TABLE.ROW_H.standard, resetChildVisibility = true }
+
+---Get storage row from pool (same chassis as item rows; no background texture)
+---@return Frame row Pooled or new storage row
+local function AcquireStorageRow(parent, width, rowHeight)
+    return AcquireListRowFromPool(StorageRowPool, parent, width, rowHeight, STORAGE_ROW_CFG)
+end
+
+---Return storage row to pool
+local function ReleaseStorageRow(row)
+    if not row or not row.isPooled then return end
+    if row._wnInFramePool then return end
+
+    row:Hide()
+    row:ClearAllPoints()
+    
+    -- Only clear scripts that exist
+    if row.HasScript and row:HasScript("OnEnter") then
+        row:SetScript("OnEnter", nil)
+    end
+    if row.HasScript and row:HasScript("OnLeave") then
+        row:SetScript("OnLeave", nil)
+    end
+    if row.HasScript and row:HasScript("OnClick") then
+        row:SetScript("OnClick", nil)
+    end
+    
+    -- Phase 2.5: Clear stale state on release
+    row._wnStorageItemRef = nil
+    row._wnStorageRowIdx = nil
+    row._wnStorageLocText = nil
+    if row.icon then row.icon:SetTexture(nil) end
+    if row.nameText then row.nameText:SetText("") end
+    if row.qtyText then row.qtyText:SetText("") end
+    if row.locationText then row.locationText:SetText("") end
+
+    row._wnInFramePool = true
+    tinsert(StorageRowPool, row)
+end
+
+-- GENERIC POOL CLEANUP
+
+--- Single DFS: release every pooled list row under `root` (character / reputation / currency / item / storage / profession).
+--- Used for main-tab switch teardown: avoids ReleaseAllPooledChildren on scrollChild, which only visits *direct*
+--- children but still Hide+ClearAllPoints+script-nils large section shells (PvE was multi-second).
+local function ReleasePooledRowsInSubtree(root)
+    if not root then return end
+    local stack = _poolSubtreeStack
+    wipe(stack)
+    stack[1] = root
+    local sp = 1
+    while sp > 0 do
+        local f = stack[sp]
+        stack[sp] = nil
+        sp = sp - 1
+        if f and f.isPooled and f.rowType then
+            if f.rowType == "item" then
+                ReleaseItemRow(f)
+            elseif f.rowType == "storage" then
+                ReleaseStorageRow(f)
+            elseif f.rowType == "currency" then
+                ReleaseCurrencyRow(f)
+            elseif f.rowType == "character" then
+                ReleaseCharacterRow(f)
+            elseif f.rowType == "reputation" then
+                ReleaseReputationRow(f)
+            elseif f.rowType == "profession" then
+                ReleaseProfessionRow(f)
+            end
+        elseif f then
+            local n = PackVariadicInto(_poolChildScratch, f:GetChildren())
+            for j = 1, n do
+                local ch = _poolChildScratch[j]
+                if ch then
+                    sp = sp + 1
+                    stack[sp] = ch
+                end
+            end
+        end
+    end
+end
+
+---Release all pooled children of a frame (and hide non-pooled ones)
+local function ReleaseAllPooledChildren(parent)
+    local n = PackVariadicInto(_poolChildScratch, parent:GetChildren())
+    for i = 1, n do
+        local child = _poolChildScratch[i]
+        if child.isPooled and child.rowType then
+            -- Use rowType to determine which pool to release to
+            if child.rowType == "item" then
+                ReleaseItemRow(child)
+            elseif child.rowType == "storage" then
+                ReleaseStorageRow(child)
+            elseif child.rowType == "currency" then
+                ReleaseCurrencyRow(child)
+            elseif child.rowType == "character" then
+                ReleaseCharacterRow(child)
+            elseif child.rowType == "reputation" then
+                ReleaseReputationRow(child)
+            elseif child.rowType == "profession" then
+                ReleaseProfessionRow(child)
+            end
+        else
+            -- Non-pooled frame (like headers, cards, etc.)
+            -- Skip persistent row elements (reorderButtons, deleteBtn, etc.)
+            -- These are managed by their parent row and should not be hidden here
+            -- ALSO skip emptyStateContainer / search empty cards - managed by empty-state helpers
+            local IsProtected = ns.UI_IsProtectedResultsEmptyChild
+            if not child.isPersistentRowElement and not (IsProtected and IsProtected(child, parent)) then
+                pcall(function()
+                    child:Hide()
+                    child:ClearAllPoints()
+                end)
+            end
+            
+            -- Clear scripts only for widgets that support them
+            -- Use HasScript to check if the widget actually supports the script type
+            if child.SetScript and child.HasScript then
+                -- Only clear scripts that the widget actually supports
+                if child:HasScript("OnClick") then
+                    local success = pcall(function() child:SetScript("OnClick", nil) end)
+                    if not success and IsDebugModeEnabled and IsDebugModeEnabled() then
+                        local childType = child:GetObjectType()
+                        DebugPrint("|cffff0000WN DEBUG: Failed to clear OnClick on", childType, "at index", i, "|r")
+                    end
+                end
+                if child:HasScript("OnEnter") then
+                    pcall(function() child:SetScript("OnEnter", nil) end)
+                end
+                if child:HasScript("OnLeave") then
+                    pcall(function() child:SetScript("OnLeave", nil) end)
+                end
+                if child:HasScript("OnMouseDown") then
+                    pcall(function() child:SetScript("OnMouseDown", nil) end)
+                end
+                if child:HasScript("OnMouseUp") then
+                    pcall(function() child:SetScript("OnMouseUp", nil) end)
+                end
+            end
+        end
+    end
+end
+
+-- NAMESPACE EXPORTS
+
+-- Export Acquire functions
+ns.UI_AcquireCharacterRow = AcquireCharacterRow
+ns.UI_AcquireReputationRow = AcquireReputationRow
+ns.UI_AcquireProfessionRow = AcquireProfessionRow
+ns.UI_AcquireCurrencyRow = AcquireCurrencyRow
+ns.UI_AcquireItemRow = AcquireItemRow
+ns.UI_AcquireStorageRow = AcquireStorageRow
+
+-- Export Release functions
+ns.UI_ReleaseCharacterRow = ReleaseCharacterRow
+ns.UI_ReleaseCharacterRowsFromSubtree = ReleaseCharacterRowsFromSubtree
+ns.UI_ReleaseReputationRow = ReleaseReputationRow
+ns.UI_ReleaseReputationRowsFromSubtree = ReleaseReputationRowsFromSubtree
+ns.UI_ReleaseProfessionRow = ReleaseProfessionRow
+ns.UI_ReleaseCurrencyRow = ReleaseCurrencyRow
+ns.UI_ReleaseCurrencyRowsFromSubtree = ReleaseCurrencyRowsFromSubtree
+ns.UI_ReleaseItemRow = ReleaseItemRow
+ns.UI_ReleaseStorageRow = ReleaseStorageRow
+ns.UI_ReleasePooledRowsInSubtree = ReleasePooledRowsInSubtree
+
+-- Export generic cleanup
+ns.UI_ReleaseAllPooledChildren = ReleaseAllPooledChildren
+
+-- Module loaded - verbose logging removed

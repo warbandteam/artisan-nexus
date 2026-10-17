@@ -1,6 +1,8 @@
 --[[
     Fishing — channel / line-out state for loot attribution only.
     Recording: FishingLootService via CHAT_MSG_LOOT (no input overrides or CVar changes).
+    Attribution uses the fishing loot-window token (LootWindowBridge) or the live channel;
+    IsInFishingLootContext (incl. the long line-out window) is informational only.
 ]]
 
 local _, ns = ...
@@ -55,25 +57,11 @@ local function PlayerChannelFishingSpellId()
     if spellID and IsFishingBobberChannelSpell(spellID) then
         return spellID
     end
-    if type(textureID) == "number" and textureID == FISHING_POLE_ICON_ID then
+    -- textureID is not NeverSecret (UnitChannelInfo); comparing a secret value errors.
+    if type(textureID) == "number" and not (issecretvalue and issecretvalue(textureID))
+        and textureID == FISHING_POLE_ICON_ID then
         local sid = FishingSpellData.GetKnownPlayerCastSpellId and FishingSpellData.GetKnownPlayerCastSpellId()
         return SafeSpellId(sid) or spellID
-    end
-    return nil
-end
-
-local function PlayerCastingFishingSpellId()
-    if type(UnitCastingInfo) ~= "function" then
-        return nil
-    end
-    local _, _, textureID, _, _, _, _, _, castingSpellID = UnitCastingInfo("player")
-    castingSpellID = SafeSpellId(castingSpellID)
-    if castingSpellID and IsFishingBobberChannelSpell(castingSpellID) then
-        return castingSpellID
-    end
-    if type(textureID) == "number" and textureID == FISHING_POLE_ICON_ID then
-        local sid = FishingSpellData.GetKnownPlayerCastSpellId and FishingSpellData.GetKnownPlayerCastSpellId()
-        return SafeSpellId(sid) or castingSpellID
     end
     return nil
 end
@@ -83,6 +71,8 @@ local FishingService = {
     _frame = nil,
     _lifecycle = nil,
     _channelingFishing = false,
+    --- GetTime() of the current/last fishing channel start (active-time clock bout seed).
+    _channelStartAt = nil,
     _lastFishingChannelStopTime = nil,
     _fishingBobberLineOut = false,
     _fishingBobberLineOutExpireAt = nil,
@@ -120,17 +110,6 @@ function FishingService:IsFishingChanneling()
         return true
     end
     return PlayerChannelFishingSpellId() ~= nil
-end
-
-function FishingService:IsBobberLineOut()
-    if self._channelingFishing or PlayerChannelFishingSpellId() or PlayerCastingFishingSpellId() then
-        return false
-    end
-    if not self._fishingBobberLineOut then
-        return false
-    end
-    local exp = self._fishingBobberLineOutExpireAt
-    return exp ~= nil and GetTime() < exp
 end
 
 function FishingService:IsInFishingLootContext()
@@ -171,6 +150,7 @@ local function GetFrame(self)
             if event == "UNIT_SPELLCAST_CHANNEL_START" then
                 if spellID and IsFishingBobberChannelSpell(spellID) then
                     self._channelingFishing = true
+                    self._channelStartAt = GetTime()
                     self._lastFishingChannelStopTime = nil
                     self._fishingBobberLineOut = false
                     self._fishingBobberLineOutExpireAt = nil
@@ -218,6 +198,7 @@ function FishingService:Disable()
         self._lifecycle:UnregisterAllEvents()
     end
     self._channelingFishing = false
+    self._channelStartAt = nil
     self._lastFishingChannelStopTime = nil
     self._fishingBobberLineOut = false
     self._fishingBobberLineOutExpireAt = nil

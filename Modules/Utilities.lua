@@ -4,6 +4,11 @@
 
 local ADDON_NAME, ns = ...
 
+-- 12.1.5 removed the global item/coin fallbacks; bind the namespaced APIs.
+local GetItemInfo = C_Item.GetItemInfo
+local GetItemInfoInstant = C_Item.GetItemInfoInstant
+local GetCoinTextureString = C_CurrencyInfo.GetCoinTextureString
+
 ---@class Utilities
 local Utilities = {}
 ns.Utilities = Utilities
@@ -28,8 +33,9 @@ function Utilities:GetCharacterGUID()
     return guid
 end
 
---- Upsert the current character into `db.global.charRegistry[guid]` (display
---- metadata only — name/realm/class refresh on every login; GUID stays stable).
+--- AN-native "characters" collector (driven by ns.CharacterData, skipped while Warband Nexus covers
+--- the roster): upsert the current character into `db.global.charRegistry[guid]` (display metadata
+--- only — name/realm/class refresh on every login; GUID stays stable).
 ---@return string|nil guid
 function Utilities:TouchCharRegistry()
     local guid = self:GetCharacterGUID()
@@ -53,6 +59,7 @@ function Utilities:TouchCharRegistry()
     --- second return (classFilename, e.g. "MAGE").
     local classFile
     if UnitClass then
+        local _
         _, classFile = UnitClass("player")
     end
     if classFile and not (issecretvalue and issecretvalue(classFile)) then
@@ -77,8 +84,7 @@ end
 ---@param guid string|nil
 ---@return string name, string realm
 function Utilities:GetCharacterNameAndRealm(guid)
-    local g = ns.db and ns.db.global
-    local rec = guid and g and g.charRegistry and g.charRegistry[guid]
+    local rec = ns.CharacterData:GetCharacter(guid)
     if rec and rec.name then
         local realm = rec.realm
         if realm and realm ~= "" and not (issecretvalue and issecretvalue(realm)) then
@@ -86,27 +92,7 @@ function Utilities:GetCharacterNameAndRealm(guid)
         end
         return rec.name, ""
     end
-    return (ns.L and ns.L["CHAR_UNKNOWN"]) or "Unknown", ""
-end
-
----@param name string|nil
----@param realm string|nil
----@return string|nil
-function Utilities:GetCharacterKey(name, realm)
-    name = name or UnitName("player")
-    if not name or (issecretvalue and issecretvalue(name)) then return nil end
-    if not realm then
-        local norm = GetNormalizedRealmName and GetNormalizedRealmName()
-        if type(norm) == "string" and not (issecretvalue and issecretvalue(norm)) and norm ~= "" then
-            realm = norm
-        else
-            realm = GetRealmName and GetRealmName() or ""
-        end
-    end
-    if not realm or (issecretvalue and issecretvalue(realm)) then return nil end
-    name = name:gsub("%s+", "")
-    realm = realm:gsub("%s+", "")
-    return name .. "-" .. realm
+    return (ns.L and ns.L["CHAR_UNKNOWN"]) or "Unknown character", ""
 end
 
 --- Remove |T|t / |A|a / |K|k so "x6" after an inline rank icon is visible to stack parsers.
@@ -270,29 +256,6 @@ function Utilities.GetPlayerSpellCooldownValues(spellID)
             end
         end
     end
-    if GetSpellCooldown then
-        if st == nil or anySecret(st, dur, en) then
-            local a, b, c = GetSpellCooldown(spellID)
-            if not anySecret(a, b, c) then
-                st, dur, en = a or 0, b or 0, c
-            end
-        end
-        if st == nil or anySecret(st, dur, en) then
-            local name
-            if C_Spell and C_Spell.GetSpellName then
-                local ok, n = pcall(C_Spell.GetSpellName, spellID)
-                if ok and type(n) == "string" and n ~= "" and not (issecretvalue and issecretvalue(n)) then
-                    name = n
-                end
-            end
-            if name then
-                local a, b, c = GetSpellCooldown(name)
-                if not anySecret(a, b, c) then
-                    st, dur, en = a or 0, b or 0, c
-                end
-            end
-        end
-    end
     if st == nil or anySecret(st, dur, en) then
         return nil, nil, nil
     end
@@ -403,57 +366,6 @@ end
 ns.LootFrameSourcesAreOnlyGameObjects = Utilities.LootFrameSourcesAreOnlyGameObjects
 ns.GetLootSlotItemCounts = Utilities.GetLootSlotItemCounts
 
---- Map itemID → first `GetLootSourceInfo` GUID for that slot while loot is listed (collapses chat + window for one pickup).
----@return table<number, string>
-function Utilities.BuildLootItemIDToFirstSourceGUIDMap()
-    local map = {}
-    if not GetNumLootItems or not GetLootSlotLink or GetNumLootItems() < 1 then
-        return map
-    end
-    local function ItemIDFromLink(link)
-        if not link or (issecretvalue and issecretvalue(link)) then
-            return nil
-        end
-        if C_Item and C_Item.GetItemInfoInstant then
-            local id = C_Item.GetItemInfoInstant(link)
-            if id and id > 0 then
-                return id
-            end
-        end
-        if GetItemInfoInstant then
-            local id = GetItemInfoInstant(link)
-            if id and id > 0 then
-                return id
-            end
-        end
-        local hex = link:match("|Hitem:(%d+)")
-        return hex and tonumber(hex) or nil
-    end
-    local n = GetNumLootItems()
-    for slot = 1, n do
-        local has = true
-        if LootSlotHasItem then
-            has = LootSlotHasItem(slot)
-        end
-        if has and GetLootSourceInfo then
-            local link = GetLootSlotLink(slot)
-            local id = ItemIDFromLink(link)
-            if id and not map[id] then
-                local ok, packed = pcall(function()
-                    return { GetLootSourceInfo(slot) }
-                end)
-                if ok and packed and packed[1] and type(packed[1]) == "string" and packed[1] ~= "" then
-                    if not (issecretvalue and issecretvalue(packed[1])) then
-                        map[id] = packed[1]
-                    end
-                end
-            end
-        end
-    end
-    return map
-end
-
-ns.BuildLootItemIDToFirstSourceGUIDMap = Utilities.BuildLootItemIDToFirstSourceGUIDMap
 
 --- Blizzard money display: amount + gold/silver/copper icons (embedded |T textures).
 --- Shared by all UI money columns (catalog AH column, session value, Hub tables, popups).
@@ -461,49 +373,64 @@ ns.BuildLootItemIDToFirstSourceGUIDMap = Utilities.BuildLootItemIDToFirstSourceG
 ---@param iconHeight number|nil embedded coin icon height (match font size, e.g. 12 catalog, 14 session row)
 ---@return string|nil nil when copper is nil or <= 0 (call sites append their own em dash / "-" fallback)
 function Utilities.FormatCopper(copper, iconHeight)
-    if not copper or copper <= 0 then
+    if not copper or copper == 0 then
         return nil
     end
+    local isNegative = (copper < 0)
+    local absCopper = math.abs(copper)
     iconHeight = tonumber(iconHeight) or 12
+    local s
     if GetCoinTextureString then
-        local ok, s = pcall(function()
-            return GetCoinTextureString(copper, iconHeight)
+        local ok, res = pcall(function()
+            return GetCoinTextureString(absCopper, iconHeight)
         end)
-        if ok and s and s ~= "" then
-            return s
+        if ok and res and res ~= "" then
+            s = res
+        else
+            local ok2, res2 = pcall(GetCoinTextureString, absCopper)
+            if ok2 and res2 and res2 ~= "" then
+                s = res2
+            end
         end
-        ok, s = pcall(GetCoinTextureString, copper)
-        if ok and s and s ~= "" then
-            return s
+    end
+    if not s or s == "" then
+        local g = math.floor(absCopper / 10000)
+        local sv = math.floor((absCopper % 10000) / 100)
+        local c = absCopper % 100
+        if g > 0 then
+            s = string.format("%dg %ds", g, sv)
+        elseif sv > 0 then
+            s = string.format("%ds %dc", sv, c)
+        else
+            s = string.format("%dc", c)
         end
     end
-    local g = math.floor(copper / 10000)
-    local s = math.floor((copper % 10000) / 100)
-    local c = copper % 100
-    if g > 0 then
-        return string.format("%dg %ds", g, s)
+    if isNegative and s then
+        return "-" .. s
     end
-    if s > 0 then
-        return string.format("%ds %dc", s, c)
-    end
-    return string.format("%dc", c)
+    return s
 end
 
 ns.FormatCopper = Utilities.FormatCopper
 
---- Prefer cached AH buyout (`ahPrices` after sync). If none (never scanned, no listings, commodity miss), fall back to vendor sell (`GetItemInfo` 11) so rows rarely stay empty. Em dash only when both are absent or zero.
+--- Loot valuation — single source for the Loot History grid, rows, overlay toasts,
+--- session rate and per-character value. Mark-to-market: always the CURRENT price.
+--- Unit = AHPriceService:GetPriceInfo (selected AH provider; it already caps at the vendor
+--- BUY price for vendor-sold items and then reports source "vendor"), else the vendor SELL
+--- price (GetItemInfo return 11). Em dash in the UI only when both are absent.
 ---@param itemID number
 ---@return number|nil unitCopper
----@return string|nil source `"ah"` | `"vendor"`
+---@return string|nil source `"ah"` (AH provider price) | `"vendor"` (vendor buy cap or vendor sell)
 function Utilities.GetLootUnitPriceCopper(itemID)
-    if not itemID or type(itemID) ~= "number" or itemID < 1 then
+    itemID = tonumber(itemID)
+    if not itemID or itemID < 1 then
         return nil, nil
     end
     local AH = ns.AHPriceService
-    if AH and AH.GetPrice then
-        local p = AH:GetPrice(itemID)
-        if p and p > 0 then
-            return p, "ah"
+    if AH and AH.GetPriceInfo then
+        local p, _, _, _, src = AH:GetPriceInfo(itemID)
+        if type(p) == "number" and p > 0 then
+            return p, (src == "vendor") and "vendor" or "ah"
         end
     end
     if GetItemInfo then
@@ -517,32 +444,78 @@ end
 
 ns.GetLootUnitPriceCopper = Utilities.GetLootUnitPriceCopper
 
---- Loot row / total pricing with a last-chance AH cache probe. Single source
---- for LootHistoryUI header totals AND LootHistoryUI_Draw rows so both always
---- price identically (previously Draw skipped the AH fallback and catalog
---- values could show an em dash while the header Total counted them).
+--- Gross and net value of `qty` units. Net deducts the AH cut (Economy:CutRate) only when
+--- the unit price is an AH price; vendor-priced value is never cut.
 ---@param itemID number|string|nil
----@return number|nil unitCopper single value (source tag intentionally dropped)
-function Utilities.GetLootUnitCopperWithFallback(itemID)
-    itemID = tonumber(itemID)
-    if not itemID or itemID < 1 then
-        return nil
+---@param qty number|nil
+---@return number gross copper (0 when unpriced)
+---@return number net copper
+---@return string|nil source "ah" | "vendor"
+function Utilities.GetLootValueCopper(itemID, qty)
+    qty = tonumber(qty) or 0
+    local unit, source = Utilities.GetLootUnitPriceCopper(itemID)
+    if not unit or qty <= 0 then
+        return 0, 0, source
     end
+    local gross = unit * qty
+    if source ~= "ah" then
+        return gross, gross, source
+    end
+    local econ = ns.Economy
+    local cut = econ and econ.CutRate and tonumber((econ:CutRate())) or 0.05
+    return gross, gross * (1 - cut), source
+end
+
+ns.GetLootValueCopper = Utilities.GetLootValueCopper
+
+--- Unit price only (kept for existing call sites; same resolution as GetLootUnitPriceCopper).
+---@param itemID number|string|nil
+---@return number|nil unitCopper
+function Utilities.GetLootUnitCopperWithFallback(itemID)
     local u = Utilities.GetLootUnitPriceCopper(itemID)
     if u and u > 0 then
         return u
-    end
-    local AH = ns.AHPriceService
-    if AH and AH.GetPrice then
-        local p = AH:GetPrice(itemID)
-        if p and p > 0 then
-            return p
-        end
     end
     return nil
 end
 
 ns.GetLootUnitCopperWithFallback = Utilities.GetLootUnitCopperWithFallback
+
+--- Exact CHAT_MSG_LOOT de-duplication by the payload `lineID` (arg 11, NeverSecret —
+--- verified 2026-10-15, ChatInfoDocumentation.lua 12.1.5). A line re-dispatched by the
+--- client or another addon carries the same lineID; distinct pickups never share one.
+--- Entries older than `ttl` seconds are swept on every insert past a small size.
+---@param ttl number|nil seconds (default 120)
+---@return table deduper with :Seen(lineID) -> true when this lineID was already handled
+function Utilities.CreateChatLineDeduper(ttl)
+    ttl = tonumber(ttl) or 120
+    local seen, size, sweepAt = {}, 0, 32
+    local d = {}
+    function d:Seen(lineID)
+        if type(lineID) ~= "number" or (issecretvalue and issecretvalue(lineID)) then
+            return false
+        end
+        local now = GetTime()
+        if seen[lineID] then
+            return true
+        end
+        if size >= sweepAt then
+            size = 0
+            for k, t in pairs(seen) do
+                if now - t > ttl then
+                    seen[k] = nil
+                else
+                    size = size + 1
+                end
+            end
+            sweepAt = math.max(32, size * 2)
+        end
+        seen[lineID] = now
+        size = size + 1
+        return false
+    end
+    return d
+end
 
 --- Item display name for table rows (Hub / Price History popups). Requests an
 --- async load so a later refresh can show the real name; guards secret values.
@@ -635,69 +608,7 @@ function Utilities.GetQualityRGB(quality)
     return 1, 1, 1
 end
 
---- Localized short quality name (e.g. Rare, Epic).
----@param quality number|nil
----@return string
-function Utilities.GetQualityLabel(quality)
-    if quality == nil then
-        return ""
-    end
-    local key = "ITEM_QUALITY" .. tostring(quality) .. "_DESC"
-    local g = _G[key]
-    if type(g) == "string" and g ~= "" then
-        if not (issecretvalue and issecretvalue(g)) then
-            return g
-        end
-    end
-    return "Q" .. tostring(quality)
-end
-
---- Return first trusted GlobalString value (localized client text) from candidate global names.
---- Skips empty strings and secret values.
----@param ... string|nil global names tried in order
----@return string|nil
-function Utilities.TryGlobalString(...)
-    local n = select("#", ...)
-    for i = 1, n do
-        local name = select(i, ...)
-        if type(name) == "string" and name ~= "" then
-            local v = _G[name]
-            if type(v) == "string" and v ~= "" then
-                if not (issecretvalue and issecretvalue(v)) then
-                    return v
-                end
-            end
-        end
-    end
-    return nil
-end
-
---- Prefer a Blizzard GlobalString when listed, else AceLocale `locKey` from ns.L (e.g. LOOT_GATHER_HERB).
----@param locKey string
----@param ... string|nil additional global names for TryGlobalString
----@return string|nil
-function Utilities.LocWithGlobal(locKey, ...)
-    if type(locKey) ~= "string" or locKey == "" then
-        return nil
-    end
-    local g = Utilities.TryGlobalString(...)
-    if g then
-        return g
-    end
-    local Ltab = ns.L
-    local loc = Ltab and rawget(Ltab, locKey)
-    if type(loc) == "string" and loc ~= "" then
-        if not (issecretvalue and issecretvalue(loc)) then
-            return loc
-        end
-    end
-    return nil
-end
-
-ns.TryGlobalString = Utilities.TryGlobalString
-ns.LocWithGlobal = Utilities.LocWithGlobal
 ns.GetQualityRGB = Utilities.GetQualityRGB
-ns.GetQualityLabel = Utilities.GetQualityLabel
 
 --- Open world only (not party/raid/arena/pvp/scenario instances).
 ---@return boolean
@@ -734,48 +645,24 @@ local SKILL_LINE_SKINNING = 393
 local SKILL_LINE_LEATHERWORKING = 165
 local SKILL_LINE_ENCHANTING = 333
 
---- Fallback for clients where `GetProfessions` omits secondary lines: scan skill list by localized Fishing name.
+--- Fallback for clients where `GetProfessions` omits secondary lines. The old skill-list scan
+--- (GetNumSkillLines / GetSkillLineInfo / GetSpellInfo) relied on globals removed before 12.1.5
+--- (absent from Ketho GlobalAPI, checked 2026-10-14). Use the documented ProfessionInfo lookup.
 ---@return boolean
 local function FallbackOwnsFishingBySkillList()
-    if not GetNumSkillLines or not GetSkillLineInfo then
+    if not (C_TradeSkillUI and C_TradeSkillUI.GetProfessionInfoBySkillLineID) then
         return false
     end
-    local fishA = GetSpellInfo and GetSpellInfo(7620) or nil
-    local fishB = _G and _G.PROFESSIONS_FISHING or nil
-    local fishC = _G and _G.SKILL_FISHING or nil
-    local targets = {}
-    local function pushName(v)
-        if type(v) == "string" and v ~= "" and not (issecretvalue and issecretvalue(v)) then
-            targets[#targets + 1] = string.lower(v)
-        end
-    end
-    pushName(fishA)
-    pushName(fishB)
-    pushName(fishC)
-    pushName("fishing")
-    if #targets < 1 then
-        return false
-    end
-    local n = GetNumSkillLines() or 0
-    for i = 1, n do
-        local name, isHeader, _, rank, _, _, maxRank = GetSkillLineInfo(i)
-        if not isHeader and type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then
-            local key = string.lower(name)
-            for j = 1, #targets do
-                if key == targets[j] then
-                    local r = tonumber(rank) or 0
-                    local mr = tonumber(maxRank) or 0
-                    if r > 0 or mr > 0 then
-                        return true
-                    end
-                end
-            end
-        end
+    local ok, info = pcall(C_TradeSkillUI.GetProfessionInfoBySkillLineID, 356)
+    if ok and type(info) == "table" then
+        local lvl = tonumber(info.skillLevel) or 0
+        local maxLvl = tonumber(info.maxSkillLevel) or 0
+        return lvl > 0 or maxLvl > 0
     end
     return false
 end
 
---- Match `skillLineID` against any numeric return from `GetProfessionInfo` (Retail builds vary; 7th is not always reliable).
+--- True when the character has learned `skillLineID` (direct ProfessionInfo lookup, then GetProfessions return 7).
 ---@param skillLineID number|nil
 ---@return boolean
 function Utilities.PlayerOwnsProfessionSkillLine(skillLineID)
@@ -785,17 +672,12 @@ function Utilities.PlayerOwnsProfessionSkillLine(skillLineID)
     end
     --- Midnight/modern clients: `GetProfessions()` may omit some secondary lines (observed: Fishing),
     --- so use direct skill-line lookup first when available.
-    if C_SkillInfo and C_SkillInfo.GetSkillLineInfo then
-        local okInfo, info = pcall(C_SkillInfo.GetSkillLineInfo, skillLineID)
-        if okInfo and type(info) == "table" then
-            local infoID = tonumber(info.skillLineID) or tonumber(info.id) or tonumber(info.professionID)
-            if infoID == skillLineID then
-                local rank = tonumber(info.skillLineRank) or tonumber(info.currentLevel) or tonumber(info.rank) or 0
-                local maxRank = tonumber(info.skillLineMaxRank) or tonumber(info.maxLevel) or tonumber(info.maxRank) or 0
-                if rank > 0 or maxRank > 0 then
-                    return true
-                end
-            end
+    -- C_SkillInfo has no GetSkillLineInfo in 12.1.5 (only SKILL_LINES_CHANGED); the documented
+    -- direct lookup is C_TradeSkillUI.GetProfessionInfoBySkillLineID (skillLevel > 0 = learned).
+    if C_TradeSkillUI and C_TradeSkillUI.GetProfessionInfoBySkillLineID then
+        local okInfo, info = pcall(C_TradeSkillUI.GetProfessionInfoBySkillLineID, skillLineID)
+        if okInfo and type(info) == "table" and (tonumber(info.skillLevel) or 0) > 0 then
+            return true
         end
     end
     if skillLineID == SKILL_LINE_FISHING and FallbackOwnsFishingBySkillList() then
@@ -804,17 +686,16 @@ function Utilities.PlayerOwnsProfessionSkillLine(skillLineID)
     if not GetProfessions or not GetProfessionInfo then
         return false
     end
-    local p1, p2, p3, p4, p5 = GetProfessions()
-    for _, profIdx in ipairs({ p1, p2, p3, p4, p5 }) do
+    -- GetProfessions returns prof1, prof2, archaeology, fishing, cooking; any may be nil, so no
+    -- ipairs (it stopped at a missing primary and hid Fishing). Only return 7 is the skill line:
+    -- matching every numeric return made a skill rank of 182/186 look like Herbalism/Mining.
+    local idxs = { GetProfessions() }
+    for slot = 1, 5 do
+        local profIdx = idxs[slot]
         if profIdx then
-            local ok, a, b, c, d, e, f, g, h, i, j, k, l = pcall(GetProfessionInfo, profIdx)
-            if ok then
-                local pack = { a, b, c, d, e, f, g, h, i, j, k, l }
-                for idx = 1, 12 do
-                    if tonumber(pack[idx]) == skillLineID then
-                        return true
-                    end
-                end
+            local ok, _, _, _, _, _, _, skillLine = pcall(GetProfessionInfo, profIdx)
+            if ok and tonumber(skillLine) == skillLineID then
+                return true
             end
         end
     end
@@ -864,11 +745,3 @@ function Utilities.PlayerOwnsAnyOverloadTrackerProfession()
     return Utilities.PlayerOwnsHerbalism() or Utilities.PlayerOwnsMining()
 end
 
-ns.PlayerOwnsHerbalism = Utilities.PlayerOwnsHerbalism
-ns.PlayerOwnsMining = Utilities.PlayerOwnsMining
-ns.PlayerOwnsFishing = Utilities.PlayerOwnsFishing
-ns.PlayerOwnsSkinning = Utilities.PlayerOwnsSkinning
-ns.PlayerOwnsLeatherworking = Utilities.PlayerOwnsLeatherworking
-ns.PlayerOwnsLeatherTabProfessions = Utilities.PlayerOwnsLeatherTabProfessions
-ns.PlayerOwnsEnchanting = Utilities.PlayerOwnsEnchanting
-ns.PlayerOwnsAnyOverloadTrackerProfession = Utilities.PlayerOwnsAnyOverloadTrackerProfession

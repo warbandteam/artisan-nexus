@@ -3,128 +3,147 @@
 
     Two questions, one window:
       1. "From bag"   - scan bags, list Midnight recipes whose reagents I hold.
-      2. "Recipe"     - pick any cached recipe, see what you still need to farm.
+      2. "By recipe"  - pick any cached recipe, see what you still need to farm.
 
     Reagent data only exists for recipes whose profession window has been
     opened at least once (see RecipeService:HarvestOpenProfession). Until
     then the list is empty - open the profession, browse once, done.
+
+    Built exactly like a Warband Nexus floating window (ns.ArtisanWindow, ArtisanWindow.lua):
+      shell / title band / close / settings gear / resize / position  -> PlansTrackerWindow.lua (via ns.ArtisanWindow)
+      mode tabs                                                       -> ns.UI_CreateSubTabBar (SharedWidgets.lua:1857)
+      search box                                                      -> ns.UI_CreateSearchBox (ItemsUI.lua:1474 usage)
+      profession filter                                               -> ns.ArtisanWindow.CreateDropdown (PlansTrackerWindow.lua:1871)
+      list rows + section headers                                     -> ns.UI_TableKit row pool + ns.UI_CreateCollapsibleHeader
+      detail pane (section headers, data rows, empty text)            -> RecipeCompanionWindow.lua:438 RenderContent,
+                                                                         ProfessionInfoWindow.lua:226 AddSectionHeader / AddLine
+      footer status line                                              -> UI_MainShell.lua main-window footer (rule + small Dim text)
 ]]
 
 local ADDON_NAME, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
+
+-- 12.1.5 removed the global item/coin fallbacks; bind the namespaced APIs.
+local GetItemInfo = C_Item.GetItemInfo
 
 local L = ns.L
-local COLORS = ns.UI_COLORS
-local ApplyVisuals = ns.UI_ApplyVisuals
 local E = ns.Constants.EVENTS
-
-local function Colors()
-    return COLORS or ns.UI_COLORS or {}
-end
+local FontManager = ns.FontManager
 
 ---@class RecipeMatcherUI
 local RecipeMatcherUI = {}
 ns.RecipeMatcherUI = RecipeMatcherUI
 
-local WINDOW_W = (ns.UI_LAYOUT and ns.UI_LAYOUT.MATCHER_WINDOW_WIDTH) or 960
-local WINDOW_H = (ns.UI_LAYOUT and ns.UI_LAYOUT.MATCHER_WINDOW_HEIGHT) or 660
-local PAD = 12
-local LAYOUT = ns.UI_LAYOUT or {}
-local LIST_EDGE_PAD = LAYOUT.MATCHER_LIST_EDGE_PAD or 4
-local PANE_GAP = LAYOUT.MATCHER_PANE_GAP or 6
-local FONTS = ns.UI_FONTS or {}
-local function Font(role)
-    return (role and FONTS[role]) or FONTS.WINDOW_BODY or "GameFontNormal"
-end
-
---- Bottom pane anchors touch the window edge directly. Classic's ornate border
---- art needs more clearance than the plain PAD used by the modern skin — see
---- AN-UI-theme.mdc border footprint.
-local function BodySafeInset(basePad)
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() and ns.UI_GetClassicShellHorizontalInset then
-        return ns.UI_GetClassicShellHorizontalInset()
-    end
-    return basePad
-end
-local ROW_H = LAYOUT.MATCHER_ROW_HEIGHT or 36
-local ICON_SZ = LAYOUT.MATCHER_ICON_SIZE or 28
-local SECTION_H = LAYOUT.MATCHER_SECTION_HEIGHT or 28
-local SECTION_GAP = 6
-local TOOLBAR_H = LAYOUT.MATCHER_TOOLBAR_HEIGHT or 32
-local TITLEBAR_H = LAYOUT.MATCHER_TITLEBAR_HEIGHT or 52
+-- ── Window-specific metrics ──
+local WINDOW_W, WINDOW_H = 960, 660
+local MIN_W, MIN_H = 720, 420
+local MAX_W, MAX_H = 1600, 1200
 local LEFT_PANE_FRAC = 0.46
+local PROF_DROPDOWN_W = 180
+local ROW_GAP = 8                 -- between toolbar rows / toolbar and panes
+local SECTION_GAP = 6             -- after a profession group in the list
+local HEADER_GAP = 2              -- section header -> first row
+local LIST_ICON = 20
+local COUNT_COL_W = 64
+local DETAIL_PAD = 8              -- RecipeCompanionWindow.lua PADDING
+local DETAIL_ROW_H = 26           -- UI_SPACING.ROW_HEIGHT
+local DETAIL_LINE_H = 18
+local DETAIL_SECTION_GAP = 10
+local GRIP_RESERVE = 22           -- footer lane kept clear of the resize grip
 
---- Semantic role markup resolved from the LIVE palette (light/dark safe).
-local function HexRole(text, kind)
-    if type(text) ~= "string" or text == "" then
-        return text or ""
-    end
-    local hex = ns.UI_GetSemanticHex and ns.UI_GetSemanticHex(kind)
-    if not hex then
-        return text
-    end
-    return "|cff" .. hex .. text .. "|r"
+local function T(key, fallback)
+    local v = L and L[key]
+    if v == nil or v == "" then return fallback end
+    return v
 end
 
-local function HexDim(a)
-    local c = COLORS and COLORS.textDim or { 0.58, 0.54, 0.64 }
-    return string.format("|cff%02x%02x%02x", math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255)) .. (a or "") .. "|r"
+local function Layout() return ns.UI_LAYOUT or {} end
+local function MainShell() return Layout().MAIN_SHELL or {} end
+local function TableTokens() return Layout().TABLE or { ROW_H = { standard = 30 }, CELL_PAD_X = 8 } end
+local function Factory() return ns.UI and ns.UI.Factory end
+local function COLORS() return ns.UI_COLORS or { accent = { 0.5, 0.4, 0.7 }, border = { 0.3, 0.3, 0.35 } } end
+local function Win() return ns.ArtisanWindow end
+
+local function ButtonHeight()
+    return (ns.UI_CONSTANTS and ns.UI_CONSTANTS.BUTTON_HEIGHT) or 32
+end
+local function SearchHeight()
+    return (ns.UI_CONSTANTS and ns.UI_CONSTANTS.SEARCH_BOX_HEIGHT) or 32
+end
+local function RowHeight()
+    local t = TableTokens()
+    return (t.ROW_H and t.ROW_H.standard) or 30
+end
+local function SectionHeaderHeight()
+    return Layout().SECTION_COLLAPSE_HEADER_HEIGHT or 36
+end
+local function PaneGap()
+    return MainShell().SETTINGS_NAV_GAP or 10
+end
+local function FooterHeight()
+    return MainShell().FOOTER_HEIGHT or 26
 end
 
---- SharedWidgets shell stylers load before this file per TOC; alias directly.
----@param btn Frame
----@param selected boolean
-local function StyleModeTab(btn, selected)
-    ns.UI_StyleShellTabButton(btn, selected)
+--- `|cffrrggbb` prefixes (RecipeCompanionWindow.lua TextRoleHex / SemanticGreenHex pattern).
+local function RoleHex(role)
+    return (ns.UI_GetTextRoleHex and ns.UI_GetTextRoleHex(role)) or "|cffcccccc"
+end
+local function GreenHex()
+    return (ns.UI_GetSemanticGreenHex and ns.UI_GetSemanticGreenHex()) or "|cff44ff44"
+end
+local function GoldHex()
+    return (ns.UI_GetSemanticGoldHex and ns.UI_GetSemanticGoldHex()) or "|cffffd100"
+end
+local function RedHex()
+    local r, g, b = 0.9, 0.3, 0.3
+    if ns.UI_GetSemanticRedColor then r, g, b = ns.UI_GetSemanticRedColor() end
+    return string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
+end
+local function AccentHex()
+    return "|cff" .. ((ns.UI_GetAccentHexColor and ns.UI_GetAccentHexColor()) or "9966cc")
+end
+local function Wrap(hex, text)
+    return hex .. tostring(text) .. "|r"
 end
 
---- Neutral toolbar control (profession filter / secondary actions).
----@param btn Frame
----@param highlight boolean hovered
----@param skipTextColor boolean|nil keep embedded |c...|r in label (e.g. profession picker)
-local function StyleToolbarBtn(btn, highlight, skipTextColor)
-    if ns.UI_StylePanelButton then
-        ns.UI_StylePanelButton(btn, { pressed = highlight and true or false })
-        return
-    end
-    ns.UI_StyleShellToolButton(btn, highlight, skipTextColor)
+--- WN money string (TableKit SetMoneyCell: 12px coins, zero shown).
+local function Money(copper)
+    if copper == nil then return nil end
+    if ns.UI_FormatMoney then return ns.UI_FormatMoney(copper, 12, true) end
+    return ns.FormatCopper and ns.FormatCopper(copper) or tostring(copper)
 end
 
---- Row overlay fills resolved from the live palette at call time.
---- Dark keeps the white ADD-style glow values; light uses an accent wash
---- (AN-UX-readability: no white overlays / dark accent fills on light surfaces).
----@param state string "none"|"hover"|"hoverSelected"|"selected"
-local function SetRowOverlay(row, state)
-    if state == "none" then
-        row.bg:SetColorTexture(0, 0, 0, 0)
-        return
-    end
-    local light = ns.UI_GetThemeMode and ns.UI_GetThemeMode() == "light"
-    local ac = Colors().accent or { 0.44, 0.32, 0.58, 1 }
-    if state == "selected" then
-        if light then
-            row.bg:SetColorTexture(ac[1], ac[2], ac[3], 0.20)
-        else
-            row.bg:SetColorTexture(ac[1] * 0.22, ac[2] * 0.18, ac[3] * 0.28, 0.35)
+local function SignedMoney(copper)
+    local TK = ns.UI_TableKit
+    if TK and TK.FormatSignedMoneyPlain then return TK.FormatSignedMoneyPlain(copper, 12) end
+    return Money(copper) or ""
+end
+
+local function ProfessionLabel(prof)
+    if not prof or prof == "" then return "" end
+    return (ns.GetProfessionDisplayName and ns.GetProfessionDisplayName(prof)) or prof
+end
+
+--- ThemedButton has no disabled skin; WN sub-tab disabled pattern (Disable + 0.5 alpha).
+local function SetButtonEnabled(btn, on)
+    if not btn then return end
+    if on then btn:Enable() else btn:Disable() end
+    btn:SetAlpha(on and 1 or 0.5)
+end
+
+local function AttachButtonTooltip(btn, title, desc)
+    btn:HookScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:SetText(title, 1, 1, 1)
+        if desc and desc ~= "" then
+            GameTooltip:AddLine(desc, 0.85, 0.85, 0.85, true)
         end
-        return
-    end
-    local sel = (state == "hoverSelected")
-    if light then
-        row.bg:SetColorTexture(ac[1], ac[2], ac[3], sel and 0.26 or 0.14)
-    else
-        row.bg:SetColorTexture(1, 1, 1, sel and 0.12 or 0.06)
-    end
-end
-
-local function RowSetSelected(row, on)
-    row._selected = on and true or false
-    if row:IsMouseOver() then
-        SetRowOverlay(row, on and "hoverSelected" or "hover")
-    elseif on then
-        SetRowOverlay(row, "selected")
-    else
-        SetRowOverlay(row, "none")
-    end
+        GameTooltip:Show()
+    end)
+    btn:HookScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
 end
 
 --- Async item name + icon: triggers a ContinueOnItemLoad that refreshes UI.
@@ -132,6 +151,7 @@ end
 local ITEM_NAME_CACHE = {}
 ---@type table<number, number>
 local ITEM_ICON_CACHE = {}
+local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local pendingRefresh = false
 local pendingRightRefresh = false
 
@@ -156,6 +176,12 @@ local function InvalidateListCaches()
     rightPaintCache.bagGen = -1
 end
 
+--- Force the detail pane to repaint on its next refresh (also when nothing is selected).
+local function InvalidateRightPaint()
+    rightPaintCache.spellID = nil
+    rightPaintCache.bagGen = -1
+end
+
 local function BumpLeftDraw()
     leftDrawGen = leftDrawGen + 1
     return leftDrawGen
@@ -167,7 +193,7 @@ local function RequestRightRefresh()
     C_Timer.After(0.08, function()
         pendingRightRefresh = false
         if RecipeMatcherUI.main and RecipeMatcherUI.main:IsShown() then
-            rightPaintCache.spellID = nil
+            InvalidateRightPaint()
             RecipeMatcherUI:Refresh({ rightOnly = true })
         end
     end)
@@ -179,7 +205,11 @@ local function RequestItemLoad(itemID, onRefresh)
     local item = Item:CreateFromItemID(itemID)
     if item.IsItemEmpty and item:IsItemEmpty() then return end
     item:ContinueOnItemLoad(function()
-        ITEM_NAME_CACHE[itemID] = item:GetItemName() or ""
+        --- Cache only real names: "" is truthy in Lua and would pin a blank name for the session.
+        local loadedName = item:GetItemName()
+        if type(loadedName) == "string" and loadedName ~= "" then
+            ITEM_NAME_CACHE[itemID] = loadedName
+        end
         local icon = C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(itemID)
         if icon then ITEM_ICON_CACHE[itemID] = icon end
         if onRefresh then
@@ -199,11 +229,9 @@ local function RequestFullRefresh()
     end)
 end
 
-local function SetItemVisual(iconFrame, itemID, onLoad)
-    if not itemID then
-        iconFrame:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
-        return
-    end
+--- Item icon (fileID) or the question mark while the item loads.
+local function ItemIcon(itemID, onLoad)
+    if not itemID then return QUESTION_ICON end
     local tex = ITEM_ICON_CACHE[itemID]
     if not tex then
         local live = C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(itemID)
@@ -213,30 +241,25 @@ local function SetItemVisual(iconFrame, itemID, onLoad)
         end
     end
     if tex and tex > 0 then
-        iconFrame:SetTexture(tex)
-    else
-        iconFrame:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
-        RequestItemLoad(itemID, onLoad)
+        return tex
     end
+    RequestItemLoad(itemID, onLoad)
+    return QUESTION_ICON
 end
 
 --- Prefer crafted item icon; else recipe UI icon (fileID) from harvest or live GetRecipeInfo.
---- (Must be defined after SetItemVisual: Lua 5.1 cannot forward-reference locals.)
-local function SetRecipeRowIcon(rowIcon, spellID, outputItemID, recipeIconFile, onRefresh)
-    local oid = outputItemID
-    if oid and oid > 0 then
-        SetItemVisual(rowIcon, oid, onRefresh)
-        return
+local function RecipeIcon(spellID, outputItemID, recipeIconFile, onRefresh)
+    if outputItemID and outputItemID > 0 then
+        return ItemIcon(outputItemID, onRefresh)
     end
     local fid = recipeIconFile
     if (not fid or fid <= 0) and ns.RecipeService and ns.RecipeService.GetRecipeDisplayIconFileID then
         fid = ns.RecipeService:GetRecipeDisplayIconFileID(spellID)
     end
     if type(fid) == "number" and fid > 0 then
-        rowIcon:SetTexture(fid)
-        return
+        return fid
     end
-    rowIcon:SetTexture(136243)
+    return 136243
 end
 
 local function ItemName(itemID, onLoad)
@@ -252,224 +275,171 @@ local function ItemName(itemID, onLoad)
         return cached
     end
     RequestItemLoad(itemID, onLoad)
-    return HexDim("item:" .. tostring(itemID))
+    return Wrap(RoleHex("Dim"), "item:" .. tostring(itemID))
 end
 
---- Shared money formatter (Modules/Utilities.lua; loads before this file per TOC).
-local FormatCopper = ns.FormatCopper
+--==========================================================================
+-- Left list (TableKit row pool + collapsible profession headers)
+--==========================================================================
 
-local function CreateRow(parent)
-    local row = CreateFrame("Button", nil, parent)
-    row:SetHeight(ROW_H)
-    row:EnableMouse(true)
-    row._selected = false
+local LIST_COLS = {
+    { key = "icon", cell = "icon", width = LIST_ICON + 16, align = "CENTER", iconSize = LIST_ICON },
+    { key = "name", flex = 1, min = 60, align = "LEFT" },
+    { key = "count", width = COUNT_COL_W, align = "RIGHT" },
+}
 
-    row.bg = row:CreateTexture(nil, "BACKGROUND")
-    row.bg:SetAllPoints()
-    row.bg:SetColorTexture(0, 0, 0, 0)
-
-    row.icon = row:CreateTexture(nil, "ARTWORK")
-    row.icon:SetSize(ICON_SZ, ICON_SZ)
-    row.icon:SetPoint("LEFT", row, "LEFT", LIST_EDGE_PAD + 4, 0)
-
-    row.right = row:CreateFontString(nil, "OVERLAY", Font("WINDOW_BODY"))
-    row.right:SetPoint("RIGHT", row, "RIGHT", -(LIST_EDGE_PAD + 6), 0)
-    row.right:SetJustifyH("RIGHT")
-
-    row.label = row:CreateFontString(nil, "OVERLAY", Font("WINDOW_BODY"))
-    row.label:SetPoint("LEFT", row.icon, "RIGHT", 10, 0)
-    row.label:SetPoint("RIGHT", row.right, "LEFT", -8, 0)
-    row.label:SetJustifyH("LEFT")
-    row.label:SetWordWrap(false)
-
-    row:SetScript("OnEnter", function(self)
-        SetRowOverlay(self, self._selected and "hoverSelected" or "hover")
-        if self.tooltipItemID then
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetItemByID(self.tooltipItemID)
-            GameTooltip:Show()
-        elseif self.tooltipSpellID then
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetSpellByID(self.tooltipSpellID)
-            GameTooltip:Show()
+local function ListValue(col, data)
+    if col.key == "icon" then
+        return data.icon
+    elseif col.key == "name" then
+        if data.green and ns.UI_GetSemanticGreenColor then
+            local r, g, b, a = ns.UI_GetSemanticGreenColor()
+            return data.label, "Bright", r, g, b, a
         end
-    end)
-    row:SetScript("OnLeave", function(self)
-        RowSetSelected(self, self._selected)
-        GameTooltip:Hide()
-    end)
+        return data.label, data.dim and "Dim" or "Bright"
+    end
+    if data.green and ns.UI_GetSemanticGreenColor then
+        local r, g, b, a = ns.UI_GetSemanticGreenColor()
+        return data.count, "Bright", r, g, b, a
+    end
+    return data.count, "Dim"
+end
+
+local function ListRowOnEnter(self)
+    if self._anSpellID then
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetSpellByID(self._anSpellID)
+        GameTooltip:Show()
+    end
+end
+
+local function ListRowOnLeave()
+    GameTooltip:Hide()
+end
+
+local function OnRecipeRowClick(spellID)
+    if RecipeMatcherUI.selectedSpellID == spellID then
+        return
+    end
+    RecipeMatcherUI.selectedSpellID = spellID
+    RecipeMatcherUI:RefreshSelection()
+end
+
+local function ListRowOnClick(self)
+    local sid = self._anSpellID
+    if not sid then return end
+    if IsModifiedClick() then
+        local link = C_Spell.GetSpellLink(sid)
+        if link and HandleModifiedItemClick(link) then
+            return
+        end
+    end
+    OnRecipeRowClick(sid)
+end
+
+--- Selected row: WN active-row highlight (accent stripe + tint); others keep the alternating fill.
+local function PaintRowSelected(row, on)
+    local F = Factory()
+    if F and F.ApplyOnlineCharacterHighlight then
+        F:ApplyOnlineCharacterHighlight(row, on and true or false)
+    end
+end
+
+local function ListContentWidth(list)
+    local w = Win().SyncScrollChildWidth(list.vp)
+    if not w or w < 1 then
+        w = (list.vp.shell:GetWidth() or 0) - 2 * Win().ViewportInnerInset() - Win().ScrollRightReserve()
+    end
+    return math.max(1, w)
+end
+
+local function AcquireListRow(list, rowIndex, y)
+    local TK = ns.UI_TableKit
+    local child = list.vp.scrollChild
+    local width = list.paintWidth
+    local row = TK.AcquireRow(list.pool, child, rowIndex, width, RowHeight())
+    row:SetPoint("TOPLEFT", child, "TOPLEFT", 0, y)
+    if not row._anMatcherWired then
+        row._anMatcherWired = true
+        row:SetScript("OnEnter", ListRowOnEnter)
+        row:SetScript("OnLeave", ListRowOnLeave)
+        row:SetScript("OnClick", ListRowOnClick)
+    end
     return row
 end
 
-local function CreateScrollList(parent)
-    local host = CreateFrame("Frame", nil, parent)
-    host:SetClipsChildren(true)
-    local viewport = CreateFrame("Frame", nil, host, "BackdropTemplate")
-    if ns.UI_ApplyViewportInset then
-        ns.UI_ApplyViewportInset(viewport, host)
-    end
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(viewport, COLORS.bgLight, COLORS.border)
-    elseif ApplyVisuals then
-        ApplyVisuals(viewport, COLORS.bgLight, { COLORS.border[1], COLORS.border[2], COLORS.border[3], 0.42 })
-    end
-
-    local barChromeHost = (ns.UI_CreateScrollBarChromeHost and ns.UI_CreateScrollBarChromeHost(host, viewport))
-        or host
-    host.barChromeHost = barChromeHost
-
-    local scroll, content = ns.UI_AttachThemedScroll(viewport, ns.UI_BuildExternalScrollOpts(barChromeHost, {
-        padL = 6, padT = -6, padB = 6, topInset = 0, bottomInset = 0,
-    }))
-    scroll:SetClipsChildren(true)
-
-    local function syncScrollWidth()
-        if ns.UI_SyncScrollChildWidth then
-            ns.UI_SyncScrollChildWidth(scroll, content, 0)
-        else
-            local w = scroll:GetWidth()
-            if w and w > 8 then
-                content:SetWidth(w)
-            end
-        end
-    end
-    host.syncWidth = syncScrollWidth
-    scroll:SetScript("OnSizeChanged", syncScrollWidth)
-    host:SetScript("OnSizeChanged", syncScrollWidth)
-
-    host.scroll = scroll
-    host.content = content
-    host.viewport = viewport
-    host.rows = {}
-    host.sectionHeaders = {}
-    if ns.UI_RegisterViewportDebug then
-        ns.UI_RegisterViewportDebug(host, "recipe_host")
-        ns.UI_RegisterViewportDebug(viewport, "recipe_vp")
-        ns.UI_RegisterViewportDebug(barChromeHost, "recipe_bar")
-        ns.UI_RegisterViewportDebug(scroll, "recipe_scroll")
-        ns.UI_RegisterViewportDebug(scroll._anScrollBarColumn, "recipe_bar")
-    end
-    return host
+local function PaintListRow(list, rowIndex, y, data)
+    local TK = ns.UI_TableKit
+    local row = AcquireListRow(list, rowIndex, y)
+    TK.PaintRowCells(row, LIST_COLS, list.widths, list.offsets, #LIST_COLS, data, ListValue)
+    row._anSpellID = data.spellID
+    PaintRowSelected(row, data.spellID ~= nil and RecipeMatcherUI.selectedSpellID == data.spellID)
+    return row
 end
 
---- Section headers double as collapse toggles. Created lazily, recycled per refresh.
-local function ApplySectionHeaderChrome(hdr)
-    if not hdr or not hdr.bg then
-        return
-    end
-    if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-        if ns.UI_ApplyClassicInsetPanel then
-            ns.UI_ApplyClassicInsetPanel(hdr)
-        end
-        return
-    end
-    local ac = Colors().accent or { 0.44, 0.32, 0.58, 1 }
-    local light = ns.UI_GetThemeMode and ns.UI_GetThemeMode() == "light"
-    if light then
-        hdr.bg:SetColorTexture(ac[1], ac[2], ac[3], 0.14)
-    else
-        hdr.bg:SetColorTexture(ac[1] * 0.12, ac[2] * 0.10, ac[3] * 0.16, 0.55)
-    end
-end
-
-local function CreateSectionHeader(parent)
-    local h = CreateFrame("Button", nil, parent)
-    h:SetHeight(SECTION_H)
-    h:EnableMouse(true)
-
-    h.bg = h:CreateTexture(nil, "BACKGROUND")
-    h.bg:SetAllPoints()
-    ApplySectionHeaderChrome(h)
-
-    h.caret = h:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
-    h.caret:SetPoint("LEFT", h, "LEFT", LIST_EDGE_PAD + 6, 0)
-    h.caret:SetTextColor(COLORS.textDim[1], COLORS.textDim[2], COLORS.textDim[3], 1)
-
-    h.label = h:CreateFontString(nil, "OVERLAY", Font("WINDOW_SECTION"))
-    h.label:SetPoint("LEFT", h.caret, "RIGHT", 6, 0)
-    h.label:SetJustifyH("LEFT")
-    h.label:SetWordWrap(false)
-
-    h.right = h:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
-    h.right:SetPoint("RIGHT", h, "RIGHT", -(LIST_EDGE_PAD + 6), 0)
-    h.right:SetJustifyH("RIGHT")
-    h.right:SetWordWrap(false)
-
-    h.label:SetPoint("RIGHT", h.right, "LEFT", -8, 0)
-
-    h:SetScript("OnEnter", function(self)
-        if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-            return
-        end
-        local ac = Colors().accent or { 0.44, 0.32, 0.58, 1 }
-        local light = ns.UI_GetThemeMode and ns.UI_GetThemeMode() == "light"
-        if light then
-            self.bg:SetColorTexture(ac[1], ac[2], ac[3], 0.22)
-        else
-            self.bg:SetColorTexture(ac[1] * 0.18, ac[2] * 0.15, ac[3] * 0.24, 0.65)
-        end
-    end)
-    h:SetScript("OnLeave", function(self)
-        ApplySectionHeaderChrome(self)
-    end)
-    return h
-end
-
-local function AcquireSectionHeader(list, index, y)
-    local h = list.sectionHeaders[index]
+--- Pooled collapsible header (ns.UI_CreateCollapsibleHeader once, ns.UI_RebindCollapsibleHeader after).
+local function AcquireSectionHeader(list, index, y, text, expanded, onToggle)
+    local child = list.vp.scrollChild
+    local h = list.headers[index]
     if not h then
-        h = CreateSectionHeader(list.content)
-        list.sectionHeaders[index] = h
+        h = ns.UI_CreateCollapsibleHeader(child, text, "recipeMatcher_" .. index, expanded, onToggle,
+            nil, nil, 0, true, { sectionHeaderHeight = SectionHeaderHeight(), useFullParentWidth = true })
+        list.headers[index] = h
     end
+    ns.UI_RebindCollapsibleHeader(h, text, expanded, onToggle)
     h:ClearAllPoints()
-    h:SetPoint("TOPLEFT", list.content, "TOPLEFT", LIST_EDGE_PAD, y)
-    h:SetPoint("RIGHT", list.content, "RIGHT", -LIST_EDGE_PAD, 0)
+    h:SetPoint("TOPLEFT", child, "TOPLEFT", 0, y)
+    h:SetPoint("TOPRIGHT", child, "TOPRIGHT", 0, y)
     h:Show()
     return h
 end
 
-local function ReleaseSectionHeaders(list)
-    local sh = list.sectionHeaders
-    for i = 1, #sh do
-        local h = sh[i]
-        if h then
-            h:Hide()
-            h:SetScript("OnClick", nil)
-        end
+local function ReleaseList(list)
+    local TK = ns.UI_TableKit
+    TK.ReleaseRowsFrom(list.pool, 1)
+    for i = 1, #list.headers do
+        list.headers[i]:Hide()
+    end
+    if list.emptyText then
+        list.emptyText:Hide()
     end
 end
 
-local function ReleaseRows(list)
-    local rows = list.rows
-    for i = 1, #rows do
-        local r = rows[i]
-        if r then
-            r:Hide()
-            r.tooltipItemID = nil
-            r.tooltipSpellID = nil
-            r:SetScript("OnClick", nil)
-            RowSetSelected(r, false)
-        end
+--- Theme change: headers carry creation-time chrome; drop them so the next paint rebuilds them.
+local function DiscardListHeaders(list)
+    local bin = ns.UI_RecycleBin
+    for i = 1, #list.headers do
+        local h = list.headers[i]
+        h:Hide()
+        h:ClearAllPoints()
+        if bin then h:SetParent(bin) end
+        list.headers[i] = nil
     end
 end
 
-local function AcquireRow(list, index, y)
-    local row = list.rows[index]
-    if not row then
-        row = CreateRow(list.content)
-        list.rows[index] = row
+--- One empty message (RecipeCompanionWindow.lua:453 noData pattern).
+local function ShowListEmpty(list, message)
+    BumpLeftDraw()
+    ReleaseList(list)
+    local child = list.vp.scrollChild
+    local fs = list.emptyText
+    if not fs then
+        fs = FontManager:CreateFontString(child, "body", "OVERLAY")
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(true)
+        list.emptyText = fs
     end
-    row:ClearAllPoints()
-    local yOff = y or (-(index - 1) * ROW_H)
-    -- TOPLEFT + TOPRIGHT only: mixing RIGHT stretch with SetWidth causes anchor-family errors.
-    row:SetPoint("TOPLEFT", list.content, "TOPLEFT", 0, yOff)
-    row:SetPoint("TOPRIGHT", list.content, "TOPRIGHT", 0, yOff)
-    row:Show()
-    return row
+    fs:ClearAllPoints()
+    fs:SetPoint("TOPLEFT", child, "TOPLEFT", DETAIL_PAD, -DETAIL_PAD)
+    fs:SetPoint("RIGHT", child, "RIGHT", -DETAIL_PAD, 0)
+    fs:SetText(Wrap(RoleHex("Muted"), message))
+    fs:Show()
+    child:SetHeight(40)
+    Win().SyncScroll(list.vp)
 end
 
 --==========================================================================
--- Forward declarations (pane renderers are defined after Init)
+-- Forward declarations
 --==========================================================================
 
 local RefreshLeft_Bag, RefreshLeft_Recipe, RefreshRight
@@ -479,416 +449,309 @@ local UpdateStatus
 -- Layout
 --==========================================================================
 
+--- Left pane width follows the window (live resize).
+local function RelayoutPanes()
+    local self = RecipeMatcherUI
+    local f = self.main
+    if not f or not self.left then return end
+    local ca = f.contentArea
+    local cw = ca and ca:GetWidth() or 0
+    if cw < 1 then cw = WINDOW_W - 2 * (Win().PADDING or 10) end
+    self.left.vp.shell:SetWidth(math.max(160, math.floor(cw * LEFT_PANE_FRAC)))
+    Win().SyncScrollChildWidth(self.left.vp)
+    Win().SyncScrollChildWidth(self.right.vp)
+    Win().SyncScroll(self.left.vp)
+    Win().SyncScroll(self.right.vp)
+end
+
+local function ProfessionFilterItems()
+    local out = {}
+    for _, prof in ipairs(ns.Constants.CRAFT_PROFESSION_FILTERS) do
+        out[#out + 1] = {
+            key = prof,
+            label = (prof == "All") and T("RECIPE_MATCHER_PROF_ALL", "All professions") or ProfessionLabel(prof),
+        }
+    end
+    return out
+end
+
+local function RunRecipeScan()
+    local svc = ns.RecipeService
+    if not svc then return end
+    if svc.IsHarvestChunkActive and svc:IsHarvestChunkActive() then
+        ns.ArtisanNexus:Print(T("RECIPE_SCAN_BUSY", "Recipe scan already in progress."))
+        return
+    end
+    local function onDone(n, _, considered)
+        if n == 0 and (considered or 0) > 0 then
+            ns.ArtisanNexus:Print(string.format(T("RECIPE_SCAN_UPTODATE_FMT", "All %d recipes are already up to date."), considered))
+        elseif n == 0 then
+            ns.ArtisanNexus:Print(T("RECIPE_MATCHER_NO_PROF_OPEN", "Open a profession window, then click Scan."))
+        else
+            ns.ArtisanNexus:Print(string.format(T("RECIPE_SCAN_DONE_FMT", "Scanned %d recipes."), n))
+        end
+        InvalidateListCaches()
+        RecipeMatcherUI:Refresh()
+    end
+    local started = svc.HarvestOpenProfessionChunked and svc:HarvestOpenProfessionChunked(onDone)
+    if not started then
+        onDone(0)
+    end
+end
+
+local function AddSelectedToShopping()
+    local sid = RecipeMatcherUI.selectedSpellID
+    if not sid or not ns.ShoppingListService then return end
+    ns.ShoppingListService:Add(sid, 1)
+    local nm = (ns.RecipeService and ns.RecipeService.GetRecipeName and ns.RecipeService:GetRecipeName(sid)) or ("#" .. tostring(sid))
+    if not nm or (issecretvalue and issecretvalue(nm)) then nm = "#" .. tostring(sid) end
+    ns.ArtisanNexus:Print(string.format(T("RECIPE_MATCHER_SHOP_ONE_FMT", "|cffd4af37+1 shopping:|r %s"), nm))
+end
+
+local function AddFilteredToShopping()
+    if not ns.ShoppingListService or not ns.ShoppingListService.AddMany then return end
+    local ids = RecipeMatcherUI:CollectFilteredSpellIDs()
+    if #ids == 0 then
+        ns.ArtisanNexus:Print(T("RECIPE_MATCHER_SHOP_NONE", "Nothing to add for the current filter."))
+        return
+    end
+    local n = ns.ShoppingListService:AddMany(ids, 1)
+    if n > 0 then
+        ns.ArtisanNexus:Print(string.format(T("RECIPE_MATCHER_SHOP_BATCH_FMT", "|cffd4af37Shopping list:|r merged %d recipe(s)."), n))
+    end
+end
+
 function RecipeMatcherUI:Init()
     if self.main then return end
+    local W = Win()
+    local TK = ns.UI_TableKit
 
-    local f = CreateFrame("Frame", "ArtisanNexusRecipeMatcher", UIParent, "BackdropTemplate")
-    f:SetSize(WINDOW_W, WINDOW_H)
-    f:SetPoint("CENTER")
-    f:SetFrameStrata("DIALOG")
-    f:SetFrameLevel(100)
-    f:SetMovable(true)
-    f:EnableMouse(true)
-    f:SetClampedToScreen(true)
-    f:Hide()
-    f._anPosKey = "recipeMatcherFrame"
-    --- Init re-runs after every ResetForUiMode; a duplicate UISpecialFrames
-    --- entry would make one Esc press run the hide handler twice.
-    local alreadySpecial = false
-    for i = 1, #UISpecialFrames do
-        if UISpecialFrames[i] == "ArtisanNexusRecipeMatcher" then
-            alreadySpecial = true
-            break
-        end
-    end
-    if not alreadySpecial then
-        tinsert(UISpecialFrames, "ArtisanNexusRecipeMatcher")
-    end
-
-    if ns.UI_ApplyMainWindowChrome then
-        ns.UI_ApplyMainWindowChrome(f)
-    else
-        ApplyVisuals(f, COLORS.bg, { COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.62 })
-    end
-
-    local shell = ns.UI_CreateWindowHeader(f, {
-        title = (L and L["RECIPE_MATCHER_TITLE"]) or "Recipes",
-        dragFrame = f,
-        onDragStop = function()
-            f:StopMovingOrSizing()
-            if ns.UI_SaveWindowPosition then
-                ns.UI_SaveWindowPosition(f)
+    local f = W.Create({
+        name = "ArtisanNexusRecipeMatcher",
+        title = T("HUB_RAIL_RECIPE_MATCHER", "Recipe Matcher"),
+        posKey = "recipeMatcherFrame",
+        width = WINDOW_W,
+        height = WINDOW_H,
+        minW = MIN_W,
+        minH = MIN_H,
+        maxW = MAX_W,
+        maxH = MAX_H,
+        tileSiblings = true,
+        onClose = function()
+            Win().CloseOpenDropdown()
+        end,
+        onLive = function()
+            RelayoutPanes()
+        end,
+        onCommit = function()
+            RelayoutPanes()
+            if RecipeMatcherUI.main and RecipeMatcherUI.main:IsShown() then
+                InvalidateRightPaint()
+                RecipeMatcherUI:Refresh()
             end
         end,
-        showSettings = true,
-        settingsTooltip = {
-            title = (L and L["LOOT_SETTINGS_TOOLTIP"]) or "Artisan Nexus settings",
-        },
-        utilities = {
-            {
-                texture = "Interface\\Icons\\INV_Misc_Coin_01",
-                onClick = function()
-                    if ns.ArtisanHubUI and ns.ArtisanHubUI.Show then
-                        ns.ArtisanHubUI:Show()
-                    end
-                end,
-                title = (L and L["LOOT_OPEN_HUB"]) or "Hub",
-                desc = (L and L["LOOT_OPEN_HUB_DESC"]) or "",
-            },
-        },
     })
-    self.shell = shell
-    f.headerBar = shell.bar
-    f.title = shell.title
+    if not f then return end
+    f:Hide()
 
-    f.status = f:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
-    f.status:SetPoint("TOPLEFT", shell.bar, "BOTTOMLEFT", PAD + 4, -4)
-    f.status:SetPoint("TOPRIGHT", shell.bar, "BOTTOMRIGHT", -(PAD + 4), -4)
-    f.status:SetHeight(22)
-    f.status:SetJustifyH("LEFT")
-    f.status:SetMaxLines(1)
-    f.status:SetWordWrap(false)
+    -- Header utility buttons, right to left: close, settings, Hub, Session Loot.
+    W.AddHeaderButton(f, {
+        icon = "settings",
+        tooltip = T("HUB_RAIL_SETTINGS", "Settings"),
+        onClick = function()
+            if ns.OpenAddonSettings then ns.OpenAddonSettings() end
+        end,
+    })
+    W.AddHeaderButton(f, {
+        texture = "Interface\\AddOns\\ArtisanNexus\\Media\\anlogo",
+        tooltip = T("HUB_WINDOW_TITLE", "Artisan Hub"),
+        desc = T("LOOT_OPEN_HUB_DESC", "Profit, queue, orders, market and ledger."),
+        onClick = function()
+            W.ShowHubBeside(f)
+        end,
+    })
+    W.AddHeaderButton(f, {
+        texture = "Interface\\Icons\\INV_Misc_Bag_10",
+        tooltip = T("HUB_RAIL_SESSION_LOOT", "Session Loot"),
+        desc = T("HUB_RAIL_SESSION_LOOT_DESC", "Gathering and fishing loot from this session."),
+        onClick = function()
+            if ns.LootHistoryUI then
+                ns.LootHistoryUI:Show(nil, { tileAfter = f })
+            end
+        end,
+    })
 
-    --- Toolbar row 1: mode tabs + scan (no profession cram on same line).
-    local toolRow1 = CreateFrame("Frame", nil, f)
-    toolRow1:SetHeight(TOOLBAR_H)
-    toolRow1:SetPoint("TOPLEFT", f.status, "BOTTOMLEFT", 0, -6)
-    toolRow1:SetPoint("TOPRIGHT", f.status, "BOTTOMRIGHT", 0, -6)
+    local ca = f.contentArea
+    local btnH = ButtonHeight()
 
-    --- Toolbar row 2: profession filter full width.
-    local toolRow2 = CreateFrame("Frame", nil, f)
-    toolRow2:SetHeight(TOOLBAR_H)
-    toolRow2:SetPoint("TOPLEFT", toolRow1, "BOTTOMLEFT", 0, -6)
-    toolRow2:SetPoint("TOPRIGHT", toolRow1, "BOTTOMRIGHT", 0, -6)
+    -- ── Toolbar row 1: mode tabs (left), shopping + scan actions (right) ──
+    local toolRow1 = Factory():CreateContainer(ca, 400, btnH, false)
+    toolRow1:SetPoint("TOPLEFT", ca, "TOPLEFT", 0, 0)
+    toolRow1:SetPoint("TOPRIGHT", ca, "TOPRIGHT", 0, 0)
+    toolRow1:SetHeight(btnH)
 
-    local function makeToolbarBtn(parent)
-        local b = ns.UI_CreateToolbarButton and ns.UI_CreateToolbarButton(parent, TOOLBAR_H - 2)
-            or CreateFrame("Button", nil, parent, "BackdropTemplate")
-        if not ns.UI_CreateToolbarButton then
-            b:SetHeight(TOOLBAR_H - 2)
-            local fs = b:CreateFontString(nil, "OVERLAY", Font("WINDOW_TOOLBAR"))
-            fs:SetPoint("CENTER", 0, 0)
-            b:SetFontString(fs)
-            b._lbl = fs
-        end
-        return b
-    end
+    f.mode = "bag"
+    local modeBar = ns.UI_CreateSubTabBar(toolRow1, {
+        tabs = {
+            { key = "bag", label = T("RECIPE_MATCHER_TAB_BAG", "From bag"), hideIcon = true },
+            { key = "recipe", label = T("RECIPE_MATCHER_TAB_RECIPE", "By recipe"), hideIcon = true },
+        },
+        activeKey = f.mode,
+        btnHeight = btnH,
+        onSelect = function(key)
+            RecipeMatcherUI:SetMode(key)
+        end,
+    })
+    modeBar:SetPoint("TOPLEFT", toolRow1, "TOPLEFT", 0, 0)
+    f.modeBar = modeBar
 
-    local tabFromBag = makeToolbarBtn(toolRow1)
-    if ns.UI_SetToolbarButtonText then
-        ns.UI_SetToolbarButtonText(tabFromBag, (L and L["RECIPE_MATCHER_TAB_BAG"]) or "From bag")
-    end
+    local btnScan = ns.UI_CreateThemedButton(toolRow1, T("RECIPE_MATCHER_HARVEST", "Scan"), 80)
+    btnScan:SetPoint("RIGHT", toolRow1, "RIGHT", 0, 0)
+    btnScan:SetScript("OnClick", RunRecipeScan)
+    AttachButtonTooltip(btnScan, T("RECIPE_MATCHER_HARVEST", "Scan"),
+        T("RECIPE_MATCHER_SCAN_TT", "Read recipe reagents from the open profession window."))
 
-    local tabRecipe = makeToolbarBtn(toolRow1)
-    local tabRecipeLabel = (L and L["RECIPE_MATCHER_TAB_RECIPE"]) or "By recipe"
-    if ns.UI_SetToolbarButtonText then
-        ns.UI_SetToolbarButtonText(tabRecipe, tabRecipeLabel)
-    end
+    local btnShopFiltered = ns.UI_CreateThemedButton(toolRow1, T("RECIPE_MATCHER_SHOP_ADD_FILTERED", "Add all filtered"), 120)
+    btnShopFiltered:SetPoint("RIGHT", btnScan, "LEFT", -ROW_GAP, 0)
+    btnShopFiltered:SetScript("OnClick", AddFilteredToShopping)
+    AttachButtonTooltip(btnShopFiltered, T("RECIPE_MATCHER_SHOP_ADD_FILTERED", "Add all filtered"),
+        T("RECIPE_MATCHER_SHOP_TT_FILTERED", "Add every listed recipe."))
+
+    local btnShopSelected = ns.UI_CreateThemedButton(toolRow1, T("RECIPE_MATCHER_SHOP_ADD_SELECTED", "Add selected"), 110)
+    btnShopSelected:SetPoint("RIGHT", btnShopFiltered, "LEFT", -ROW_GAP, 0)
+    btnShopSelected:SetScript("OnClick", AddSelectedToShopping)
+    AttachButtonTooltip(btnShopSelected, T("RECIPE_MATCHER_SHOP_ADD_SELECTED", "Add selected"),
+        T("RECIPE_MATCHER_SHOP_TT_SELECTED", "Add selected recipe (+1 craft)."))
+
+    -- ── Toolbar row 2: search (fills) + profession filter (right) ──
+    local searchH = SearchHeight()
+    local toolRow2 = Factory():CreateContainer(ca, 400, searchH, false)
+    toolRow2:SetPoint("TOPLEFT", toolRow1, "BOTTOMLEFT", 0, -ROW_GAP)
+    toolRow2:SetPoint("TOPRIGHT", toolRow1, "BOTTOMRIGHT", 0, -ROW_GAP)
+    toolRow2:SetHeight(searchH)
 
     f.profFilter = "All"
-    local profBtn = makeToolbarBtn(toolRow2)
-    local function profBtnUpdate()
-        local pl = (L and L["RECIPE_MATCHER_PROF_SHORT"]) or "Profession"
-        local text = string.format("%s: %s", pl, HexDim(f.profFilter))
-        local plain = string.format("%s: %s", pl, f.profFilter)
-        if ns.UI_IsNativePanelButton and ns.UI_IsNativePanelButton(profBtn) then
-            if ns.UI_SetToolbarButtonText then
-                ns.UI_SetToolbarButtonText(profBtn, plain)
-            end
-        elseif ns.UI_SetToolbarButtonText then
-            ns.UI_SetToolbarButtonText(profBtn, text)
-        else
-            local fs = profBtn:GetFontString()
-            if fs then fs:SetText(text) end
-        end
-    end
-    profBtnUpdate()
-
-    local PROF_ORDER = (ns.Constants and ns.Constants.CRAFT_PROFESSION_FILTERS) or {
-        "All",
-        "Alchemy", "Blacksmithing", "Cooking", "Enchanting", "Engineering",
-        "Inscription", "Jewelcrafting", "Leatherworking", "Tailoring",
-    }
-    profBtn:SetScript("OnClick", function()
-        local idx = 1
-        for i = 1, #PROF_ORDER do if PROF_ORDER[i] == f.profFilter then idx = i; break end end
-        idx = idx % #PROF_ORDER + 1
-        f.profFilter = PROF_ORDER[idx]
-        profBtnUpdate()
-        RecipeMatcherUI:Refresh()
-    end)
-    profBtn:SetScript("OnEnter", function()
-        StyleToolbarBtn(profBtn, true, true)
-    end)
-    profBtn:SetScript("OnLeave", function()
-        StyleToolbarBtn(profBtn, false, true)
-    end)
-
-    local harvestBtn = makeToolbarBtn(toolRow1)
-    if ns.UI_SetToolbarButtonText then
-        ns.UI_SetToolbarButtonText(harvestBtn, (L and L["RECIPE_MATCHER_HARVEST"]) or "Scan")
-    end
-    harvestBtn:SetScript("OnClick", function()
-        local svc = ns.RecipeService
-        if not svc then return end
-        if svc.IsHarvestChunkActive and svc:IsHarvestChunkActive() then
-            return
-        end
-        local function onDone(n)
-            if n == 0 and ns.ArtisanNexus then
-                ns.ArtisanNexus:Print((L and L["RECIPE_MATCHER_NO_PROF_OPEN"])
-                    or "Open a profession window first, then click Scan Now.")
-            end
-            InvalidateListCaches()
+    -- Profession filter: the shared WN dropdown (ns.ArtisanWindow.CreateDropdown).
+    local profDropdown = Win().CreateDropdown(toolRow2, {
+        width = PROF_DROPDOWN_W,
+        height = searchH,
+        items = ProfessionFilterItems,
+        value = function() return f.profFilter end,
+        onSelected = function(key)
+            f.profFilter = key
             RecipeMatcherUI:Refresh()
-        end
-        local started = svc.HarvestOpenProfessionChunked and svc:HarvestOpenProfessionChunked(onDone)
-        if not started then
-            onDone(0)
-        end
-    end)
-    harvestBtn:SetScript("OnEnter", function()
-        StyleToolbarBtn(harvestBtn, true)
-    end)
-    harvestBtn:SetScript("OnLeave", function()
-        StyleToolbarBtn(harvestBtn, false)
-    end)
+        end,
+    })
+    profDropdown:SetPoint("RIGHT", toolRow2, "RIGHT", 0, 0)
+    f.profDropdown = profDropdown
 
-    local function layoutToolbar()
-        local w1 = toolRow1:GetWidth() or (WINDOW_W - PAD * 2)
-        if w1 < 200 then return end
-        if ns.UI_LayoutStretchRow then
-            ns.UI_LayoutStretchRow(toolRow1, { tabFromBag, tabRecipe, harvestBtn }, 6)
-            ns.UI_LayoutStretchRow(toolRow2, { profBtn }, 0)
-        end
-    end
-
-    --- Left: recipe list. Bottom x matches the toolbar chain's left edge
-    --- (PAD + 4) — a mismatched second left anchor skews the pane rect.
-    local left = CreateScrollList(f)
-    local bottomSafePad = BodySafeInset(PAD)
-    left:SetPoint("TOPLEFT", toolRow2, "BOTTOMLEFT", 0, -PAD)
-    left:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", bottomSafePad + 4, bottomSafePad)
-    left:SetWidth(math.floor(WINDOW_W * LEFT_PANE_FRAC))
-
-    local divider
-    if ns.UI_CreatePaneDivider then
-        divider = ns.UI_CreatePaneDivider(f)
-    else
-        divider = CreateFrame("Frame", nil, f)
-        divider:SetWidth(1)
-        local divTex = divider:CreateTexture(nil, "ARTWORK")
-        divTex:SetAllPoints()
-        divTex:SetColorTexture(COLORS.border[1], COLORS.border[2], COLORS.border[3], 0.55)
-        divider._dividerTex = divTex
-        divider.RefreshDividerColor = function() end
-    end
-    divider:SetPoint("TOPLEFT", left, "TOPRIGHT", PANE_GAP, 0)
-    divider:SetPoint("BOTTOMLEFT", left, "BOTTOMRIGHT", PANE_GAP, 0)
-    f.paneDivider = divider
-
-    --- Right: sticky title + scroll
-    local rightOuter = CreateFrame("Frame", nil, f, "BackdropTemplate")
-    rightOuter:SetPoint("TOPLEFT", divider, "TOPRIGHT", PANE_GAP, 0)
-    --- Mirror the toolbar right edge (PAD + 4) so both panes sit symmetric
-    --- under the rows above.
-    rightOuter:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -(bottomSafePad + 4), bottomSafePad)
-    rightOuter:SetClipsChildren(true)
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(rightOuter, COLORS.bgCard, COLORS.border)
-    end
-    f.rightOuter = rightOuter
-
-    local rightTitleBar = CreateFrame("Frame", nil, rightOuter, "BackdropTemplate")
-    rightTitleBar:SetHeight(TITLEBAR_H)
-    rightTitleBar:SetPoint("TOPLEFT", LIST_EDGE_PAD, -LIST_EDGE_PAD)
-    rightTitleBar:SetPoint("TOPRIGHT", -LIST_EDGE_PAD, -LIST_EDGE_PAD)
-    if ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(rightTitleBar, COLORS.bgLight, COLORS.border)
-    elseif ApplyVisuals then
-        ApplyVisuals(rightTitleBar, COLORS.bgCard, { COLORS.border[1], COLORS.border[2], COLORS.border[3], 0.45 })
-    end
-
-    local rightDetailTitle = rightTitleBar:CreateFontString(nil, "OVERLAY", Font("WINDOW_SECTION"))
-    rightDetailTitle:SetPoint("TOPLEFT", rightTitleBar, "TOPLEFT", 12, -8)
-    rightDetailTitle:SetPoint("RIGHT", rightTitleBar, "RIGHT", -12, 0)
-    rightDetailTitle:SetJustifyH("LEFT")
-    rightDetailTitle:SetWordWrap(false)
-    rightDetailTitle:SetMaxLines(1)
-
-    local rightDetailSub = rightTitleBar:CreateFontString(nil, "OVERLAY", Font("WINDOW_META"))
-    rightDetailSub:SetPoint("TOPLEFT", rightDetailTitle, "BOTTOMLEFT", 0, -1)
-    rightDetailSub:SetPoint("RIGHT", rightTitleBar, "RIGHT", -10, 0)
-    rightDetailSub:SetJustifyH("LEFT")
-    rightDetailSub:SetMaxLines(1)
-    rightDetailSub:SetWordWrap(false)
-
-    --- Shopping list actions (service layer only; no secure macro).
-    local shopBar = CreateFrame("Frame", nil, rightOuter)
-    shopBar:SetHeight(TOOLBAR_H)
-    shopBar:SetPoint("TOPLEFT", rightTitleBar, "BOTTOMLEFT", LIST_EDGE_PAD, -6)
-    shopBar:SetPoint("TOPRIGHT", rightTitleBar, "BOTTOMRIGHT", -LIST_EDGE_PAD, -6)
-    if ns.UI_CreateHorizontalRule then
-        shopBar._rule = ns.UI_CreateHorizontalRule(shopBar)
-        shopBar._rule:SetPoint("BOTTOMLEFT", shopBar, "BOTTOMLEFT", 0, 0)
-        shopBar._rule:SetPoint("BOTTOMRIGHT", shopBar, "BOTTOMRIGHT", 0, 0)
-    end
-
-    local function makeShopBtn()
-        return makeToolbarBtn(shopBar)
-    end
-
-    local btnShopSelected = makeShopBtn()
-    local btnShopFiltered = makeShopBtn()
-
-    --- Modern skin has no template disabled art: without this, a dead
-    --- "Add selected" looks fully clickable (Classic grays out natively).
-    for _, sb in ipairs({ btnShopSelected, btnShopFiltered }) do
-        sb:SetScript("OnDisable", function(self) self:SetAlpha(0.45) end)
-        sb:SetScript("OnEnable", function(self) self:SetAlpha(1) end)
-    end
-
-    local function layoutShopBar()
-        if ns.UI_LayoutStretchRow then
-            ns.UI_LayoutStretchRow(shopBar, { btnShopSelected, btnShopFiltered }, 6)
-        end
-    end
-    shopBar:SetScript("OnSizeChanged", layoutShopBar)
-
-    local function shopBarTip(btn, title, body)
-        btn:SetScript("OnEnter", function(self)
-            StyleToolbarBtn(self, true)
-            GameTooltip:SetOwner(self, "ANCHOR_TOP")
-            GameTooltip:AddLine(title, 1, 1, 1)
-            if body and body ~= "" then
-                GameTooltip:AddLine(body, 0.75, 0.75, 0.8, true)
+    f.searchText = ""
+    local search, clearSearch = ns.UI_CreateSearchBox(toolRow2, WINDOW_W, T("RECIPE_MATCHER_SEARCH", "Search recipes..."),
+        function(text)
+            f.searchText = text or ""
+            RecipeMatcherUI:Refresh({ leftOnly = true })
+        end)
+    search:ClearAllPoints()
+    search:SetPoint("LEFT", toolRow2, "LEFT", 0, 0)
+    search:SetPoint("RIGHT", profDropdown, "LEFT", -ROW_GAP, 0)
+    f.searchBox = search
+    f.clearSearch = clearSearch
+    do
+        local kids = { search:GetChildren() }
+        for i = 1, #kids do
+            if kids[i].GetObjectType and kids[i]:GetObjectType() == "EditBox" then
+                f.searchEditBox = kids[i]
+                break
             end
-            GameTooltip:Show()
-        end)
-        btn:SetScript("OnLeave", function(self)
-            StyleToolbarBtn(self, false)
-            GameTooltip:Hide()
-        end)
-    end
-
-    local shopSelLabel = (L and L["RECIPE_MATCHER_SHOP_ADD_SELECTED"]) or "Add selected"
-    local shopFilLabel = (L and L["RECIPE_MATCHER_SHOP_ADD_FILTERED"]) or "Add all filtered"
-    if ns.UI_SetToolbarButtonText then
-        ns.UI_SetToolbarButtonText(btnShopSelected, shopSelLabel)
-        ns.UI_SetToolbarButtonText(btnShopFiltered, shopFilLabel)
-    end
-    StyleToolbarBtn(btnShopSelected, false)
-    StyleToolbarBtn(btnShopFiltered, false)
-
-    shopBarTip(btnShopSelected, shopSelLabel,
-        (L and L["RECIPE_MATCHER_SHOP_TT_SELECTED"]) or "Adds the highlighted recipe on the left (count +1).")
-    shopBarTip(btnShopFiltered, shopFilLabel,
-        (L and L["RECIPE_MATCHER_SHOP_TT_FILTERED"]) or "Adds every recipe in the current list (profession filter; both tabs).")
-
-    btnShopSelected:SetScript("OnClick", function()
-        local sid = RecipeMatcherUI.selectedSpellID
-        if not sid or not ns.ShoppingListService then return end
-        ns.ShoppingListService:Add(sid, 1)
-        if ns.ArtisanNexus and ns.ArtisanNexus.Print then
-            local nm = (ns.RecipeService and ns.RecipeService.GetRecipeName and ns.RecipeService:GetRecipeName(sid)) or ("#" .. tostring(sid))
-            if not nm or (issecretvalue and issecretvalue(nm)) then nm = "#" .. tostring(sid) end
-            ns.ArtisanNexus:Print(string.format((L and L["RECIPE_MATCHER_SHOP_ONE_FMT"]) or "|cffd4af37+1 shopping:|r %s", nm))
         end
-    end)
-    btnShopFiltered:SetScript("OnClick", function()
-        if not ns.ShoppingListService or not ns.ShoppingListService.AddMany then return end
-        local ids = RecipeMatcherUI:CollectFilteredSpellIDs()
-        if #ids == 0 then
-            if ns.ArtisanNexus and ns.ArtisanNexus.Print then
-                ns.ArtisanNexus:Print((L and L["RECIPE_MATCHER_SHOP_NONE"]) or "Nothing to add for the current filter.")
-            end
-            return
-        end
-        local n = ns.ShoppingListService:AddMany(ids, 1)
-        if ns.ArtisanNexus and ns.ArtisanNexus.Print and n > 0 then
-            ns.ArtisanNexus:Print(string.format((L and L["RECIPE_MATCHER_SHOP_BATCH_FMT"]) or "|cffd4af37Shopping list:|r merged %d recipe(s).", n))
-        end
-    end)
-
-    local right = CreateScrollList(rightOuter)
-    right:SetPoint("TOPLEFT", shopBar, "BOTTOMLEFT", 0, -6)
-    right:SetPoint("BOTTOMRIGHT", rightOuter, "BOTTOMRIGHT", -LIST_EDGE_PAD, LIST_EDGE_PAD)
-
-    --- Tab state
-    f.mode = "bag"
-    local function refreshModeTabs()
-        local bagSel = f.mode == "bag"
-        StyleModeTab(tabFromBag, bagSel)
-        StyleModeTab(tabRecipe, not bagSel)
     end
-    RecipeMatcherUI.refreshModeTabs = refreshModeTabs
 
-    local function setMode(m)
-        if f.mode == m then return end
-        f.mode = m
-        RecipeMatcherUI.selectedSpellID = nil
-        refreshModeTabs()
-        RecipeMatcherUI:Refresh()
-    end
-    tabFromBag:SetScript("OnClick", function() setMode("bag") end)
-    tabRecipe:SetScript("OnClick", function() setMode("recipe") end)
-    refreshModeTabs()
-    StyleToolbarBtn(profBtn, false, true)
-    StyleToolbarBtn(harvestBtn, false)
+    -- ── Footer status line (main-window footer: top rule + small Dim text) ──
+    local footer = Factory():CreateContainer(ca, 400, FooterHeight(), false)
+    footer:SetHeight(FooterHeight())
+    footer:SetPoint("BOTTOMLEFT", ca, "BOTTOMLEFT", 0, 0)
+    footer:SetPoint("BOTTOMRIGHT", ca, "BOTTOMRIGHT", -GRIP_RESERVE, 0)
+    footer:EnableMouse(false)
+    local footerTop = footer:CreateTexture(nil, "ARTWORK")
+    footerTop:SetHeight((ns.GetPixelScale and ns.GetPixelScale(footer)) or 1)
+    if ns.UI_SnapRuleTexture then ns.UI_SnapRuleTexture(footerTop) end
+    footerTop:SetPoint("TOPLEFT", footer, "TOPLEFT", 0, 0)
+    footerTop:SetPoint("TOPRIGHT", footer, "TOPRIGHT", 0, 0)
+    f.footerTop = footerTop
+    local status = FontManager:CreateFontString(footer, "small", "OVERLAY")
+    status:SetPoint("LEFT", footer, "LEFT", 8, 0)
+    status:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
+    status:SetJustifyH("LEFT")
+    status:SetWordWrap(false)
+    status:SetMaxLines(1)
+    ns.UI_SetTextColorRole(status, "Dim", 0.92)
+    f.status = status
+    f.footer = footer
 
-    toolRow1:SetScript("OnSizeChanged", layoutToolbar)
-    toolRow2:SetScript("OnSizeChanged", layoutToolbar)
-    f:HookScript("OnShow", function()
-        layoutToolbar()
-        layoutShopBar()
-        if left.syncWidth then left.syncWidth() end
-        if right.syncWidth then right.syncWidth() end
-        RecipeMatcherUI:Refresh()
-    end)
-    if C_Timer and C_Timer.After then
-        C_Timer.After(0, function()
-            layoutToolbar()
-            layoutShopBar()
-        end)
-    end
+    -- ── Panes: list viewport (left) + detail viewport (right) ──
+    local leftVp = W.CreateScrollViewport(f, ca)
+    leftVp.shell:SetPoint("TOPLEFT", toolRow2, "BOTTOMLEFT", 0, -ROW_GAP)
+    leftVp.shell:SetPoint("BOTTOMLEFT", ca, "BOTTOMLEFT", 0, FooterHeight() + ROW_GAP)
+    leftVp.shell:SetWidth(math.floor((WINDOW_W - 2 * (W.PADDING or 10)) * LEFT_PANE_FRAC))
+
+    local rightVp = W.CreateScrollViewport(f, ca)
+    rightVp.shell:SetPoint("TOPLEFT", leftVp.shell, "TOPRIGHT", PaneGap(), 0)
+    rightVp.shell:SetPoint("BOTTOMRIGHT", ca, "BOTTOMRIGHT", 0, FooterHeight() + ROW_GAP)
 
     self.main = f
-    self.left = left
-    self.right = right
-    self.rightTitleBar = rightTitleBar
-    self.rightDetailTitle = rightDetailTitle
-    self.rightDetailSub = rightDetailSub
-    self.toolbarTabBar = toolRow1
-    self.toolRow2 = toolRow2
-    self.tabFromBag = tabFromBag
-    self.tabRecipe = tabRecipe
-    self.profBtn = profBtn
-    self.harvestBtn = harvestBtn
-    self.layoutToolbar = layoutToolbar
-    self.layoutShopBar = layoutShopBar
-    self.shopBar = shopBar
+    self.left = {
+        vp = leftVp,
+        pool = TK.CreateRowPool(RowHeight()),
+        headers = {},
+        widths = {},
+        offsets = {},
+        paintWidth = 1,
+    }
+    self.right = { vp = rightVp }
     self.btnShopSelected = btnShopSelected
     self.btnShopFiltered = btnShopFiltered
+    self.btnScan = btnScan
     self.selectedSpellID = nil
+
+    f:HookScript("OnShow", function()
+        RelayoutPanes()
+        RecipeMatcherUI:Refresh()
+    end)
+    f:HookScript("OnHide", function()
+        Win().CloseOpenDropdown()
+    end)
+
+    self:ApplyThemeColors()
 
     if not RecipeMatcherUI._eventOwner then
         RecipeMatcherUI._eventOwner = ns.NewEventOwner("RecipeMatcherUI")
     end
     local owner = RecipeMatcherUI._eventOwner
+    --- Schematics + snapshot messages arrive in bursts while the trade skill
+    --- frame loads; RequestFullRefresh collapses them into one Refresh.
     owner:RegisterMessage(E.RECIPE_SCHEMATICS_UPDATED, function()
         InvalidateListCaches()
         local main = RecipeMatcherUI.main
-        if main and main:IsShown() then RecipeMatcherUI:Refresh() end
+        if main and main:IsShown() then RequestFullRefresh() end
     end)
     if E.PROFESSION_SNAPSHOT_UPDATED then
         owner:RegisterMessage(E.PROFESSION_SNAPSHOT_UPDATED, function()
             local main = RecipeMatcherUI.main
-            if main and main:IsShown() then RecipeMatcherUI:Refresh() end
+            if main and main:IsShown() then RequestFullRefresh() end
         end)
     end
     if E.THEME_CHANGED then
         owner:RegisterMessage(E.THEME_CHANGED, function()
             RecipeMatcherUI:RefreshTheme()
+        end)
+    end
+    if E.FONT_CHANGED then
+        owner:RegisterMessage(E.FONT_CHANGED, function()
+            local main = RecipeMatcherUI.main
+            if main and main:IsShown() then
+                InvalidateRightPaint()
+                RecipeMatcherUI:Refresh()
+            end
         end)
     end
     if not RecipeMatcherUI._bagBucket and ns.ArtisanNexus and ns.ArtisanNexus.RegisterBucketEvent then
@@ -904,89 +767,51 @@ function RecipeMatcherUI:Init()
             RequestFullRefresh()
         end)
     end
-
-    self:LayoutClassicShellChrome()
 end
 
-function RecipeMatcherUI:LayoutClassicShellChrome()
+--- Mode tab switch ("bag" | "recipe").
+function RecipeMatcherUI:SetMode(mode)
     local f = self.main
-    if not f then
-        return
-    end
-    if ns.UI_RefreshClassicMainWindowShell then
-        ns.UI_RefreshClassicMainWindowShell(f)
-    elseif f.headerBar and ns.UI_RefreshWindowHeader then
-        ns.UI_RefreshWindowHeader(f.headerBar)
-    end
-    if f.status and ns.UI_AnchorClassicShellBodyRow then
-        ns.UI_AnchorClassicShellBodyRow(f.status, f, f.headerBar, PAD + 4, 4)
-    end
+    if not f or (mode ~= "bag" and mode ~= "recipe") then return end
+    if f.modeBar then f.modeBar:SetActiveTab(mode) end
+    if f.mode == mode then return end
+    f.mode = mode
+    self.selectedSpellID = nil
+    self:Refresh()
 end
 
-function RecipeMatcherUI:ResetForUiMode()
-    if self.main then
-        self.main:Hide()
-        --- Discarded chrome must leave BORDER_REGISTRY (infra MUST).
-        if ns.UI_UnregisterVisuals then
-            ns.UI_UnregisterVisuals(self.main)
-        end
-        self.main = nil
+--- Theme-dependent inks owned by this file (footer rule, dropdown chrome).
+function RecipeMatcherUI:ApplyThemeColors()
+    local f = self.main
+    if not f then return end
+    if f.footerTop then
+        local C = COLORS()
+        local div = (ns.UI_GetFooterDividerColor and ns.UI_GetFooterDividerColor())
+            or { C.accent[1], C.accent[2], C.accent[3], 0.28 }
+        f.footerTop:SetColorTexture(div[1], div[2], div[3], div[4] or 0.28)
+    end
+    if f.status then
+        ns.UI_SetTextColorRole(f.status, "Dim", 0.92)
+    end
+    if f.profDropdown then
+        f.profDropdown:Restyle()
+    end
+    if f.searchBox and ns.UI_ApplySearchBoxChrome then
+        ns.UI_ApplySearchBoxChrome(f.searchBox, { editBoxHost = true })
+    end
+    if f.modeBar then
+        f.modeBar:SetActiveTab(f.mode)
     end
 end
 
 function RecipeMatcherUI:RefreshTheme()
     if not self.main then return end
-    --- Painted strings carry palette-resolved hex — force both panes to
-    --- repaint with the new theme's colors.
-    rightPaintCache.spellID = nil
-    rightPaintCache.bagGen = -1
-    if ns.UI_ApplyMainWindowChrome then
-        ns.UI_ApplyMainWindowChrome(self.main)
-    end
-    if ns.UI_RefreshWindowHeader then
-        ns.UI_RefreshWindowHeader(self.main.headerBar)
-    end
-    self:LayoutClassicShellChrome()
-    if self.main.title then
-        if ns.UI_IsClassicUi and ns.UI_IsClassicUi() then
-            self.main.title:SetTextColor(1, 0.82, 0)
-        else
-            local c = Colors()
-            self.main.title:SetTextColor(c.textBright[1], c.textBright[2], c.textBright[3])
-        end
-    end
-    if self.refreshModeTabs then
-        self.refreshModeTabs()
-    end
-    if self.profBtn then
-        StyleToolbarBtn(self.profBtn, false, true)
-    end
-    if self.harvestBtn then
-        StyleToolbarBtn(self.harvestBtn, false)
-    end
-    if self.main.paneDivider and self.main.paneDivider.RefreshDividerColor then
-        self.main.paneDivider:RefreshDividerColor()
-    end
-    if self.main.rightOuter and ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(self.main.rightOuter, Colors().bgCard, Colors().border)
-    end
-    if self.rightTitleBar and ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(self.rightTitleBar, Colors().bgLight, Colors().border)
-    end
-    if self.left and self.left.viewport and ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(self.left.viewport, Colors().bgLight, Colors().border)
-    end
-    if self.right and self.right.viewport and ns.UI_StylePanelInset then
-        ns.UI_StylePanelInset(self.right.viewport, Colors().bgLight, Colors().border)
-    end
-    if self.shopBar and self.shopBar._rule and self.shopBar._rule.RefreshRuleColor then
-        self.shopBar._rule:RefreshRuleColor()
-    end
-    if self.left and self.left.scroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.left.scroll)
-    end
-    if self.right and self.right.scroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.right.scroll)
+    Win().RefreshChrome(self.main)
+    self:ApplyThemeColors()
+    --- Painted strings carry palette-resolved hex: force both panes to repaint with the new theme.
+    InvalidateRightPaint()
+    if self.left then
+        DiscardListHeaders(self.left)
     end
     if self.main:IsShown() then
         self:Refresh()
@@ -1003,31 +828,26 @@ UpdateStatus = function(self)
     local stats = svc:GetStats()
     local statusFs = self.main.status
     if stats.total > 0 and stats.harvested < 1 then
-        statusFs:SetText((L and L["RECIPE_MATCHER_HARVEST_ONBOARDING"])
-            or "Open any Midnight profession window once, then click Scan to cache recipes.")
-        local warn = Colors().textMuted or { 0.85, 0.75, 0.45 }
-        statusFs:SetTextColor(warn[1], warn[2], warn[3])
+        statusFs:SetText(Wrap(GoldHex(), T("RECIPE_MATCHER_HARVEST_ONBOARDING",
+            "Open a profession window, then click Scan.")))
         return
     end
-    local pct = (stats.total > 0) and math.floor((stats.harvested / stats.total) * 100) or 100
+    local text
     if stats.total > 0 and stats.harvested < stats.total then
-        statusFs:SetText(string.format(
-            (L and L["RECIPE_MATCHER_STATUS_PARTIAL"]) or "%d / %d recipes cached (%d%%) - open professions to learn more.",
-            stats.harvested, stats.total, pct))
+        text = string.format(
+            T("RECIPE_MATCHER_STATUS_PARTIAL", "%d / %d recipes cached (%d%%)"),
+            stats.harvested, stats.total, math.floor((stats.harvested / stats.total) * 100))
     else
-        statusFs:SetText(string.format(
-            (L and L["RECIPE_MATCHER_STATUS_LINE"]) or "%d / %d recipes cached - open a profession to learn more.",
-            stats.harvested, stats.total))
+        text = string.format(T("RECIPE_MATCHER_STATUS_LINE", "%d recipes cached"), stats.harvested)
     end
-    local dim = Colors().textDim or { 0.58, 0.54, 0.64 }
-    statusFs:SetTextColor(dim[1], dim[2], dim[3])
     local snapSvc = ns.ProfessionSnapshotService
     if snapSvc and snapSvc.GetChipText then
         local chip = snapSvc:GetChipText()
         if chip and chip ~= "" then
-            statusFs:SetText(statusFs:GetText() .. "  |  " .. chip)
+            text = text .. "  |  " .. chip
         end
     end
+    statusFs:SetText(text)
 end
 
 local function GroupByProfession(entries)
@@ -1051,33 +871,6 @@ RecipeMatcherUI.collapsed = RecipeMatcherUI.collapsed or {}
 
 local function IsCollapsed(prof)
     return RecipeMatcherUI.collapsed[prof] == true
-end
-
-local function ToggleCollapse(prof)
-    RecipeMatcherUI.collapsed[prof] = not RecipeMatcherUI.collapsed[prof]
-end
-
-local function ConfigureSectionHeader(hdr, prof, label, right)
-    ApplySectionHeaderChrome(hdr)
-    local collapsed = IsCollapsed(prof)
-    hdr.caret:SetText(collapsed and ">" or "v")
-    hdr.caret:SetTextColor(COLORS.accent[1], COLORS.accent[2], COLORS.accent[3], 0.9)
-    hdr.label:SetText(label)
-    hdr.label:SetTextColor(COLORS.textBright[1], COLORS.textBright[2], COLORS.textBright[3], 1)
-    hdr.right:SetText(right or "")
-    hdr.right:SetTextColor(COLORS.textDim[1], COLORS.textDim[2], COLORS.textDim[3], 0.95)
-    hdr:SetScript("OnClick", function()
-        ToggleCollapse(prof)
-        RecipeMatcherUI:Refresh({ leftOnly = true })
-    end)
-end
-
-local function OnRecipeRowClick(spellID)
-    if RecipeMatcherUI.selectedSpellID == spellID then
-        return
-    end
-    RecipeMatcherUI.selectedSpellID = spellID
-    RecipeMatcherUI:RefreshSelection()
 end
 
 local function ListCacheKeyPrefix(filter, svc)
@@ -1126,43 +919,25 @@ local function GetBagResultsCached(svc, filter, bagCounts)
     return results
 end
 
-local function PaintBagRow(self, list, entry, rowIndex, y)
-    local row = AcquireRow(list, rowIndex, y)
-    SetRecipeRowIcon(row.icon, entry.spellID, entry.outputItemID, entry.recipeIcon, RequestFullRefresh)
-    local label = entry.name ~= "" and entry.name or ("spell:" .. entry.spellID)
-    local suc = Colors().success or { 0.48, 0.80, 0.58, 1 }
-    if entry.craftable then
-        row.label:SetText(string.format("|cff%02x%02x%02x%s|r",
-            math.floor(suc[1] * 255), math.floor(suc[2] * 255), math.floor(suc[3] * 255), label))
-    else
-        row.label:SetText(label)
-    end
-    row.right:SetText(string.format("%d/%d", entry.matched, entry.total))
-    if entry.craftable then
-        row.right:SetTextColor(suc[1], suc[2], suc[3])
-    else
-        row.right:SetTextColor(COLORS.textDim[1], COLORS.textDim[2], COLORS.textDim[3])
-    end
-    row.tooltipSpellID = entry.spellID
-    local sid = entry.spellID
-    row:SetScript("OnClick", function() OnRecipeRowClick(sid) end)
-    RowSetSelected(row, RecipeMatcherUI.selectedSpellID == sid)
-end
+--- Scratch row data (one table reused per paint; PaintRowCells reads it synchronously).
+local ROW_DATA = {}
 
-local function PaintRecipeRow(self, list, entry, rowIndex, y)
-    local row = AcquireRow(list, rowIndex, y)
-    SetRecipeRowIcon(row.icon, entry.spellID, entry.outputItemID, entry.recipeIcon, RequestFullRefresh)
-    if entry.cached then
-        row.label:SetText(entry.name)
-        row.right:SetText("")
+local function PaintEntryRow(list, entry, mode, rowIndex, y)
+    local data = ROW_DATA
+    data.spellID = entry.spellID
+    data.icon = RecipeIcon(entry.spellID, entry.outputItemID, entry.recipeIcon, RequestFullRefresh)
+    if mode == "bag" then
+        data.label = (entry.name ~= "" and entry.name) or ("spell:" .. entry.spellID)
+        data.count = string.format("%d/%d", entry.matched, entry.total)
+        data.green = entry.craftable and true or false
+        data.dim = false
     else
-        row.label:SetText(HexDim(entry.name))
-        row.right:SetText(HexDim("?"))
+        data.label = entry.name
+        data.count = entry.cached and "" or "?"
+        data.green = false
+        data.dim = not entry.cached
     end
-    row.tooltipSpellID = entry.spellID
-    local sid = entry.spellID
-    row:SetScript("OnClick", function() OnRecipeRowClick(sid) end)
-    RowSetSelected(row, RecipeMatcherUI.selectedSpellID == sid)
+    PaintListRow(list, rowIndex, y, data)
 end
 
 local function BuildLeftPaintQueue(order, groups, mode)
@@ -1180,15 +955,11 @@ local function BuildLeftPaintQueue(order, groups, mode)
         end
         local rightText
         if mode == "bag" then
-            rightText = string.format(
-                (L and L["RECIPE_MATCHER_READY_TOTAL_FMT"]) or "%d ready / %d total",
-                craftableCount, #g)
+            rightText = string.format(T("RECIPE_MATCHER_READY_TOTAL_FMT", "%d ready / %d total"), craftableCount, #g)
         else
-            rightText = string.format(
-                (L and L["RECIPE_MATCHER_CACHED_FMT"]) or "%d / %d cached",
-                cachedCount, #g)
+            rightText = string.format(T("RECIPE_MATCHER_CACHED_FMT", "%d / %d cached"), cachedCount, #g)
         end
-        queue[#queue + 1] = { kind = "header", prof = prof, label = prof, right = rightText }
+        queue[#queue + 1] = { kind = "header", prof = prof, label = ProfessionLabel(prof), right = rightText }
         if not IsCollapsed(prof) then
             for ei = 1, #g do
                 queue[#queue + 1] = { kind = "row", entry = g[ei], mode = mode }
@@ -1199,27 +970,31 @@ local function BuildLeftPaintQueue(order, groups, mode)
     return queue
 end
 
+local function MakeHeaderToggle(prof)
+    return function(expanded)
+        RecipeMatcherUI.collapsed[prof] = not expanded
+        RecipeMatcherUI:Refresh({ leftOnly = true })
+    end
+end
+
 local function PaintLeftQueue(self, queue, gen, qi, y, rowIndex, sectionIndex)
     if gen ~= leftDrawGen then
         return
     end
     local list = self.left
     local limit = math.min(qi + LEFT_DRAW_CHUNK - 1, #queue)
+    local rowH = RowHeight()
     for i = qi, limit do
         local item = queue[i]
         if item.kind == "header" then
             sectionIndex = sectionIndex + 1
-            local hdr = AcquireSectionHeader(list, sectionIndex, y)
-            ConfigureSectionHeader(hdr, item.prof, item.label, item.right)
-            y = y - SECTION_H - 2
+            local text = item.label .. "  " .. Wrap(RoleHex("Dim"), item.right)
+            AcquireSectionHeader(list, sectionIndex, y, text, not IsCollapsed(item.prof), MakeHeaderToggle(item.prof))
+            y = y - SectionHeaderHeight() - HEADER_GAP
         elseif item.kind == "row" then
             rowIndex = rowIndex + 1
-            if item.mode == "bag" then
-                PaintBagRow(self, list, item.entry, rowIndex, y)
-            else
-                PaintRecipeRow(self, list, item.entry, rowIndex, y)
-            end
-            y = y - ROW_H
+            PaintEntryRow(list, item.entry, item.mode, rowIndex, y)
+            y = y - rowH
         elseif item.kind == "gap" then
             y = y - SECTION_GAP
         end
@@ -1234,24 +1009,37 @@ local function PaintLeftQueue(self, queue, gen, qi, y, rowIndex, sectionIndex)
         end
         return
     end
-    list.content:SetHeight(-y + 8)
-    --- Chunked paint finishes async: bar visibility/thumb were computed against
-    --- the PREVIOUS content height in RefreshLeft_*; re-run on the final chunk
-    --- (modern scroll has no OnScrollRangeChanged hook — classic does).
-    if ns.UI_FinishScrollLayout and list.scroll then
-        ns.UI_FinishScrollLayout(list.scroll)
-    end
+    list.vp.scrollChild:SetHeight(math.max(1, -y))
+    --- Chunked paint finishes async: bar visibility / thumb follow the final content height.
+    Win().SyncScroll(list.vp)
 end
 
 local function StartLeftPaint(self, queue)
     local gen = BumpLeftDraw()
     local list = self.left
-    ReleaseRows(list)
-    ReleaseSectionHeaders(list)
-    PaintLeftQueue(self, queue, gen, 1, -4, 0, 0)
+    ReleaseList(list)
+    list.paintWidth = ListContentWidth(list)
+    ns.UI_TableKit.ResolveWidths(LIST_COLS, list.paintWidth, list.widths, list.offsets)
+    PaintLeftQueue(self, queue, gen, 1, 0, 0, 0)
 end
 
---- Spell IDs for the current mode + profession filter (deduped), for shopping list batch add.
+--- Entries whose name contains the search text (lowercased by the search box); all when empty.
+local function ApplySearch(entries, query)
+    if not query or query == "" then
+        return entries
+    end
+    local out = {}
+    for i = 1, #entries do
+        local e = entries[i]
+        local name = e.name
+        if type(name) == "string" and name:lower():find(query, 1, true) then
+            out[#out + 1] = e
+        end
+    end
+    return out
+end
+
+--- Spell IDs for the current mode + profession filter + search (deduped), for shopping list batch add.
 function RecipeMatcherUI:CollectFilteredSpellIDs()
     local svc = ns.RecipeService
     if not svc or not self.main then return {} end
@@ -1261,7 +1049,7 @@ function RecipeMatcherUI:CollectFilteredSpellIDs()
     local seen = {}
     if self.main.mode == "bag" then
         local bagCounts = self._bagCounts or svc:GetBagCounts()
-        local results = GetBagResultsCached(svc, filter, bagCounts)
+        local results = ApplySearch(GetBagResultsCached(svc, filter, bagCounts), self.main.searchText)
         for i = 1, #results do
             local sid = results[i].spellID
             if sid and not seen[sid] then
@@ -1270,10 +1058,14 @@ function RecipeMatcherUI:CollectFilteredSpellIDs()
             end
         end
     else
-        local entries = GetRecipeEntriesCached(svc, filter)
+        local entries = ApplySearch(GetRecipeEntriesCached(svc, filter), self.main.searchText)
         for i = 1, #entries do
             local sid = entries[i].spellID
-            if sid and not seen[sid] then
+            -- Only recipes with harvested reagents that a tracked character knows; the full
+            -- catalog (1000+ rows incl. unlearned / never-opened) is not a shopping list.
+            local sch = sid and svc:GetSchematic(sid)
+            local usable = sch and type(sch.reagents) == "table" and #sch.reagents > 0 and sch.learned ~= false
+            if usable and not seen[sid] then
                 seen[sid] = true
                 out[#out + 1] = sid
             end
@@ -1285,29 +1077,20 @@ end
 RefreshLeft_Bag = function(self)
     local svc = ns.RecipeService
     if not svc then return end
-    local list = self.left
-
     local filter = self.main.profFilter
     if filter == "All" then filter = nil end
     local bagCounts = self._bagCounts or svc:GetBagCounts()
     local results = GetBagResultsCached(svc, filter, bagCounts)
+    local searching = self.main.searchText ~= ""
+    results = ApplySearch(results, self.main.searchText)
 
     if #results == 0 then
-        BumpLeftDraw()
-        ReleaseRows(list)
-        ReleaseSectionHeaders(list)
-        local row = AcquireRow(list, 1, -4)
-        row.icon:SetTexture("Interface\\Icons\\INV_Misc_Note_01")
-        local stats = svc:GetStats()
-        if stats.harvested < 1 then
-            row.label:SetText(HexDim((L and L["RECIPE_MATCHER_HARVEST_ONBOARDING"])
-                or "Open any Midnight profession window once, then click Scan to cache recipes."))
+        --- No-scan onboarding lives in the status line; this only says why the list is empty.
+        if searching then
+            ShowListEmpty(self.left, T("RECIPE_MATCHER_EMPTY_RECIPE", "No recipes match the current filter."))
         else
-            row.label:SetText(HexDim((L and L["RECIPE_MATCHER_EMPTY_BAG"])
-                or "No bag reagents match any harvested Midnight recipe yet."))
+            ShowListEmpty(self.left, T("RECIPE_MATCHER_EMPTY_BAG", "No bag reagents match a known recipe."))
         end
-        row.right:SetText("")
-        list.content:SetHeight(ROW_H + 8)
         return
     end
 
@@ -1318,27 +1101,12 @@ end
 RefreshLeft_Recipe = function(self)
     local svc = ns.RecipeService
     if not svc then return end
-
     local filter = self.main.profFilter
     if filter == "All" then filter = nil end
-    local entries = GetRecipeEntriesCached(svc, filter)
+    local entries = ApplySearch(GetRecipeEntriesCached(svc, filter), self.main.searchText)
 
     if #entries == 0 then
-        --- Mirror the bag-mode empty state: a fully blank pane with no message
-        --- reads as broken when the catalog is empty/unavailable.
-        BumpLeftDraw()
-        local list = self.left
-        ReleaseRows(list)
-        ReleaseSectionHeaders(list)
-        local row = AcquireRow(list, 1, -4)
-        row.icon:SetTexture("Interface\\Icons\\INV_Misc_Note_01")
-        row.label:SetText(HexDim((L and L["RECIPE_MATCHER_EMPTY_RECIPE"])
-            or "No recipes for this filter yet - open a Midnight profession, then Scan."))
-        row.right:SetText("")
-        list.content:SetHeight(ROW_H + 8)
-        if ns.UI_FinishScrollLayout and list.scroll then
-            ns.UI_FinishScrollLayout(list.scroll)
-        end
+        ShowListEmpty(self.left, T("RECIPE_MATCHER_EMPTY_RECIPE", "No recipes match the current filter."))
         return
     end
 
@@ -1346,192 +1114,261 @@ RefreshLeft_Recipe = function(self)
     for _, g in pairs(groups) do
         table.sort(g, function(a, b) return (a.name or "") < (b.name or "") end)
     end
-
     StartLeftPaint(self, BuildLeftPaintQueue(order, groups, "recipe"))
+end
+
+--==========================================================================
+-- Detail pane (RecipeCompanionWindow RenderContent + ProfessionInfoWindow AddSectionHeader / AddLine)
+--==========================================================================
+
+--- ProfessionInfoWindow.lua:648-660: recycle the previous render.
+local function ClearDetail(child)
+    local bin = ns.UI_RecycleBin
+    local regions = { child:GetRegions() }
+    for i = 1, #regions do
+        local region = regions[i]
+        region:Hide()
+        if bin then region:SetParent(bin) end
+    end
+    local children = { child:GetChildren() }
+    for i = 1, #children do
+        local c = children[i]
+        c:Hide()
+        c:ClearAllPoints()
+        if bin then c:SetParent(bin) end
+    end
+end
+
+--- ProfessionInfoWindow.lua:226 AddSectionHeader (accent title + hairline).
+local function AddSectionHeader(child, yOffset, text)
+    yOffset = yOffset + DETAIL_SECTION_GAP
+    local header = FontManager:CreateFontString(child, "body", "OVERLAY")
+    header:SetPoint("TOPLEFT", DETAIL_PAD, -yOffset)
+    header:SetPoint("RIGHT", child, "RIGHT", -DETAIL_PAD, 0)
+    header:SetJustifyH("LEFT")
+    header:SetText(Wrap(AccentHex(), text))
+    yOffset = yOffset + DETAIL_LINE_H + 2
+
+    local C = COLORS()
+    local line = child:CreateTexture(nil, "ARTWORK")
+    line:SetPoint("TOPLEFT", DETAIL_PAD, -yOffset)
+    line:SetPoint("RIGHT", child, "RIGHT", -DETAIL_PAD, 0)
+    if ns.UI_SetRuleThickness then ns.UI_SetRuleThickness(line, "horizontal", 1) else line:SetHeight(1) end
+    line:SetColorTexture(C.border[1], C.border[2], C.border[3], 0.35)
+    return yOffset + 4
+end
+
+--- ProfessionInfoWindow.lua:262 AddFullWidthLine (wrapping body text).
+local function AddTextLine(child, yOffset, text)
+    local fs = FontManager:CreateFontString(child, "body", "OVERLAY")
+    fs:SetPoint("TOPLEFT", DETAIL_PAD, -yOffset)
+    fs:SetPoint("RIGHT", child, "RIGHT", -DETAIL_PAD, 0)
+    fs:SetJustifyH("LEFT")
+    fs:SetWordWrap(true)
+    fs:SetText(text)
+    local h = fs:GetStringHeight() or 0
+    return yOffset + math.max(DETAIL_LINE_H, h + 4)
+end
+
+local function DetailRowOnEnter(self)
+    if self._anItemID then
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetItemByID(self._anItemID)
+        GameTooltip:Show()
+    end
+end
+
+local function DetailRowOnMouseUp(self)
+    local itemID = self._anItemID
+    if not itemID then return end
+    local _, link = C_Item.GetItemInfo(itemID)
+    if link then
+        HandleModifiedItemClick(link)
+    end
+end
+
+--- RecipeCompanionWindow.lua data row: Factory:CreateDataRow + icon + name (left) + value (right).
+local function AddDataRow(child, yOffset, rowIndex, icon, label, value, itemID)
+    local F = Factory()
+    local row
+    row, yOffset = F:CreateDataRow(child, yOffset, rowIndex, DETAIL_ROW_H)
+    local tex = row:CreateTexture(nil, "ARTWORK")
+    ns.UI_TableKit.ApplyIcon(tex, icon, 18)
+    tex:SetPoint("LEFT", DETAIL_PAD, 0)
+
+    local right = FontManager:CreateFontString(row, "body", "OVERLAY")
+    right:SetPoint("RIGHT", row, "RIGHT", -DETAIL_PAD, 0)
+    right:SetJustifyH("RIGHT")
+    right:SetWordWrap(false)
+    right:SetText(value or "")
+
+    local nameText = FontManager:CreateFontString(row, "body", "OVERLAY")
+    nameText:SetPoint("LEFT", tex, "RIGHT", 6, 0)
+    nameText:SetPoint("RIGHT", right, "LEFT", -8, 0)
+    nameText:SetJustifyH("LEFT")
+    nameText:SetWordWrap(false)
+    nameText:SetText(label or "")
+    ns.UI_SetTextColorRole(nameText, "Bright")
+
+    if itemID then
+        row._anItemID = itemID
+        row:EnableMouse(true)
+        row:SetScript("OnEnter", DetailRowOnEnter)
+        row:SetScript("OnLeave", ListRowOnLeave)
+        row:SetScript("OnMouseUp", DetailRowOnMouseUp)
+    end
+    return yOffset
 end
 
 RefreshRight = function(self)
     local svc = ns.RecipeService
     if not svc then return end
-    local list = self.right
-    local detailTitle = self.rightDetailTitle
-    local detailSub = self.rightDetailSub
+    local vp = self.right.vp
+    local child = vp.scrollChild
 
     local sid = self.selectedSpellID
     local bagGen = svc.GetBagCacheGeneration and svc:GetBagCacheGeneration() or 0
-    if sid and rightPaintCache.spellID == sid and rightPaintCache.bagGen == bagGen
-        and list and list.rows and #list.rows > 0 then
+    if rightPaintCache.spellID == sid and rightPaintCache.bagGen == bagGen and child._anPainted then
         return
     end
-
-    ReleaseRows(list)
+    Win().SyncScrollChildWidth(vp)
+    ClearDetail(child)
+    child._anPainted = true
+    rightPaintCache.spellID = sid
+    rightPaintCache.bagGen = bagGen
 
     if not sid then
-        rightPaintCache.spellID = nil
-        rightPaintCache.bagGen = bagGen
-        if detailTitle then
-            detailTitle:SetText((L and L["RECIPE_MATCHER_SELECT_HINT"]) or "Select a recipe")
-        end
-        if detailSub then
-            detailSub:SetText("")
-            detailSub:Hide()
-        end
-        if self.rightTitleBar then
-            self.rightTitleBar:SetHeight(36)
-        end
-        --- In-viewport empty state: title-bar text alone leaves a large blank
-        --- pane that reads as broken (and tints as a void under /an debug).
-        local hintRow = AcquireRow(list, 1)
-        hintRow.icon:SetTexture("Interface\\Icons\\INV_Misc_Note_01")
-        hintRow.label:SetText(HexDim((L and L["RECIPE_MATCHER_EMPTY_DETAIL_HINT"])
-            or "Select a recipe on the left to see reagents, cost and value."))
-        hintRow.right:SetText("")
-        hintRow.tooltipItemID = nil
-        hintRow:SetScript("OnClick", nil)
-        list.content:SetHeight(ROW_H + 8)
+        --- One hint for the empty detail pane.
+        local yOffset = AddTextLine(child, DETAIL_PAD, Wrap(RoleHex("Muted"), T("RECIPE_MATCHER_SELECT_HINT", "Choose a recipe")))
+        child:SetHeight(yOffset + DETAIL_PAD)
+        Win().SyncScroll(vp)
         return
     end
 
-    if detailSub then
-        detailSub:Show()
-    end
-    if self.rightTitleBar then
-        self.rightTitleBar:SetHeight(TITLEBAR_H)
-    end
-
+    local refreshCb = RequestRightRefresh
     local name = svc:GetRecipeName(sid) or ("spell:" .. sid)
     local bagCounts = self._bagCounts or svc:GetBagCounts()
     local rows, craftable = svc:MatchReagents(sid, bagCounts)
     local prof = svc:GetProfession(sid) or ""
-    if detailTitle then
-        local line = name
-        if craftable then
-            line = line .. "  " .. HexRole("+ " .. ((L and L["RECIPE_MATCHER_READY"]) or "Ready"), "success")
-        end
-        detailTitle:SetText(line)
+
+    -- Title block: recipe name (+ Ready) and profession.
+    local yOffset = DETAIL_PAD
+    local title = FontManager:CreateFontString(child, "title", "OVERLAY")
+    title:SetPoint("TOPLEFT", DETAIL_PAD, -yOffset)
+    title:SetPoint("RIGHT", child, "RIGHT", -DETAIL_PAD, 0)
+    title:SetJustifyH("LEFT")
+    title:SetWordWrap(false)
+    local line = Wrap(RoleHex("Bright"), name)
+    if craftable then
+        line = line .. "  " .. Wrap(GreenHex(), "+ " .. T("RECIPE_MATCHER_READY", "Ready"))
     end
-    if detailSub then
-        detailSub:SetText(prof ~= "" and prof or " ")
+    title:SetText(line)
+    yOffset = yOffset + math.max(DETAIL_LINE_H + 4, (title:GetStringHeight() or 0) + 4)
+    if prof ~= "" then
+        local sub = FontManager:CreateFontString(child, "small", "OVERLAY")
+        sub:SetPoint("TOPLEFT", DETAIL_PAD, -yOffset)
+        sub:SetPoint("RIGHT", child, "RIGHT", -DETAIL_PAD, 0)
+        sub:SetJustifyH("LEFT")
+        sub:SetText(ProfessionLabel(prof))
+        ns.UI_SetTextColorRole(sub, "Muted")
+        yOffset = yOffset + DETAIL_LINE_H
     end
 
+    local rowCounter = 0
+
+    -- Output
+    yOffset = AddSectionHeader(child, yOffset, T("HUB_CRAFT_OUTPUT", "Output"))
+    local outputID = svc:GetOutputItem(sid)
+    if outputID then
+        local outPrice = svc:EstimateOutputValue(sid)
+        rowCounter = rowCounter + 1
+        yOffset = AddDataRow(child, yOffset, rowCounter, ItemIcon(outputID),
+            Wrap(GoldHex(), T("RECIPE_MATCHER_PRODUCES_LABEL", "Produces:")) .. " " .. ItemName(outputID, refreshCb),
+            Money(outPrice) or Wrap(RoleHex("Dim"), T("RECIPE_MATCHER_NO_AH_PRICE", "no AH price")),
+            outputID)
+    else
+        yOffset = AddTextLine(child, yOffset, Wrap(RoleHex("Dim"),
+            T("RECIPE_MATCHER_PRODUCES_UNKNOWN", "Unknown until the profession is opened.")))
+    end
+
+    -- Reagents
+    yOffset = AddSectionHeader(child, yOffset, T("HUB_COL_REAGENTS", "Reagents"))
     if #rows == 0 then
-        local row = AcquireRow(list, 1)
-        row.label:SetText((L and L["RECIPE_MATCHER_NO_SCHEMATIC"])
-            or "No reagent data yet - open this profession window once to harvest.")
-        row.right:SetText("")
-        list.content:SetHeight(ROW_H + 8)
+        yOffset = AddTextLine(child, yOffset, Wrap(RoleHex("Muted"),
+            T("RECIPE_MATCHER_NO_SCHEMATIC", "No reagent data. Open this profession once.")))
+        child:SetHeight(yOffset + DETAIL_PAD)
+        Win().SyncScroll(vp)
         return
     end
 
-    table.sort(rows, function(a, b) return (a.short > 0) and not (b.short > 0) end)
-
-    --- +2 leading rows reserved for output summary + separator
-    local leadRows = 2
-    local outputID = svc:GetOutputItem(sid)
-    list.content:SetHeight((#rows + leadRows) * ROW_H + 8)
-
-    --- Output row
-    local outRow = AcquireRow(list, 1)
-    outRow:ClearAllPoints()
-    outRow:SetPoint("TOPLEFT", list.content, "TOPLEFT", LIST_EDGE_PAD, -4)
-    outRow:SetPoint("RIGHT", list.content, "RIGHT", -LIST_EDGE_PAD, 0)
-    local refreshCb = RequestRightRefresh
-    if outputID then
-        SetItemVisual(outRow.icon, outputID)
-        local outPrice = svc:EstimateOutputValue(sid)
-        outRow.label:SetText(
-            HexRole((L and L["RECIPE_MATCHER_PRODUCES_LABEL"]) or "Produces:", "warning")
-            .. " " .. ItemName(outputID, refreshCb))
-        outRow.right:SetText(FormatCopper(outPrice)
-            or HexDim((L and L["RECIPE_MATCHER_NO_AH_PRICE"]) or "no AH price"))
-        outRow.tooltipItemID = outputID
-    else
-        local schOut = svc.GetSchematic and svc:GetSchematic(sid)
-        SetRecipeRowIcon(outRow.icon, sid, nil, schOut and schOut.recipeIcon, refreshCb)
-        outRow.label:SetText(HexDim((L and L["RECIPE_MATCHER_PRODUCES_UNKNOWN"])
-            or "Produces: (unknown - open profession to harvest)"))
-        outRow.right:SetText("")
-        outRow.tooltipItemID = nil
-    end
-    outRow:SetScript("OnClick", nil)
-
-    --- Reagent cost summary row
-    local costRow = AcquireRow(list, 2)
-    costRow:ClearAllPoints()
-    costRow:SetPoint("TOPLEFT", list.content, "TOPLEFT", LIST_EDGE_PAD, -ROW_H - 4)
-    costRow:SetPoint("RIGHT", list.content, "RIGHT", -LIST_EDGE_PAD, 0)
-    costRow.icon:SetTexture(133784) -- coin
+    -- Reagent cost summary (+ margin vs output value)
     local cost, missing = svc:EstimateReagentCost(sid)
-    local costLabel = (L and L["RECIPE_MATCHER_REAGENT_COST_LABEL"]) or "Reagent AH cost:"
+    local costLabel = T("RECIPE_MATCHER_REAGENT_COST_LABEL", "Reagent AH cost:")
     if cost then
-        local txt = HexRole(costLabel, "muted") .. " " .. (FormatCopper(cost) or "-")
+        local txt = Wrap(RoleHex("Muted"), costLabel) .. " " .. (Money(cost) or "-")
         if missing > 0 then
-            txt = txt .. HexDim(string.format(
-                " " .. ((L and L["RECIPE_MATCHER_UNPRICED_FMT"]) or "(%d unpriced)"), missing))
+            txt = txt .. " " .. Wrap(RoleHex("Dim"), string.format(T("RECIPE_MATCHER_UNPRICED_FMT", "(%d unpriced)"), missing))
         end
-        costRow.label:SetText(txt)
+        local marginText = ""
         local out = svc:EstimateOutputValue(sid)
         if out and cost > 0 then
             local margin = out - cost
             local pct = math.floor((margin / cost) * 100 + 0.5)
-            costRow.right:SetText(HexRole(string.format(
-                (margin >= 0) and "+%s (%+d%%)" or "%s (%+d%%)",
-                FormatCopper(margin) or "", pct),
-                (margin >= 0) and "success" or "danger"))
-        else
-            costRow.right:SetText("")
+            local hex = (margin >= 0) and GreenHex() or RedHex()
+            marginText = Wrap(hex, ((margin >= 0) and "+" or "") .. SignedMoney(margin) .. string.format(" (%+d%%)", pct))
         end
+        rowCounter = rowCounter + 1
+        yOffset = AddDataRow(child, yOffset, rowCounter, 133784, txt, marginText, nil)
     else
-        costRow.label:SetText(HexDim((L and L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"])
-            or "Reagent AH cost: run /an ah to scan prices"))
-        costRow.right:SetText("")
+        yOffset = AddTextLine(child, yOffset, Wrap(RoleHex("Dim"),
+            T("RECIPE_MATCHER_REAGENT_COST_SCAN_HINT", "Sync AH prices to price reagents.")))
     end
-    costRow.tooltipItemID = nil
-    costRow:SetScript("OnClick", nil)
 
+    table.sort(rows, function(a, b) return (a.short > 0) and not (b.short > 0) end)
+    local needFmt = T("RECIPE_MATCHER_NEED_FMT", "(need %d)")
     for i = 1, #rows do
         local r = rows[i]
-        local row = AcquireRow(list, i + leadRows)
-        row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", list.content, "TOPLEFT", LIST_EDGE_PAD, -((i + leadRows - 1) * ROW_H) - 4)
-        row:SetPoint("RIGHT", list.content, "RIGHT", -LIST_EDGE_PAD, 0)
-
-        SetItemVisual(row.icon, r.itemID)
-        row.label:SetText(ItemName(r.itemID, refreshCb))
         local priceTxt = ""
         if ns.AHPriceService and ns.AHPriceService.GetPrice then
             local p = ns.AHPriceService:GetPrice(r.itemID)
-            if p then priceTxt = "  |cff888888" .. (FormatCopper(p * r.qty) or "") .. "|r" end
+            if p then priceTxt = "  " .. Wrap(RoleHex("Dim"), Money(p * r.qty) or "") end
         end
+        local value
         if r.short == 0 then
-            row.right:SetText(string.format("|cff55ff55%d|r / %d%s", r.have, r.qty, priceTxt))
+            value = Wrap(GreenHex(), r.have) .. Wrap(RoleHex("Bright"), " / " .. r.qty) .. priceTxt
         else
-            row.right:SetText(string.format("|cffff6666%d|r / %d  (need %d)%s", r.have, r.qty, r.short, priceTxt))
+            value = Wrap(RedHex(), r.have) .. Wrap(RoleHex("Bright"), " / " .. r.qty)
+                .. "  " .. Wrap(RedHex(), string.format(needFmt, r.short)) .. priceTxt
         end
-        row.tooltipItemID = r.itemID
-        row:SetScript("OnClick", nil)
+        rowCounter = rowCounter + 1
+        yOffset = AddDataRow(child, yOffset, rowCounter, ItemIcon(r.itemID, refreshCb),
+            ItemName(r.itemID, refreshCb), value, r.itemID)
     end
 
-    rightPaintCache.spellID = sid
-    rightPaintCache.bagGen = bagGen
+    child:SetHeight(yOffset + DETAIL_PAD)
+    Win().SyncScroll(vp)
 end
 
-function RecipeMatcherUI:EnsureFrameSize()
-    if not self.main then
-        return
+--==========================================================================
+-- Public API
+--==========================================================================
+
+local function SyncActionButtons(self, includeFiltered)
+    SetButtonEnabled(self.btnShopSelected, self.selectedSpellID ~= nil)
+    if includeFiltered then
+        SetButtonEnabled(self.btnShopFiltered, #self:CollectFilteredSpellIDs() > 0)
     end
-    self.main:SetSize(WINDOW_W, WINDOW_H)
 end
 
 function RecipeMatcherUI:RefreshSelection()
     if not self.main or not self.main:IsShown() then return end
     local sid = self.selectedSpellID
-    local rows = self.left and self.left.rows
+    local rows = self.left and self.left.pool and self.left.pool.rows
     if rows then
         for i = 1, #rows do
             local row = rows[i]
-            if row and row.tooltipSpellID then
-                RowSetSelected(row, row.tooltipSpellID == sid)
+            if row and row:IsShown() and row._anSpellID then
+                PaintRowSelected(row, row._anSpellID == sid)
             end
         end
     end
@@ -1540,12 +1377,7 @@ function RecipeMatcherUI:RefreshSelection()
         self._bagCounts = svc:GetBagCounts()
     end
     RefreshRight(self)
-    if self.btnShopSelected then
-        self.btnShopSelected:SetEnabled(sid ~= nil)
-    end
-    if self.right and self.right.scroll and ns.UI_FinishScrollLayout then
-        ns.UI_FinishScrollLayout(self.right.scroll)
-    end
+    SyncActionButtons(self, false)
 end
 
 function RecipeMatcherUI:Refresh(opts)
@@ -1555,8 +1387,6 @@ function RecipeMatcherUI:Refresh(opts)
         self:RefreshSelection()
         return
     end
-    if self.left and self.left.syncWidth then self.left.syncWidth() end
-    if self.right and self.right.syncWidth then self.right.syncWidth() end
 
     local svc = ns.RecipeService
     if svc then
@@ -1565,29 +1395,7 @@ function RecipeMatcherUI:Refresh(opts)
 
     if opts.rightOnly then
         RefreshRight(self)
-        if self.btnShopSelected then
-            self.btnShopSelected:SetEnabled(self.selectedSpellID ~= nil)
-        end
-        if self.right and self.right.scroll and ns.UI_FinishScrollLayout then
-            ns.UI_FinishScrollLayout(self.right.scroll)
-        end
-        return
-    end
-
-    if opts.leftOnly then
-        UpdateStatus(self)
-        if self.main.mode == "bag" then
-            RefreshLeft_Bag(self)
-        else
-            RefreshLeft_Recipe(self)
-        end
-        if self.btnShopFiltered then
-            local ids = self:CollectFilteredSpellIDs()
-            self.btnShopFiltered:SetEnabled(#ids > 0)
-        end
-        if self.left and self.left.scroll and ns.UI_FinishScrollLayout then
-            ns.UI_FinishScrollLayout(self.left.scroll)
-        end
+        SyncActionButtons(self, false)
         return
     end
 
@@ -1597,17 +1405,10 @@ function RecipeMatcherUI:Refresh(opts)
     else
         RefreshLeft_Recipe(self)
     end
-    RefreshRight(self)
-    if self.btnShopSelected and self.btnShopFiltered then
-        local ids = self:CollectFilteredSpellIDs()
-        self.btnShopFiltered:SetEnabled(#ids > 0)
-        self.btnShopSelected:SetEnabled(self.selectedSpellID ~= nil)
+    if not opts.leftOnly then
+        RefreshRight(self)
     end
-    if self.layoutShopBar then self.layoutShopBar() end
-    if ns.UI_FinishScrollLayout then
-        if self.left and self.left.scroll then ns.UI_FinishScrollLayout(self.left.scroll) end
-        if self.right and self.right.scroll then ns.UI_FinishScrollLayout(self.right.scroll) end
-    end
+    SyncActionButtons(self, true)
 end
 
 function RecipeMatcherUI:Hide()
@@ -1617,53 +1418,17 @@ function RecipeMatcherUI:Hide()
 end
 
 function RecipeMatcherUI:Toggle()
-    self:Init()
-    self:EnsureFrameSize()
-    if self.layoutToolbar then self.layoutToolbar() end
-    if self.main:IsShown() then
+    if self.main and self.main:IsShown() then
         self.main:Hide()
     else
-        if ns.UI_PresentCraftWindow then
-            ns.UI_PresentCraftWindow(self.main, "recipes")
-        else
-            if ns.UI_CloseSiblingCraftWindows then
-                ns.UI_CloseSiblingCraftWindows("recipes")
-            end
-            self.main:Show()
-        end
+        self:Show()
     end
 end
 
-function RecipeMatcherUI:Show(arg)
+--- Open the Recipe Matcher.
+---@param opts table|nil `{ tileAfter = Frame }`: tile beside the window it was opened from.
+function RecipeMatcherUI:Show(opts)
     self:Init()
-    self:EnsureFrameSize()
-    if self.layoutToolbar then self.layoutToolbar() end
-    self:LayoutClassicShellChrome()
-    local opts = type(arg) == "table" and arg or nil
-    if ns.UI_PresentCraftWindow then
-        ns.UI_PresentCraftWindow(self.main, "recipes", opts)
-    else
-        if ns.UI_CloseSiblingCraftWindows then
-            ns.UI_CloseSiblingCraftWindows("recipes")
-        end
-        self.main:Show()
-    end
-end
-
-function RecipeMatcherUI:SelectRecipe(spellID)
-    self:Init()
-    self:EnsureFrameSize()
-    if self.layoutToolbar then self.layoutToolbar() end
-    if ns.UI_PresentCraftWindow then
-        ns.UI_PresentCraftWindow(self.main, "recipes")
-    elseif ns.UI_CloseSiblingCraftWindows then
-        ns.UI_CloseSiblingCraftWindows("recipes")
-        self.main:Show()
-    else
-        self.main:Show()
-    end
-    self.main.mode = "recipe"
-    if self.refreshModeTabs then self.refreshModeTabs() end
-    self.selectedSpellID = spellID
-    self:Refresh()
+    if not self.main then return end
+    Win().Present(self.main, type(opts) == "table" and opts or nil)
 end

@@ -1,14 +1,18 @@
 --[[
-    Fishing loot: **CHAT_MSG_LOOT** (self-only) is the single source of truth for Last pickups + Overall DB.
-    Blizzard / clients sometimes dispatch the **same** line twice in <0.25s — we drop repeats by raw message text
-    (same pattern as `GatheringLootService` `CHAT_MSG_DUP_SEC`).
-    Window slot scans are **not** used for recording (avoids chat+window double commits and GUID/preOpen races).
+    Fishing loot: **CHAT_MSG_LOOT** (self-only) is the single recorder for Last pickups + Overall DB.
 
-    API note: `IsFishingLoot()` / loot events are only used by `ShouldAttributeLootToFishing` to decide
-    “does this chat line count as fishing?” — not for incrementing totals.
+    Attribution: a line counts as fishing only when
+      1) it consumes a fishing loot-window token (LootWindowBridge: LOOT_OPENED with
+         IsFishingLoot()), or
+      2) the player is channelling a fishing cast, or stopped one within FISH_CHANNEL_GRACE_SEC.
+    A line made of fish alone is NOT enough (vendor / AH / quest fish are not catches).
+    Duplicate lines are dropped by the chat `lineID` (exact; no time window).
 ]]
 
 local ADDON_NAME, ns = ...
+
+-- 12.1.5 removed the global item/coin fallbacks; bind the namespaced APIs.
+local GetItemInfo = C_Item.GetItemInfo
 
 local ArtisanNexus = ns.ArtisanNexus
 local E = ns.Constants.EVENTS
@@ -19,12 +23,10 @@ local FishingLootService = {
     _deferFishingSessionTabSignals = false,
 }
 
---- Loot bridge still resets this on LOOT_OPENED (delta math unused for fishing; kept for API compat).
-local lastWindowCounts = {}
+--- Bobber click ends the channel just before the loot window/chat line arrives.
+local FISH_CHANNEL_GRACE_SEC = 5
 
---- Same chat line re-fired within this window → ignore (FastLoot, ElvUI, server echo).
-local lastFishLootChatAt = {}
-local CHAT_MSG_DUP_SEC = 0.25
+local chatLines = ns.Utilities.CreateChatLineDeduper(120)
 
 --- Short UI tick when optional fish-record sound is on. `SOUNDKIT.LOOT_WINDOW_COIN_SOUND` = 120 (BlizzardInterfaceResources).
 local function PlayFishingLootRecordedTick()
@@ -40,73 +42,53 @@ local function NormFishItemID(id)
     return nil
 end
 
-local function ShouldAttributeLootToFishing(counts)
+--- Live fishing channel (or one that just ended) — fallback when no fishing window token exists.
+local function IsFishingChannelContext()
+    local fs = ns.FishingService
+    if not fs then
+        return false
+    end
+    if fs.IsFishingChanneling and fs:IsFishingChanneling() then
+        return true
+    end
+    local stopAt = fs._lastFishingChannelStopTime
+    return stopAt ~= nil and (GetTime() - stopAt) <= FISH_CHANNEL_GRACE_SEC
+end
+
+--- True when this pickup is a catch (consumes one fishing window token if any).
+---@param itemID number
+---@param qty number
+---@return boolean
+local function ClaimFishingPickup(itemID, qty)
     if ns.IsOpenWorld and not ns.IsOpenWorld() then
         return false
     end
-    if IsFishingLoot and IsFishingLoot() then
+    local bridge = ns.LootWindowBridge
+    if bridge and bridge.ConsumeToken and bridge:ConsumeToken("fishing", itemID, qty) then
         return true
     end
-    if ns.GatheringLootService and ns.GatheringLootService.ShouldAttributeLootToGathering then
-        local gatheringWantsWindow = ns.GatheringLootService.ShouldAttributeLootWindowScan
-            and ns.GatheringLootService:ShouldAttributeLootWindowScan()
-        if gatheringWantsWindow and ns.GatheringLootService:ShouldAttributeLootToGathering() then
-            return false
-        end
-    end
-    if ns.FishingService and ns.FishingService:IsInFishingLootContext() then
-        return true
-    end
-    if counts and next(counts) and ns.IsFishingCatalogItem then
-        for itemID in pairs(counts) do
-            if not ns.IsFishingCatalogItem(itemID) then
-                return false
-            end
-        end
-        return true
-    end
-    return false
-end
-
-function FishingLootService:MergeLootSourceSnapshotFromWindow()
-    --- Legacy no-op: recording uses chat only.
-end
-
-function FishingLootService:ResetWindowCountSnapshot()
-    wipe(lastWindowCounts)
+    return IsFishingChannelContext()
 end
 
 local function IncrementFishingLootHistoryDb(itemID, qty, itemName)
     if not itemID or itemID < 1 then
         return
     end
-    qty = math.max(1, qty or 1)
     if not (ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)) then
         return
     end
-    local db = ArtisanNexus.db.global.fishingLootHistory
-    if type(db) ~= "table" then
-        ArtisanNexus.db.global.fishingLootHistory = {}
-        db = ArtisanNexus.db.global.fishingLootHistory
-    end
-    if not db[itemID] then
-        db[itemID] = { count = 0, lastAt = 0, name = nil }
-    end
-    local row = db[itemID]
-    row.count = (row.count or 0) + qty
-    row.lastAt = time()
-    if itemName and itemName ~= "" and not (issecretvalue and issecretvalue(itemName)) then
-        row.name = itemName
-    elseif not row.name or row.name == "" then
+    if not itemName or itemName == "" or (issecretvalue and issecretvalue(itemName)) then
         local name = GetItemInfo(itemID)
-        if name and not (issecretvalue and issecretvalue(name)) then
-            row.name = name
-        end
+        itemName = (name and not (issecretvalue and issecretvalue(name))) and name or nil
+    end
+    local svc = ns.SessionLootService
+    if svc and svc.CreditLootHistory then
+        svc:CreditLootHistory("fishingLootHistory", itemID, math.max(1, qty or 1), itemName)
     end
 end
 
---- One self-loot chat line → one batch of DB + session lines (per item in that line).
-local function ProcessChatSessionOnly(msg)
+--- One self-loot chat line → one batch of DB + session lines (per caught item in that line).
+local function ProcessChatLoot(msg, lineID)
     if not msg or (issecretvalue and issecretvalue(msg)) then
         return
     end
@@ -114,56 +96,29 @@ local function ProcessChatSessionOnly(msg)
     if not (ns.IsSelfLootChatMessage and ns.IsSelfLootChatMessage(msg)) then
         return
     end
-
-    local now = GetTime()
-    local prevAt = lastFishLootChatAt[msg]
-    if prevAt and (now - prevAt) < CHAT_MSG_DUP_SEC then
+    if chatLines:Seen(lineID) then
         return
-    end
-    lastFishLootChatAt[msg] = now
-    if (now % 30) < 0.05 then
-        for k, t in pairs(lastFishLootChatAt) do
-            if (now - t) > CHAT_MSG_DUP_SEC * 4 then
-                lastFishLootChatAt[k] = nil
-            end
-        end
     end
 
     local counts = (ns.ParseChatLootItemQuantities and ns.ParseChatLootItemQuantities(msg)) or {}
-    if not ShouldAttributeLootToFishing(counts) then
-        return
-    end
+    local boutStartAt = ns.FishingService and ns.FishingService._channelStartAt or nil
 
     FishingLootService._deferFishingSessionTabSignals = true
     local hadSessionTouch = false
-    local primaryItemId = nil
-    local totalQuantity = 0
-    local distinctItems = 0
     for rawId, qty in pairs(counts) do
         local itemID = NormFishItemID(rawId)
-        if not itemID or not (ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)) then
-            --- Non-catalog drops in a mixed line: skip session rows for those IDs.
-        elseif ns.SessionLootService and ns.SessionLootService.PushFishingSession then
-            local q = math.max(1, qty or 1)
-            IncrementFishingLootHistoryDb(itemID, qty, nil)
-            ns.SessionLootService:PushFishingSession(itemID, qty, { quiet = true })
-            hadSessionTouch = true
-            distinctItems = distinctItems + 1
-            totalQuantity = totalQuantity + q
-            if not primaryItemId or itemID < primaryItemId then
-                primaryItemId = itemID
+        if itemID and ns.IsFishingCatalogItem and ns.IsFishingCatalogItem(itemID)
+            and ClaimFishingPickup(itemID, qty) then
+            if ns.SessionLootService and ns.SessionLootService.PushFishingSession
+                and ns.SessionLootService:PushFishingSession(itemID, qty, { quiet = true, boutStartAt = boutStartAt }) then
+                IncrementFishingLootHistoryDb(itemID, qty, nil)
+                hadSessionTouch = true
             end
         end
     end
     FishingLootService._deferFishingSessionTabSignals = false
 
     if hadSessionTouch then
-        --- One internal message per processed self-loot chat line (not per item row).
-        ArtisanNexus:SendMessage(E.FISHING_LOOT_RECORDED, {
-            primaryItemId = primaryItemId,
-            totalQuantity = totalQuantity,
-            distinctItems = distinctItems,
-        })
         local profile = ArtisanNexus.db and ArtisanNexus.db.profile
         if profile and profile.fishingLootSoundEnabled then
             PlayFishingLootRecordedTick()
@@ -176,16 +131,13 @@ local function ProcessChatSessionOnly(msg)
         if ns.SessionLootService and ns.SessionLootService.EmitFishingLootTabSignal then
             ns.SessionLootService:EmitFishingLootTabSignal()
         end
-    elseif dbg and next(counts) then
-        ArtisanNexus:Print("[FishingLoot] Fishing-attributed chat line had no catalog items to record.")
-    end
-    if next(counts) and ns.FishingService and ns.FishingService.ClearPostLootState then
-        ns.FishingService:ClearPostLootState()
     end
 end
 
-function FishingLootService:ShouldAttributeLootToFishing()
-    return ShouldAttributeLootToFishing(nil)
+--- True while a fishing catch can still be attributed without a window token.
+---@return boolean
+function FishingLootService:IsFishingContextActive()
+    return IsFishingChannelContext()
 end
 
 local eventFrame = CreateFrame("Frame")
@@ -194,7 +146,9 @@ function FishingLootService:Enable()
     eventFrame:RegisterEvent("CHAT_MSG_LOOT")
     eventFrame:SetScript("OnEvent", function(_, event, ...)
         if event == "CHAT_MSG_LOOT" then
-            ProcessChatSessionOnly(select(1, ...))
+            -- verified 2026-10-15, ChatInfoDocumentation.lua 12.1.5: arg 1 text, arg 11 lineID.
+            local text, _, _, _, _, _, _, _, _, _, lineID = ...
+            ProcessChatLoot(text, lineID)
         end
     end)
 end

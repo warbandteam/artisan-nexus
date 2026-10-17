@@ -1,6 +1,7 @@
 --[[
     Localized profession / gathering tab labels: prefer C_Profession (client language),
     then AceLocale, with safe fallbacks.
+    ns.GetProfessionDisplayName(key): catalog key ("Alchemy") -> client-language profession name.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -87,4 +88,54 @@ function ns.GetGatheringTabDisplayName(tabKey)
         return fb
     end
     return tabKey
+end
+
+--- Catalog key -> client-language name, cached once resolved.
+local professionDisplayNames = {}
+
+--- Standard primary profession icons keyed by the English profession key (copied from Warband Nexus
+--- Modules/DataService.lua KNOWN_PROFESSION_ICONS; Hub Crafting group headers).
+ns.KNOWN_PROFESSION_ICONS = {
+    ["Alchemy"]        = "Interface\\Icons\\Trade_Alchemy",
+    ["Blacksmithing"]  = "Interface\\Icons\\Trade_BlackSmithing",
+    ["Enchanting"]     = "Interface\\Icons\\Trade_Engraving",
+    ["Engineering"]    = "Interface\\Icons\\Trade_Engineering",
+    ["Herbalism"]      = "Interface\\Icons\\Trade_Herbalism",
+    ["Inscription"]    = "Interface\\Icons\\INV_Inscription_Tradeskill01",
+    ["Jewelcrafting"]  = "Interface\\Icons\\INV_Misc_Gem_01",
+    ["Leatherworking"] = "Interface\\Icons\\Trade_LeatherWorking",
+    ["Mining"]         = "Interface\\Icons\\Trade_Mining",
+    ["Skinning"]       = "Interface\\Icons\\INV_Misc_Pelt_Wolf_01",
+    ["Tailoring"]      = "Interface\\Icons\\Trade_Tailoring",
+    ["Cooking"]        = "Interface\\Icons\\INV_Misc_Food_15",
+    ["Fishing"]        = "Interface\\Icons\\Trade_Fishing",
+}
+
+--- Client-language name of a craft profession catalog key ("Alchemy", ...; ns.MidnightRecipeCatalog).
+--- Stored filters keep the English key; only the label is localized. C_TradeSkillUI.GetTradeSkillDisplayName
+--- (skillLineID) -> professionDisplayName, verified 2026-10-15 in TradeSkillUIDocumentation 12.1.5;
+--- called on the catalog's base profession skill line. Falls back to the key.
+---@param key string
+---@return string
+function ns.GetProfessionDisplayName(key)
+    key = ns.CoerceUiString(key, "")
+    if key == "" then
+        return ""
+    end
+    local cached = professionDisplayNames[key]
+    if cached then
+        return cached
+    end
+    local cat = ns.MidnightRecipeCatalog
+    local data = type(cat) == "table" and cat[key]
+    local slid = type(data) == "table" and (data.parentSkillLineID or data.skillLineID)
+    if slid and C_TradeSkillUI and C_TradeSkillUI.GetTradeSkillDisplayName then
+        local ok, disp = pcall(C_TradeSkillUI.GetTradeSkillDisplayName, slid)
+        disp = ok and ns.CoerceUiString(disp, "") or ""
+        if disp ~= "" then
+            professionDisplayNames[key] = disp
+            return disp
+        end
+    end
+    return key
 end

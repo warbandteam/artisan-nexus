@@ -1,11 +1,11 @@
-## Interface: 120100
+## Interface: 120105
 ## Title: Artisan Nexus
 ## Notes: Professions QoL for WoW Midnight — session loot (fishing & gathering), AH prices, overload hints, craft queue, minimap launcher.
 ## Author: Artisan Nexus
-## Version: 0.3.0
+## Version: 0.4.0-beta1
 ## IconTexture: Interface\AddOns\ArtisanNexus\Media\anlogo.tga
 ## SavedVariables: ArtisanNexusDB
-## OptionalDeps: Ace3, LibSharedMedia-3.0
+## OptionalDeps: Ace3, LibSharedMedia-3.0, WarbandNexus, Auctionator, TradeSkillMaster
 ## X-Category: Professions
 ## X-License: All Rights Reserved
 ## X-Website: https://www.curseforge.com/wow/addons/artisan-nexus
@@ -37,22 +37,60 @@ Modules\Utilities.lua
 Modules\MigrationService.lua
 Core.lua
 Modules\ProfessionLocale.lua
-Modules\ErrorHandler.lua
+Modules\WarbandNexusBridge.lua
 
-Modules\UI\ArtisanTheme.lua
-Modules\UI\ArtisanSharedWidgets_Classic.lua
-Modules\UI\ArtisanSharedWidgets.lua
-Modules\UI\ArtisanSharedWidgets_WindowShell.lua
-Modules\UI\UI_DebugOverlay.lua
-Modules\UI\ArtisanSharedWidgets_Factory.lua
+# Warband Nexus UI framework (copied verbatim from warband-nexus; load order as in WarbandNexus.toc)
+Modules\APIWrapper.lua
+Modules\Profiler.lua
+Modules\LoadingTracker.lua
+Modules\FontManager.lua
+Modules\SearchStateManager.lua
+Modules\WindowManager.lua
+Modules\UI\IconRegistry.lua
+Modules\UI\FormatHelpers.lua
+Modules\UI\ColumnOrderHelpers.lua
+Modules\UI\SharedWidgets_Pixel.lua
+Modules\UI\SharedWidgets_ClassicTheme.lua
+Modules\UI\SharedWidgets_Theme.lua
+Modules\UI\SharedWidgets_Layout.lua
+Modules\UI\SharedWidgets.lua
+Modules\UI\SharedWidgets_Icons.lua
+Modules\UI\SharedWidgets_Collapsible.lua
+Modules\UI\SharedWidgets_Factory_Chrome.lua
+Modules\UI\SharedWidgets_Factory.lua
+Modules\UI\SharedWidgets_RowPool.lua
+Modules\UI\SharedWidgets_TableKit.lua
+Modules\UI\SharedWidgets_Search.lua
+Modules\UI\SharedWidgets_EmptyState.lua
+Modules\UI\SharedWidgets_TitleToolbar.lua
+Modules\UI\LayoutCoordinator.lua
+Modules\UI\FramePoolFactory.lua
+Modules\UI\WindowFactory.lua
+Modules\UI\SearchBoxComponent.lua
+Modules\UI\VirtualListModule.lua
+Modules\UI\TooltipFactory.lua
 Modules\UI\ProfessionQualityAtlas.lua
 Modules\Data\GatheringCatalog.lua
 Modules\Data\GatheringNodeOverloadRegistry.lua
 Modules\Data\FishingCatalog.lua
 Modules\Data\MidnightRecipeCatalog.lua
+Modules\Data\MidnightReagentCatalog.lua
+Modules\Data\CharacterDataProvider.lua
 Modules\SessionLootService.lua
 Modules\AHPriceService.lua
 Modules\PriceHistoryService.lua
+Modules\Economy\EconomyCore.lua
+Modules\Economy\VendorPriceService.lua
+Modules\Economy\CraftLedgerService.lua
+Modules\Economy\OwnedAuctionsService.lua
+Modules\Economy\SalesLedgerService.lua
+Modules\Economy\CraftOpsService.lua
+Modules\Economy\CraftEVService.lua
+Modules\Economy\MarketIntelService.lua
+Modules\Economy\ConcentrationPlannerService.lua
+Modules\Economy\CooldownService.lua
+Modules\Economy\CraftingOrdersService.lua
+Modules\Economy\TooltipService.lua
 Modules\BagPressureGuard.lua
 Modules\RecipeService.lua
 Modules\ProfitabilityService.lua
@@ -63,7 +101,6 @@ Modules\ProfessionSnapshotService.lua
 Modules\CraftEventService.lua
 Modules\CraftingQueueService.lua
 Modules\CraftLootService.lua
-Modules\CraftingOrdersResearch.lua
 Modules\PostingHelperService.lua
 
 Modules\Fishing\FishingSpellData.lua
@@ -75,8 +112,9 @@ Modules\Gathering\GatheringOverloadService.lua
 Modules\Gathering\GatheringOverloadActionButton.lua
 Modules\Crafting\CraftQueueActionButton.lua
 Modules\LootWindowBridge.lua
-Modules\UI\LootHistoryUI_Chrome.lua
+Modules\UI\ArtisanWindow.lua
 Modules\UI\LootHistoryUI_Draw.lua
+Modules\UI\NotificationToastFactory.lua
 Modules\UI\SessionLootOverlayUI.lua
 Modules\UI\LootHistoryUI.lua
 Modules\UI\LootHistoryUI_Init.lua
@@ -84,10 +122,27 @@ Modules\UI\GatheringOverloadIndicator.lua
 Modules\UI\RecipeMatcherUI.lua
 Modules\UI\PriceHistoryUI.lua
 Modules\UI\PostingHelperUI.lua
-Modules\UI\ArtisanHubUI.lua
+Modules\UI\Settings\SettingsSchema.lua
+Modules\UI\SettingsUI_Shell.lua
+Modules\UI\SettingsUI_Keybind.lua
+Modules\UI\SettingsUI_Artisan.lua
+Modules\UI\SettingsUI.lua
+# Artisan Hub tabs (drawn by the WN main window: Modules\UI.lua + UI_MainShell + UI_TabHost)
+Modules\UI\Hub\HubData.lua
+Modules\UI\Hub\HubTabKit.lua
+Modules\UI\Hub\Pages\OverviewPage.lua
+Modules\UI\Hub\Pages\CraftingPage.lua
+Modules\UI\Hub\Pages\CraftingPage_Detail.lua
+Modules\UI\Hub\Pages\PlanPage.lua
+Modules\UI\Hub\Pages\PlanPage_Shopping.lua
+Modules\UI\Hub\Pages\ConcentrationPage.lua
+Modules\UI\Hub\Pages\OrdersPage.lua
+Modules\UI\Hub\Pages\MarketPage.lua
+Modules\UI\Hub\Pages\LedgerPage.lua
+Modules\UI\UI_RefreshRouter.lua
+Modules\UI.lua
+Modules\UI\UI_MainShell.lua
+Modules\UI\UI_TabHost.lua
 Modules\UI\ProfessionSidecarUI.lua
-Modules\UI\ArtisanSettingsFrame.xml
-Modules\UI\ArtisanSettingsUI.lua
-Modules\UI\ArtisanSettingsUI_Layout.lua
 Config.lua
 Modules\MinimapButton.lua

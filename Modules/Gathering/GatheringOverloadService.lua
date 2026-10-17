@@ -7,7 +7,7 @@
 local ADDON_NAME, ns = ...
 
 local ArtisanNexus = ns.ArtisanNexus
-local E = ns.Constants and ns.Constants.EVENTS
+local E = ns.Constants.EVENTS
 
 ---@class GatheringOverloadService
 local GatheringOverloadService = {
@@ -89,12 +89,6 @@ local function GetSpellTextureForSpellID(spellID)
             if type(iid) == "number" and iid > 0 then
                 return iid
             end
-        end
-    end
-    if GetSpellTexture then
-        local tex = GetSpellTexture(id)
-        if tex and tex ~= "" then
-            return tex
         end
     end
     return nil
@@ -225,6 +219,51 @@ end
 
 local NODE_NAME_KEYWORDS = BuildNodeNameKeywords()
 
+--[[
+    Locale support: node-name keywords above come from the English catalog `note`s. In other
+    clients the herb/ore item names are appended at runtime from C_Item.GetItemNameByID (the
+    client's localized name; verified 2026-10-15, ItemDocumentation 12.1.5), so category
+    detection works when the node shares its item's name (herbs do). Remaining enUS-only
+    parts: OVERLOAD_KEYWORDS, MODIFIER_KEYWORDS and GATHERING_LINE_HINTS ("overload",
+    "wild", "infused", "cursed", "deposit", ...) and the ore "Ore"/"Deposit" alias stripping.
+    Node templates are server-side (no Midnight node rows in GameObjects DB2 12.1.5), so
+    there is no localized source for those words; non-English clients get the
+    overloaded/modifier hint only if the tooltip happens to contain the English words.
+]]
+local localizedPending = false
+
+local function AddLocalizedNodeKeywords()
+    if not (C_Item and C_Item.GetItemNameByID) then
+        return
+    end
+    localizedPending = false
+    for _, cat in ipairs({ "herb", "mine" }) do
+        local list = NODE_NAME_KEYWORDS[cat]
+        local have = {}
+        for i = 1, #list do
+            have[list[i]] = true
+        end
+        local entries = ns.GetGatheringCatalogByCategory and ns.GetGatheringCatalogByCategory(cat) or {}
+        for i = 1, #entries do
+            local ranks = ns.ResolveCatalogEntryRanks and ns.ResolveCatalogEntryRanks(entries[i]) or {}
+            for r = 1, #ranks do
+                local name = C_Item.GetItemNameByID(ranks[r])
+                local low = NormalizeLower(name)
+                if not low then
+                    localizedPending = true
+                    if C_Item.RequestLoadItemDataByID then
+                        C_Item.RequestLoadItemDataByID(ranks[r])
+                    end
+                -- Byte length: 6 bytes is two CJK characters; shorter names match too much.
+                elseif #low >= 6 and not have[low] then
+                    have[low] = true
+                    list[#list + 1] = low
+                end
+            end
+        end
+    end
+end
+
 --- Expose the keyword table (read-only usage) so the secure-cast keybind and the
 --- world overlay can classify tooltip / nameplate text without rebuilding it.
 function ns.GetOverloadNodeKeywords()
@@ -235,11 +274,14 @@ local function IsSpellKnownSafe(spellID)
     if not spellID then
         return false
     end
-    if IsPlayerSpell and IsPlayerSpell(spellID) then
-        return true
-    end
-    if IsSpellKnownOrOverridesKnown and IsSpellKnownOrOverridesKnown(spellID) then
-        return true
+    -- Globals IsPlayerSpell / IsSpellKnownOrOverridesKnown are gone in 12.1.5 (absent from
+    -- Ketho GlobalAPI, checked 2026-10-14); C_SpellBook.IsSpellKnownOrInSpellBook(spellID,
+    -- spellBank = Player, includeOverrides = true) is documented in SpellBookDocumentation 12.1.5.
+    if C_SpellBook and C_SpellBook.IsSpellKnownOrInSpellBook then
+        local ok, known = pcall(C_SpellBook.IsSpellKnownOrInSpellBook, spellID)
+        if ok and known then
+            return true
+        end
     end
     if C_SpellBook and C_SpellBook.IsSpellInSpellBook then
         local ok, inBook = pcall(C_SpellBook.IsSpellInSpellBook, spellID)
@@ -279,7 +321,8 @@ local function GetSpellCooldownTriple(spellID)
     return startTime, duration, 0
 end
 
---- Node hint / ilk bilinen spell için kalan süre (ResolveOverloadStatus); `IsUsableSpell` ile eski davranış korunur.
+--- Remaining cooldown for the node hint / first known spell (ResolveOverloadStatus); a ready spell that is
+--- not castable (C_Spell.IsSpellUsable, SpellDocumentation.lua 12.1.5.70391) reports nil instead of 0.
 local function GetCooldownRemaining(spellID)
     local getVals = ns.GetPlayerSpellCooldownValues
     if not getVals then
@@ -306,11 +349,9 @@ local function GetCooldownRemaining(spellID)
         return duration
     end
     if duration <= 0 then
-        if IsUsableSpell then
-            local usable = IsUsableSpell(spellID)
-            if not usable then
-                return nil
-            end
+        local ok, usable = pcall(C_Spell.IsSpellUsable, spellID)
+        if ok and usable == false and not (issecretvalue and issecretvalue(usable)) then
+            return nil
         end
         return 0
     end
@@ -699,6 +740,11 @@ function GatheringOverloadService:Enable()
     self._enabled = true
     self._slowElapsed = 0
     self._scheduleNonce = self._scheduleNonce + 1
+    AddLocalizedNodeKeywords()
+    if localizedPending and C_Timer and C_Timer.After then
+        -- Item names load asynchronously; one retry once the requests have resolved.
+        C_Timer.After(5, AddLocalizedNodeKeywords)
+    end
     HookTooltip()
     scanFrame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
     scanFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
@@ -728,6 +774,10 @@ function GatheringOverloadService:Enable()
             return
         end
         GatheringOverloadService._slowElapsed = 0
+        -- No gathering nodes in instances; skip the poll there.
+        if ns.IsOpenWorld and not ns.IsOpenWorld() then
+            return
+        end
         ScanTooltip()
     end)
 end

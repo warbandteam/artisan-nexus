@@ -26,7 +26,7 @@ if (Test-Path -LiteralPath $StageDir) {
 New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
 
 $CopyNames = @(
-    "Core.lua", "Config.lua", "embeds.xml", "Bindings.xml", "ArtisanNexus.toc",
+    "Core.lua", "Config.lua", "embeds.xml", "Bindings.xml", "ArtisanNexus.toc", "LICENSE",
     "Locales", "Modules", "Media", "libs"
 )
 foreach ($name in $CopyNames) {
@@ -38,6 +38,16 @@ foreach ($name in $CopyNames) {
     Copy-Item -LiteralPath $src -Destination (Join-Path $StageDir $name) -Recurse -Force
 }
 
+# Dotfiles / dot-folders (.DS_Store, Locales/.tmp, editor state) never ship (.pkgmeta parity).
+Get-ChildItem -LiteralPath $StageDir -Recurse -Force |
+    Where-Object { $_.Name.StartsWith(".") } |
+    Sort-Object { $_.FullName.Length } -Descending |
+    ForEach-Object {
+        if (Test-Path -LiteralPath $_.FullName) {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force
+        }
+    }
+
 # Wago / CurseForge reject zips with extra addon TOCs under libs.
 $LibsDir = Join-Path $StageDir "libs"
 if (Test-Path -LiteralPath $LibsDir) {
@@ -46,8 +56,7 @@ if (Test-Path -LiteralPath $LibsDir) {
 
 $LibJunk = @(
     "README.md", "README.textile", "changelog.txt", "CHANGES.txt", "LICENSE.txt",
-    "Changelog-libdatabroker-1-1-v1.1.4.txt", "embeds.xml", "Bindings.xml", "Ace3.lua",
-    "LibDeflate\.xml"
+    "Changelog-libdatabroker-1-1-v1.1.4.txt", "embeds.xml", "Bindings.xml", "Ace3.lua"
 )
 foreach ($rel in $LibJunk) {
     $p = Join-Path $LibsDir ($rel -replace '/', '\')

@@ -1,0 +1,1190 @@
+--[[
+    Warband Nexus - SharedWidgets SharedWidgets_Search (ops-029 slice)
+    Loaded after Modules/UI/SharedWidgets.lua core exports.
+]]
+
+local _, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
+local WarbandNexus = ns.ArtisanNexus
+local FontManager = ns.FontManager
+local issecretvalue = issecretvalue
+
+ns.UI = ns.UI or {}
+ns.UI.Factory = ns.UI.Factory or {}
+
+local E = ns.Constants and ns.Constants.EVENTS
+local COLORS = ns.UI_COLORS
+local UI_SPACING = ns.UI_SPACING
+local UI_LAYOUT = ns.UI_LAYOUT or UI_SPACING
+local GetPixelScale = ns.GetPixelScale
+local PixelSnap = ns.PixelSnap
+local ApplyVisuals = ns.UI_ApplyVisuals
+local CreateButton = ns.UI_CreateButton
+local CreateIcon = ns.UI_CreateIcon
+local GetColors = function() return ns.UI_COLORS end
+local DebugPrint = ns.DebugPrint
+local IsDebugModeEnabled = ns.IsDebugModeEnabled
+
+local function SearchBrightHex()
+    return (ns.UI_GetBrightHex and ns.UI_GetBrightHex()) or (ns.UI_GetTextRoleHex and ns.UI_GetTextRoleHex("Bright")) or "|cffeeeeee"
+end
+
+local function SearchMutedHex()
+    return (ns.UI_GetTextRoleHex and ns.UI_GetTextRoleHex("Muted")) or "|cff888888"
+end
+
+local function GetLockAtlasMarkup(sz)
+    sz = sz or 14
+    local markup = ns.UI_GetIconMarkup and ns.UI_GetIconMarkup("lock", sz, sz)
+    if markup and markup ~= "" then
+        return markup
+    end
+    return string.format("|TInterface\\Common\\LockIcon:%d:%d:0:0|t", sz, sz)
+end
+
+--- Surface tier color: single implementation lives in SharedWidgets.lua (`ns.UI_ResolveSurfaceTierColor`).
+local function ResolveSurfaceTierColor(tier)
+    return ns.UI_ResolveSurfaceTierColor(tier)
+end
+
+local function RosterPickerChrome()
+    if ns.UI_GetSearchBoxChromeColors then
+        return ns.UI_GetSearchBoxChromeColors()
+    end
+    local bg = ns.UI_GetControlChromeBackdrop and ns.UI_GetControlChromeBackdrop() or ResolveSurfaceTierColor("rowOdd")
+    local b = ns.UI_GetBorderStrokeColor and ns.UI_GetBorderStrokeColor() or COLORS.border
+    return bg, { b[1], b[2], b[3], 0.5 }
+end
+
+local function RosterSectionBarChrome()
+    local c = COLORS
+    local bg = c.surfaceRowOdd or c.bgLight or c.bg or { 0.09, 0.09, 0.11, 0.9 }
+    return { bg[1], bg[2], bg[3], bg[4] or 0.9 }, { 0, 0, 0, 0 }
+end
+
+local function WnFormatRealmDisplay(raw)
+    if not raw or raw == "" then return "" end
+    if issecretvalue and issecretvalue(raw) then return "" end
+    if ns.Utilities and ns.Utilities.FormatRealmName then
+        return ns.Utilities:FormatRealmName(raw) or raw
+    end
+    return raw
+end
+
+local function WnSafeCharLine(char)
+    local n = char and char.name
+    local rlm = char and char.realm
+    if n and issecretvalue and issecretvalue(n) then n = "?" end
+    if rlm and issecretvalue and issecretvalue(rlm) then rlm = "" end
+    n = n or "?"
+    if rlm and rlm ~= "" then
+        return n .. " - " .. WnFormatRealmDisplay(rlm)
+    end
+    return n
+end
+
+local function WnPickerTextLower(s)
+    if not s or s == "" then return "" end
+    if issecretvalue and issecretvalue(s) then return "" end
+    return s:lower()
+end
+
+--- Plain-text blob for search (name + realm + level). Player names may include non-ASCII; do not strip them.
+local function WnPlainSearchBlob(char)
+    local n = char and char.name
+    local rlm = char and char.realm or ""
+    if n and issecretvalue and issecretvalue(n) then n = "" end
+    if rlm and issecretvalue and issecretvalue(rlm) then rlm = "" end
+    n = n or ""
+    local rPretty = WnFormatRealmDisplay(rlm)
+    local lv = tonumber(char and char.level) or 0
+    return WnPickerTextLower(n .. " " .. tostring(rlm) .. " " .. tostring(rPretty) .. " " .. tostring(lv))
+end
+
+local function WnPickerLineMatchesChar(char, filterLower)
+    if not filterLower or filterLower == "" then return true end
+    local blob = WnPlainSearchBlob(char)
+    if blob == "" then return false end
+    return blob:find(filterLower, 1, true) ~= nil
+end
+
+--- Class-colored character name only (roster name column).
+local function WnColoredCharacterName(char)
+    local n = char and char.name
+    if n and issecretvalue and issecretvalue(n) then n = "?" end
+    n = n or "?"
+    local cc = RAID_CLASS_COLORS and char.classFile and RAID_CLASS_COLORS[char.classFile]
+    local r, g, b = 1, 1, 1
+    if cc then
+        r = cc.r or 1
+        g = cc.g or 1
+        b = cc.b or 1
+    end
+    local hx = string.format("%02x%02x%02x", math.floor(r * 255), math.floor(g * 255), math.floor(b * 255))
+    return string.format("|cff%s%s|r", hx, n)
+end
+
+local function WnRosterLevelStr(char)
+    local lv = tonumber(char and char.level)
+    if not lv or lv < 1 then
+        return "?"
+    end
+    return tostring(lv)
+end
+
+local function WnRosterRealmColored(char)
+    local rlm = char and char.realm or ""
+    if rlm and issecretvalue and issecretvalue(rlm) then rlm = "" end
+    local rShow = WnFormatRealmDisplay(rlm)
+    if rShow == "" then
+        return ""
+    end
+    return SearchBrightHex() .. rShow .. "|r"
+end
+
+--- Build members / non-member buckets for one custom header (same rules as legacy pick menu).
+local function WnBuildCustomHeaderManageBuckets(addon, profile, charactersList, groupId)
+    local members, candidates = {}, {}
+    if not addon or not profile or not charactersList or not groupId or not ns.CharacterService then
+        return members, candidates
+    end
+    ns.CharacterService:EnsureCustomCharacterSectionsProfile(profile)
+    for i = 1, #charactersList do
+        local ch = charactersList[i]
+        local ck = ns.UI_GetCharKey(ch)
+        -- Favorites are eligible: a section membership outranks the Favorites block, so they must
+        -- be listable here too (otherwise a favorited member could never be removed from a section).
+        if ck and (ch.isTracked ~= false) then
+            local gid = ns.CharacterService:GetCharacterCustomSectionId(addon, ck)
+            local isLocked = ns.CharacterService:IsCharacterSectionLocked(addon, ck)
+            local item = { char = ch, key = ck, groupId = gid, isLocked = isLocked }
+            if gid == groupId then
+                members[#members + 1] = item
+            else
+                candidates[#candidates + 1] = item
+            end
+        end
+    end
+    table.sort(members, function(a, b)
+        return WnSafeCharLine(a.char) < WnSafeCharLine(b.char)
+    end)
+    table.sort(candidates, function(a, b)
+        return WnSafeCharLine(a.char) < WnSafeCharLine(b.char)
+    end)
+    return members, candidates
+end
+
+--- Roster picker: `groupId` nil = new section (all eligible, checkboxes). Set = manage (members + bulk add).
+function ns.UI_CreateCustomHeaderRosterPicker(parent, width, addon, profile, charactersList, groupId)
+    if not parent or not addon or not profile or not charactersList or not ns.UI or not ns.UI.Factory or not ns.CharacterService then
+        return nil
+    end
+    local Factory = ns.UI.Factory
+    local L = ns.L
+    local UI_SPACING = ns.UI_SPACING
+    local itemPad = (UI_SPACING and UI_SPACING.AFTER_ELEMENT) or 8
+    local filterAreaH = 38
+    local scrollBarW = (ns.UI_GetScrollbarColumnWidth and ns.UI_GetScrollbarColumnWidth()) or 26
+    local ROW = 32
+    local SECTION_BAR_H = 28
+    local SECTION_AFTER = 10
+    -- Same left gutter as checkbox rows; same right padding in both blocks so columns line up.
+    local ROSTER_CONTENT_LEFT = 36
+    local ROSTER_ROW_RIGHT_PAD = 10
+    ns.CharacterService:EnsureCustomCharacterSectionsProfile(profile)
+
+    local root = CreateFrame("Frame", nil, parent)
+    if width and width > 60 then
+        root:SetWidth(width)
+    end
+    root:SetHeight(80)
+    if ApplyVisuals then
+        local pickerBg, pickerBorder = RosterPickerChrome()
+        ns.UI_ApplyVisuals(root, pickerBg, pickerBorder)
+        root._borderType = "accent"
+        root._bgType = "searchChrome"
+        root._borderAlpha = pickerBorder and pickerBorder[4]
+    end
+
+    local filterLabel = FontManager:CreateFontString(root, "small", "OVERLAY")
+    filterLabel:SetPoint("TOPLEFT", root, "TOPLEFT", 8, -6)
+    filterLabel:SetText((L and L["CUSTOM_HEADER_PICKER_FILTER_LABEL"]) or "Search")
+    ns.UI_SetTextColorRole(filterLabel, "Normal")
+
+    local filterBg = Factory:CreateContainer(root, 100, filterAreaH - 6, false)
+    filterBg:SetPoint("TOPLEFT", filterLabel, "BOTTOMLEFT", 0, -4)
+    filterBg:SetPoint("TOPRIGHT", root, "TOPRIGHT", -8, -16)
+    if ApplyVisuals then
+        if ns.UI_ApplySearchBoxChrome then
+            ns.UI_ApplySearchBoxChrome(filterBg, { editBoxHost = true })
+        else
+            local filterChromeBg, filterChromeBorder = RosterPickerChrome()
+            ApplyVisuals(filterBg, filterChromeBg, filterChromeBorder)
+        end
+    end
+    local filterEb = Factory:CreateEditBox(filterBg)
+    if filterEb.SetPoint then
+        filterEb:SetPoint("TOPLEFT", filterBg, "TOPLEFT", 8, -6)
+        filterEb:SetPoint("BOTTOMRIGHT", filterBg, "BOTTOMRIGHT", -8, 4)
+    end
+    filterEb:SetMaxLetters(48)
+
+    local listHost = CreateFrame("Frame", nil, root)
+    listHost:SetPoint("TOPLEFT", filterBg, "BOTTOMLEFT", 0, -itemPad)
+    listHost:SetPoint("BOTTOMRIGHT", root, "BOTTOMRIGHT", -4, 4)
+
+    local sbLane = (ns.UI_GetVerticalScrollbarLaneReserve and ns.UI_GetVerticalScrollbarLaneReserve()) or (scrollBarW + 2)
+    local scrollFrame = Factory:CreateScrollFrame(listHost, "UIPanelScrollFrameTemplate", true)
+    scrollFrame:SetPoint("TOPLEFT", listHost, "TOPLEFT", 0, 0)
+    scrollFrame:SetPoint("BOTTOMRIGHT", listHost, "BOTTOMRIGHT", -sbLane, 0)
+    scrollFrame:EnableMouseWheel(true)
+    local scrollBarColumn = Factory.CreateBareScrollBarColumn and Factory:CreateBareScrollBarColumn(listHost, scrollBarW)
+        or Factory:CreateScrollBarColumn(listHost, scrollBarW, 0, 0)
+    if Factory.EnsureScrollBarColumnSync then
+        Factory:EnsureScrollBarColumnSync(scrollFrame, scrollBarColumn, { width = scrollBarW, gap = 2 })
+    elseif scrollFrame.ScrollBar and Factory.PositionScrollBarInContainer then
+        Factory:PositionScrollBarInContainer(scrollFrame.ScrollBar, scrollBarColumn, 0)
+    end
+
+    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
+    scrollFrame:SetScrollChild(scrollChild)
+
+    local selected = {}
+    local pendingAdd = {}
+    local pendingRemove = {}
+    local bin = ns.UI_RecycleBin
+
+    local function rosterPickMapOn(map, key)
+        if not map or not key then return false end
+        return map[key] and true or false
+    end
+
+    local function syncRosterCheckboxVisual(toggle, on)
+        if not toggle then return end
+        local v = on and true or false
+        if toggle.SetChecked then toggle:SetChecked(v) end
+        if toggle.innerDot then toggle.innerDot:SetShown(v) end
+    end
+
+    local function effWidth()
+        local w = root:GetWidth()
+        if not w or w < 80 then
+            w = width or 400
+        end
+        return w
+    end
+
+    local function collectEligible()
+        local list = {}
+        for i = 1, #charactersList do
+            local ch = charactersList[i]
+            local ck = ns.UI_GetCharKey(ch)
+            if ck and (ch.isTracked ~= false) and not ns.CharacterService:IsFavoriteCharacter(addon, ck) then
+                local gid = ns.CharacterService:GetCharacterCustomSectionId(addon, ck)
+                local isLocked = ns.CharacterService:IsCharacterSectionLocked(addon, ck)
+                list[#list + 1] = { char = ch, key = ck, groupId = gid, isLocked = isLocked }
+            end
+        end
+        table.sort(list, function(a, b)
+            return WnSafeCharLine(a.char) < WnSafeCharLine(b.char)
+        end)
+        return list
+    end
+
+    local function recycleScrollChildren()
+        local ch = { scrollChild:GetChildren() }
+        for i = 1, #ch do
+            ch[i]:Hide()
+            if bin then ch[i]:SetParent(bin) else ch[i]:SetParent(nil) end
+        end
+    end
+
+    local function rebuild()
+        recycleScrollChildren()
+        local filterRaw = filterEb:GetText()
+        if type(filterRaw) ~= "string" then filterRaw = "" end
+        if issecretvalue and issecretvalue(filterRaw) then filterRaw = "" end
+        local filterLower = WnPickerTextLower(filterRaw:match("^%s*(.-)%s*$") or "")
+
+        local bw = effWidth() - 16 - scrollBarW
+        if bw < 120 then bw = 120 end
+        scrollChild:SetWidth(bw)
+        local y = 0
+        local LVL_COL_W = 44
+        local COL_GAP = 8
+
+        local function layoutRosterColumns(leftPad, rightReserve)
+            local contentRight = bw - rightReserve
+            local avail = contentRight - leftPad
+
+            local secW = math.floor(avail * 0.25)
+            if secW < 80 then secW = 80 end
+            if secW > 150 then secW = 150 end
+
+            local nameW = math.floor(avail * 0.32)
+            if nameW < 90 then nameW = 90 end
+            if nameW > 200 then nameW = 200 end
+
+            local secX = leftPad
+            local nameL = secX + secW + COL_GAP
+            local lvX = nameL + nameW + COL_GAP
+            local realmX = lvX + LVL_COL_W + COL_GAP
+            local realmW = math.max(70, contentRight - realmX)
+
+            return secX, secW, nameL, nameW, lvX, realmX, realmW, contentRight
+        end
+
+        local function paintRosterRowColumns(row, entry, leftPad, rightReserve)
+            local char = (type(entry) == "table" and entry.char) or entry
+            local secX, secW, nameL, nameW, lvX, realmX, realmW, contentRight = layoutRosterColumns(leftPad, rightReserve)
+
+            local sf = FontManager:CreateFontString(row, "body", "OVERLAY")
+            sf:SetPoint("LEFT", row, "LEFT", secX, 0)
+            sf:SetWidth(secW)
+            sf:SetJustifyH("LEFT")
+            if sf.SetMaxLines then sf:SetMaxLines(1) end
+            if sf.SetWordWrap then sf:SetWordWrap(false) end
+
+            local gid = type(entry) == "table" and entry.groupId
+            if gid and gid ~= "" then
+                local gname = (ns.CharacterService and ns.CharacterService.GetCustomSectionName and ns.CharacterService:GetCustomSectionName(addon, gid)) or gid
+                if entry.isLocked then
+                    sf:SetText(GetLockAtlasMarkup(13) .. " |cffffd700" .. gname .. "|r")
+                else
+                    sf:SetText("|cff66ccff" .. gname .. "|r")
+                end
+            else
+                local noneText = (L and L["CUSTOM_HEADER_SECTION_NONE"]) or (NONE or "None")
+                sf:SetText("|cff777777" .. noneText .. "|r")
+            end
+
+            local nm = FontManager:CreateFontString(row, "body", "OVERLAY")
+            nm:SetPoint("LEFT", row, "LEFT", nameL, 0)
+            nm:SetWidth(nameW)
+            nm:SetJustifyH("LEFT")
+            if nm.SetMaxLines then nm:SetMaxLines(1) end
+            if nm.SetWordWrap then nm:SetWordWrap(false) end
+            nm:SetText(WnColoredCharacterName(char))
+
+            local lv = FontManager:CreateFontString(row, "body", "OVERLAY")
+            lv:SetPoint("LEFT", row, "LEFT", lvX, 0)
+            lv:SetWidth(LVL_COL_W)
+            lv:SetJustifyH("CENTER")
+            lv:SetText(SearchBrightHex() .. WnRosterLevelStr(char) .. "|r")
+
+            local rf = FontManager:CreateFontString(row, "body", "OVERLAY")
+            rf:SetPoint("LEFT", row, "LEFT", realmX, 0)
+            rf:SetWidth(realmW)
+            rf:SetJustifyH("LEFT")
+            if rf.SetMaxLines then rf:SetMaxLines(1) end
+            if rf.SetWordWrap then rf:SetWordWrap(false) end
+            rf:SetText(WnRosterRealmColored(char))
+        end
+
+        local function addPlaceholderLine(text, extraH, textLeftPad)
+            local h = ROW + (extraH or 0)
+            local wrap = CreateFrame("Frame", nil, scrollChild)
+            wrap:SetSize(bw, h)
+            wrap:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -y)
+            local padL = (type(textLeftPad) == "number" and textLeftPad >= 0) and textLeftPad or 10
+            local fs = FontManager:CreateFontString(wrap, "body", "OVERLAY")
+            fs:SetPoint("LEFT", padL, 0)
+            fs:SetPoint("RIGHT", wrap, "RIGHT", -10, 0)
+            fs:SetJustifyH("LEFT")
+            ns.UI_SetTextColorRole(fs, "Muted")
+            fs:SetText(text)
+            y = y + h + 4
+        end
+
+        local function addColumnHeaderRow(leftPad, rightReserve)
+            local secX, secW, nameL, nameW, lvX, realmX, realmW, contentRight = layoutRosterColumns(leftPad, rightReserve)
+            local hdrH = 20
+            local hf = CreateFrame("Frame", nil, scrollChild)
+            hf:SetSize(bw, hdrH)
+            hf:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -y)
+
+            local c1 = FontManager:CreateFontString(hf, "small", "OVERLAY")
+            c1:SetPoint("LEFT", hf, "LEFT", secX, 0)
+            c1:SetWidth(secW)
+            c1:SetJustifyH("LEFT")
+            ns.UI_SetTextColorRole(c1, "Normal")
+            c1:SetText((L and L["CUSTOM_HEADER_COL_SECTION"]) or "Section")
+
+            local c2 = FontManager:CreateFontString(hf, "small", "OVERLAY")
+            c2:SetPoint("LEFT", hf, "LEFT", nameL, 0)
+            c2:SetWidth(nameW)
+            c2:SetJustifyH("LEFT")
+            ns.UI_SetTextColorRole(c2, "Normal")
+            c2:SetText((L and L["CUSTOM_HEADER_COL_CHARACTER"]) or "Character")
+
+            local c3 = FontManager:CreateFontString(hf, "small", "OVERLAY")
+            c3:SetPoint("LEFT", hf, "LEFT", lvX, 0)
+            c3:SetWidth(LVL_COL_W)
+            c3:SetJustifyH("CENTER")
+            ns.UI_SetTextColorRole(c3, "Normal")
+            c3:SetText((L and L["CUSTOM_HEADER_COL_LEVEL"]) or "Level")
+
+            local c4 = FontManager:CreateFontString(hf, "small", "OVERLAY")
+            c4:SetPoint("LEFT", hf, "LEFT", realmX, 0)
+            c4:SetWidth(realmW)
+            c4:SetJustifyH("LEFT")
+            ns.UI_SetTextColorRole(c4, "Normal")
+            c4:SetText((L and L["CUSTOM_HEADER_COL_REALM"]) or "Realm")
+
+            y = y + hdrH + 4
+        end
+
+        local function addSectionTitle(txt)
+            local bar = CreateFrame("Frame", nil, scrollChild)
+            bar:SetSize(bw, SECTION_BAR_H)
+            bar:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -y)
+            if ns.UI_ApplyVisuals then
+                local barBg, barBorder = RosterSectionBarChrome()
+                ns.UI_ApplyVisuals(bar, barBg, barBorder)
+            end
+            local fs = FontManager:CreateFontString(bar, "tabSubtitle", "OVERLAY")
+            fs:SetPoint("LEFT", 10, 0)
+            fs:SetPoint("RIGHT", bar, "RIGHT", -10, 0)
+            fs:SetJustifyH("LEFT")
+            fs:SetText(txt)
+            ns.UI_SetTextColorRole(fs, "Bright")
+            y = y + SECTION_BAR_H + SECTION_AFTER
+        end
+
+        if not groupId then
+            local all = collectEligible()
+            addColumnHeaderRow(ROSTER_CONTENT_LEFT, ROSTER_ROW_RIGHT_PAD)
+            local shown = 0
+            for i = 1, #all do
+                local entry = all[i]
+                if WnPickerLineMatchesChar(entry.char, filterLower) then
+                    shown = shown + 1
+                    local ck = entry.key
+                    local isLocked = entry.isLocked
+                    local row = Factory:CreateButton(scrollChild, bw, ROW, true)
+                    row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -y)
+                    if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(row, { 0.08, 0.08, 0.10, 0 }, { 0, 0, 0, 0 }) end
+                    if Factory.ApplyHighlight and not isLocked then Factory:ApplyHighlight(row) end
+                    local cb = ns.UI_CreateThemedCheckbox and ns.UI_CreateThemedCheckbox(row, rosterPickMapOn(selected, ck))
+                    if cb then
+                        cb:SetPoint("LEFT", 8, 0)
+                        syncRosterCheckboxVisual(cb, rosterPickMapOn(selected, ck))
+                        if isLocked then
+                            if cb.Disable then cb:Disable() end
+                            if cb.SetAlpha then cb:SetAlpha(0.35) end
+                        else
+                            cb:SetScript("OnClick", function(self)
+                                local v = self:GetChecked() and true or false
+                                syncRosterCheckboxVisual(self, v)
+                                selected[ck] = v and true or nil
+                            end)
+                        end
+                    end
+                    paintRosterRowColumns(row, entry, ROSTER_CONTENT_LEFT, ROSTER_ROW_RIGHT_PAD)
+                    if isLocked then
+                        local gname = (entry.groupId and ns.CharacterService and ns.CharacterService.GetCustomSectionName and ns.CharacterService:GetCustomSectionName(addon, entry.groupId)) or entry.groupId or ""
+                        local function showLockedTip(f)
+                            GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+                            GameTooltip:SetText((L and L["CUSTOM_HEADER_ROW_LOCKED_TITLE"]) or "Section Locked", 1, 0.82, 0)
+                            GameTooltip:AddLine(string.format((L and L["CUSTOM_HEADER_ROW_LOCKED_TOOLTIP"]) or "Character is locked in section '%s'. Unlock that section first to move.", gname), 0.85, 0.85, 0.9, true)
+                            GameTooltip:Show()
+                        end
+                        row:SetScript("OnEnter", showLockedTip)
+                        row:SetScript("OnLeave", GameTooltip_Hide)
+                        if cb then
+                            cb:SetScript("OnEnter", showLockedTip)
+                            cb:SetScript("OnLeave", GameTooltip_Hide)
+                        end
+                    else
+                        local tipText = entry.groupId and entry.groupId ~= "" and string.format((L and L["CUSTOM_HEADER_ROW_WILL_MOVE"]) or "Will move from '%s'", (ns.CharacterService and ns.CharacterService.GetCustomSectionName and ns.CharacterService:GetCustomSectionName(addon, entry.groupId)) or entry.groupId)
+                        if tipText then
+                            row:SetScript("OnEnter", function(f)
+                                GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+                                GameTooltip:SetText(tipText, 1, 0.82, 0.2)
+                                GameTooltip:Show()
+                            end)
+                            row:SetScript("OnLeave", GameTooltip_Hide)
+                        end
+                        row:SetScript("OnClick", function()
+                            if not cb then return end
+                            local v = not (cb:GetChecked() and true or false)
+                            syncRosterCheckboxVisual(cb, v)
+                            selected[ck] = v and true or nil
+                        end)
+                    end
+                    y = y + ROW
+                end
+            end
+            if shown == 0 then
+                addPlaceholderLine((L and L["CUSTOM_HEADER_PICKER_EMPTY"]) or "No matching characters.", 0, ROSTER_CONTENT_LEFT)
+            end
+        else
+            local members, candidates = WnBuildCustomHeaderManageBuckets(addon, profile, charactersList, groupId)
+            local isCurrentSecLocked = ns.CharacterService and ns.CharacterService.IsCustomSectionLocked and ns.CharacterService:IsCustomSectionLocked(addon, groupId)
+            addSectionTitle(((L and L["CUSTOM_HEADER_MENU_IN_HEADER"]) or "In this section") .. (isCurrentSecLocked and (" " .. GetLockAtlasMarkup(14)) or ""))
+            addColumnHeaderRow(ROSTER_CONTENT_LEFT, ROSTER_ROW_RIGHT_PAD)
+            local memShown = 0
+            for i = 1, #members do
+                local entry = members[i]
+                if WnPickerLineMatchesChar(entry.char, filterLower) then
+                    memShown = memShown + 1
+                    local row = Factory:CreateButton(scrollChild, bw, ROW, true)
+                    row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -y)
+                    if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(row, { 0.08, 0.08, 0.10, 0 }, { 0, 0, 0, 0 }) end
+                    if Factory.ApplyHighlight and not isCurrentSecLocked then Factory:ApplyHighlight(row) end
+                    local ck = entry.key
+                    local memChecked = not rosterPickMapOn(pendingRemove, ck)
+                    local rmCb = ns.UI_CreateThemedCheckbox and ns.UI_CreateThemedCheckbox(row, memChecked)
+                    if rmCb then
+                        rmCb:SetPoint("LEFT", 8, 0)
+                        syncRosterCheckboxVisual(rmCb, memChecked)
+                        if isCurrentSecLocked then
+                            if rmCb.Disable then rmCb:Disable() end
+                            if rmCb.SetAlpha then rmCb:SetAlpha(0.35) end
+                        else
+                            rmCb:SetScript("OnClick", function(self)
+                                local v = self:GetChecked() and true or false
+                                syncRosterCheckboxVisual(self, v)
+                                if v then
+                                    pendingRemove[ck] = nil
+                                else
+                                    pendingRemove[ck] = true
+                                end
+                            end)
+                        end
+                    end
+                    paintRosterRowColumns(row, entry, ROSTER_CONTENT_LEFT, ROSTER_ROW_RIGHT_PAD)
+                    if isCurrentSecLocked then
+                        local function showSecLockTip(f)
+                            GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+                            GameTooltip:SetText((L and L["CUSTOM_HEADER_ROW_LOCKED_TITLE"]) or "Section Locked", 1, 0.82, 0)
+                            GameTooltip:AddLine((L and L["CUSTOM_HEADER_SECTION_LOCKED_REMOVE_TOOLTIP"]) or "This section is locked. Unlock header to remove members.", 0.85, 0.85, 0.9, true)
+                            GameTooltip:Show()
+                        end
+                        row:SetScript("OnEnter", showSecLockTip)
+                        row:SetScript("OnLeave", GameTooltip_Hide)
+                        if rmCb then
+                            rmCb:SetScript("OnEnter", showSecLockTip)
+                            rmCb:SetScript("OnLeave", GameTooltip_Hide)
+                        end
+                    else
+                        row:SetScript("OnClick", function()
+                            if not rmCb then return end
+                            local v = not (rmCb:GetChecked() and true or false)
+                            syncRosterCheckboxVisual(rmCb, v)
+                            if v then
+                                pendingRemove[ck] = nil
+                            else
+                                pendingRemove[ck] = true
+                            end
+                        end)
+                    end
+                    y = y + ROW
+                end
+            end
+            if memShown == 0 then
+                addPlaceholderLine((L and L["CUSTOM_HEADER_MENU_NO_MEMBERS"]) or "No characters yet.", 2, ROSTER_CONTENT_LEFT)
+            end
+            y = y + 4
+            addSectionTitle((L and L["CUSTOM_HEADER_MENU_ADD_TO_HEADER"]) or "Add characters")
+            addColumnHeaderRow(ROSTER_CONTENT_LEFT, ROSTER_ROW_RIGHT_PAD)
+            local candShown = 0
+            for i = 1, #candidates do
+                local entry = candidates[i]
+                if WnPickerLineMatchesChar(entry.char, filterLower) then
+                    candShown = candShown + 1
+                    local ck = entry.key
+                    local isLocked = entry.isLocked
+                    local row = Factory:CreateButton(scrollChild, bw, ROW, true)
+                    row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -y)
+                    if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(row, { 0.08, 0.08, 0.10, 0 }, { 0, 0, 0, 0 }) end
+                    if Factory.ApplyHighlight and not isLocked then Factory:ApplyHighlight(row) end
+                    local cb = ns.UI_CreateThemedCheckbox and ns.UI_CreateThemedCheckbox(row, rosterPickMapOn(pendingAdd, ck))
+                    if cb then
+                        cb:SetPoint("LEFT", 8, 0)
+                        syncRosterCheckboxVisual(cb, rosterPickMapOn(pendingAdd, ck))
+                        if isLocked then
+                            if cb.Disable then cb:Disable() end
+                            if cb.SetAlpha then cb:SetAlpha(0.35) end
+                        else
+                            cb:SetScript("OnClick", function(self)
+                                local v = self:GetChecked() and true or false
+                                syncRosterCheckboxVisual(self, v)
+                                pendingAdd[ck] = v and true or nil
+                            end)
+                        end
+                    end
+                    paintRosterRowColumns(row, entry, ROSTER_CONTENT_LEFT, ROSTER_ROW_RIGHT_PAD)
+                    if isLocked then
+                        local gname = (entry.groupId and ns.CharacterService and ns.CharacterService.GetCustomSectionName and ns.CharacterService:GetCustomSectionName(addon, entry.groupId)) or entry.groupId or ""
+                        local function showLockedTip(f)
+                            GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+                            GameTooltip:SetText((L and L["CUSTOM_HEADER_ROW_LOCKED_TITLE"]) or "Section Locked", 1, 0.82, 0)
+                            GameTooltip:AddLine(string.format((L and L["CUSTOM_HEADER_ROW_LOCKED_TOOLTIP"]) or "Character is locked in section '%s'. Unlock that section first to move.", gname), 0.85, 0.85, 0.9, true)
+                            GameTooltip:Show()
+                        end
+                        row:SetScript("OnEnter", showLockedTip)
+                        row:SetScript("OnLeave", GameTooltip_Hide)
+                        if cb then
+                            cb:SetScript("OnEnter", showLockedTip)
+                            cb:SetScript("OnLeave", GameTooltip_Hide)
+                        end
+                    else
+                        local tipText = entry.groupId and entry.groupId ~= "" and string.format((L and L["CUSTOM_HEADER_ROW_WILL_MOVE"]) or "Will move from '%s'", (ns.CharacterService and ns.CharacterService.GetCustomSectionName and ns.CharacterService:GetCustomSectionName(addon, entry.groupId)) or entry.groupId)
+                        if tipText then
+                            row:SetScript("OnEnter", function(f)
+                                GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+                                GameTooltip:SetText(tipText, 1, 0.82, 0.2)
+                                GameTooltip:Show()
+                            end)
+                            row:SetScript("OnLeave", GameTooltip_Hide)
+                        end
+                        row:SetScript("OnClick", function()
+                            if not cb then return end
+                            local v = not (cb:GetChecked() and true or false)
+                            syncRosterCheckboxVisual(cb, v)
+                            pendingAdd[ck] = v and true or nil
+                        end)
+                    end
+                    y = y + ROW
+                end
+            end
+            if candShown == 0 then
+                addPlaceholderLine((L and L["CUSTOM_HEADER_MENU_NO_CANDIDATES"]) or "No eligible characters.", 0, ROSTER_CONTENT_LEFT)
+            end
+        end
+
+        scrollChild:SetHeight(math.max(y, 1))
+        scrollFrame:SetVerticalScroll(0)
+        if Factory.UpdateScrollBarVisibility then Factory:UpdateScrollBarVisibility(scrollFrame) end
+    end
+
+    filterEb:SetScript("OnTextChanged", function()
+        rebuild()
+    end)
+    root:SetScript("OnSizeChanged", function()
+        rebuild()
+    end)
+    rebuild()
+
+    return {
+        frame = root,
+        filterEdit = filterEb,
+        Rebuild = rebuild,
+        GetSelectedKeys = function()
+            local keys = {}
+            if groupId then return keys end
+            for ck, on in pairs(selected) do
+                if on then keys[#keys + 1] = ck end
+            end
+            return keys
+        end,
+        ApplyPendingAdds = function()
+            if not groupId then return 0 end
+            local n = 0
+            local function rosterAssignKey(ck)
+                if not ck then return ck end
+                if ns.Utilities and ns.Utilities.GetCanonicalCharacterKey then
+                    return ns.Utilities:GetCanonicalCharacterKey(ck) or ck
+                end
+                return ck
+            end
+            for ck, on in pairs(pendingRemove) do
+                if on then
+                    local k = rosterAssignKey(ck)
+                    if ns.CharacterService:SetCharacterCustomSection(addon, k, nil, true) then
+                        n = n + 1
+                    end
+                end
+            end
+            wipe(pendingRemove)
+            for ck, on in pairs(pendingAdd) do
+                if on then
+                    local k = rosterAssignKey(ck)
+                    if ns.CharacterService:SetCharacterCustomSection(addon, k, groupId, true) then
+                        n = n + 1
+                    end
+                end
+            end
+            wipe(pendingAdd)
+            if n > 0 and addon.SendMessage then
+                addon:SendMessage(E.CHARACTER_UPDATED, { charKey = nil, dataType = "customSection" })
+            end
+            rebuild()
+            return n
+        end,
+        ClearSelection = function()
+            wipe(selected)
+            if groupId then
+                wipe(pendingAdd)
+                wipe(pendingRemove)
+            end
+            rebuild()
+        end,
+    }
+end
+
+--- [+] on header row: open same modal window as new section (addon:OpenCustomHeaderRosterWindow).
+function ns.UI_ShowCustomHeaderMembersMenu(anchorFrame, groupId, profile, charactersList)
+    if not groupId then return end
+    local addon = ns.ArtisanNexus
+    if not addon or not addon.OpenCustomHeaderRosterWindow then return end
+    local function open()
+        addon:OpenCustomHeaderRosterWindow(groupId)
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0, open)
+    else
+        open()
+    end
+end
+
+-- CUSTOM HEADER DECORATOR (Characters / Professions / PvE single source)
+-- Defined in Characters tab (profile.characterCustomGroups), consumed identically
+-- in related tabs. Layout: [chevron] [icon] [gold-star] [title] ... [add-btn] [count]
+
+-- Migrate legacy per-tab field names so a header decorated by an older code path
+-- (e.g. ProfessionsUI's `_wnProfSectionGoldStar`/`_wnProfSectionCount`) reuses the
+-- same widgets, preventing duplicate stars/counts when re-decorated by the helper.
+local function MigrateLegacyCustomHeaderFields(headerFrame)
+    if not headerFrame then return end
+    if headerFrame._wnProfSectionGoldStar and not headerFrame._wnCustomHeaderGoldStarBtn then
+        headerFrame._wnCustomHeaderGoldStarBtn = headerFrame._wnProfSectionGoldStar
+        headerFrame._wnProfSectionGoldStar = nil
+    end
+    if headerFrame._wnProfSectionCount and not headerFrame._wnCustomHeaderCount then
+        headerFrame._wnCustomHeaderCount = headerFrame._wnProfSectionCount
+        headerFrame._wnProfSectionCount = nil
+    end
+end
+
+--- Decorate a CreateCollapsibleHeader frame with the unified Custom Header chrome.
+--- Idempotent: re-attaches existing widgets on subsequent calls (safe across redraws).
+---
+--- opts (table):
+---   groupId          : string  custom header id (required)
+---   memberCount      : number  count badge value (defaults to 0)
+---   addon            : table   WarbandNexus addon ref
+---   profile          : table   addon.db.profile
+---   expandIcon       : Texture chevron from CreateCollapsibleHeader (return #2)
+---   iconFrame        : Texture section atlas icon from CreateCollapsibleHeader (return #3)
+---   headerText       : FontString title from CreateCollapsibleHeader (return #4)
+---   includeAddButton : boolean show the [+] roster manage button (Character tab only)
+---   addButtonRoster  : table   character list passed to picker (when includeAddButton)
+---   refreshTab       : string  optional tab payload for WN_UI_MAIN_REFRESH_REQUESTED on toggle
+---   addBtnSize       : number  optional override for + button size (default 16)
+---   allowSectionHighlightToggle : boolean (default true). When false, no gold-star control (PvE/Professions: highlight only on Character tab).
+-- Fixed right-edge columns shared by every section header (built-in and custom) so gold / arrows /
+-- add / count line up top-to-bottom. Right to left the order is: [count] [+ add] [down][up arrows]
+-- [gold]. The add button and reorder arrows only appear on custom sections; built-in headers
+-- (Favorites / Character / Untracked) leave those two slots empty but still place count + gold on the
+-- exact same columns, so every header reads as aligned vertical columns. The variable-width gold is
+-- the LEFTMOST column and is right-anchored (grows leftward into the title), so no gold amount can
+-- shove the count / add / arrow columns out of alignment.
+local SECTION_COUNT_RIGHT_INSET = 12    -- member-count badge, rightmost
+local SECTION_LOCK_RIGHT_INSET  = 38    -- [lock] button (left of count)
+local SECTION_ADD_RIGHT_INSET   = 62    -- [+] manage-roster button (left of lock)
+local SECTION_ARROW_RIGHT_INSET = 90    -- down-arrow right edge (up-arrow sits to its left)
+-- Gold right edge. Must clear the arrow column (up-arrow left edge ~= ARROW_INSET + 43) with a
+-- comfortable gap so the money's copper coin never crowds the arrows: 150 - 133 = 17px, in line with
+-- the other inter-column gaps.
+local SECTION_GOLD_RIGHT_INSET  = 150   -- gold total right edge (clears the arrow column + gap)
+
+--- Attach / refresh the per-section gold total on a collapsible header, right-aligned to the shared
+--- gold column. Returns the FontString (hidden when the setting is off or there is nothing to show).
+---@param headerFrame Frame
+---@param copper number|nil Summed gold in copper; nil or 0 hides the label
+---@return FontString|nil
+function ns.UI_SetSectionHeaderGoldTotal(headerFrame, copper)
+    if not headerFrame then return nil end
+    local fs = headerFrame._wnSectionGoldTotalFs
+    local addon = ns.ArtisanNexus
+    local profile = addon and addon.db and addon.db.profile
+    local enabled = not profile or profile.showSectionGoldTotal ~= false
+    local amount = tonumber(copper) or 0
+    if not enabled or amount <= 0 then
+        if fs then fs:Hide() end
+        return fs
+    end
+    if not fs then
+        fs = FontManager:CreateFontString(headerFrame, FontManager:GetFontRole("tabSubtitle"), "OVERLAY")
+        headerFrame._wnSectionGoldTotalFs = fs
+    end
+    fs:SetJustifyH("RIGHT")
+    -- FormatMoney emits its own |cff colours plus coin icons; do not re-colour it.
+    fs:SetText((ns.UI_FormatMoney and ns.UI_FormatMoney(amount, 12)) or tostring(amount))
+    -- Fixed column: identical anchor on every header so the amounts line up top-to-bottom.
+    fs:ClearAllPoints()
+    fs:SetPoint("RIGHT", headerFrame, "RIGHT", -SECTION_GOLD_RIGHT_INSET, 0)
+    fs:Show()
+    return fs
+end
+
+function ns.UI_DecorateCustomHeader(headerFrame, opts)
+    if not headerFrame or type(opts) ~= "table" then return end
+    local groupId = opts.groupId
+    if not groupId or groupId == "" then return end
+
+    MigrateLegacyCustomHeaderFields(headerFrame)
+
+    local addon = opts.addon or ns.ArtisanNexus
+    local profile = opts.profile or (addon and addon.db and addon.db.profile)
+    if not profile then return end
+
+    local FormatNumber = ns.UI_FormatNumber or function(n) return tostring(n or 0) end
+    local CharacterService = ns.CharacterService
+
+    local headerHeight = headerFrame.GetHeight and headerFrame:GetHeight() or 0
+    if headerHeight <= 0 then headerHeight = 36 end
+    local addBtnSize = tonumber(opts.addBtnSize) or 16
+    local starSize = math.max(16, math.min(22, headerHeight - 10))
+
+    -- Count badge (right edge baseline; siblings re-anchor relative to this).
+    local countFs = headerFrame._wnCustomHeaderCount
+    if not countFs then
+        -- Same role as the built-in Favorites/Character/Untracked counts, so every section's badge
+        -- is one consistent size.
+        countFs = FontManager:CreateFontString(headerFrame, FontManager:GetFontRole("sectionHeaderCount"), "OVERLAY")
+        headerFrame._wnCustomHeaderCount = countFs
+    end
+    countFs:SetJustifyH("RIGHT")
+    countFs:SetText("|cffaaaaaa" .. FormatNumber(opts.memberCount or 0) .. "|r")
+    countFs:Show()
+
+    -- [+] manage roster button (left of count). Character tab only.
+    local addBtn = headerFrame._wnCustomHeaderAddBtn
+    if opts.includeAddButton then
+        if not addBtn and ns.UI and ns.UI.Factory and ns.UI.Factory.CreateButton then
+            addBtn = ns.UI.Factory:CreateButton(headerFrame, addBtnSize, addBtnSize, true)
+            headerFrame._wnCustomHeaderAddBtn = addBtn
+            addBtn:SetFrameLevel((headerFrame:GetFrameLevel() or 2) + 3)
+            local okA = false
+            if addBtn.SetNormalAtlas then
+                okA = pcall(function()
+                    addBtn:SetNormalAtlas("communities-icon-addgroupplus")
+                end)
+            end
+            if not okA then
+                local gt = addBtn.GetNormalTexture and addBtn:GetNormalTexture()
+                if gt then
+                    gt:SetTexture("Interface\\Icons\\INV_Misc_GroupLooking")
+                    gt:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                end
+            end
+        end
+        if addBtn then
+            addBtn:SetSize(addBtnSize, addBtnSize)
+            local rosterChars = opts.addButtonRoster
+            if (not rosterChars) and addon and addon.GetAllCharacters then
+                rosterChars = addon:GetAllCharacters() or {}
+            end
+            local profileRef = profile
+            local localGid = groupId
+            addBtn:SetScript("OnEnter", function(b)
+                GameTooltip:SetOwner(b, "ANCHOR_LEFT")
+                GameTooltip:SetText((ns.L and ns.L["CUSTOM_HEADER_ROW_ADD_TOOLTIP"]) or "Add characters", 1, 1, 1)
+                GameTooltip:AddLine((ns.L and ns.L["CUSTOM_HEADER_ROW_ADD_TOOLTIP_BODY"]) or "Pick tracked characters to place in this header. Remove them here or via the row note icon.", 0.85, 0.85, 0.9, true)
+                GameTooltip:Show()
+            end)
+            addBtn:SetScript("OnLeave", GameTooltip_Hide)
+            addBtn:SetScript("OnClick", function(b)
+                if ns.UI_ShowCustomHeaderMembersMenu then
+                    ns.UI_ShowCustomHeaderMembersMenu(b, localGid, profileRef, rosterChars)
+                end
+            end)
+            addBtn:Show()
+        end
+    elseif addBtn then
+        addBtn:Hide()
+    end
+
+    -- [lock] toggle button (left of count, right of +). Character tab only.
+    local lockBtn = headerFrame._wnCustomHeaderLockBtn
+    local allowLockToggle = (opts.allowLockToggle ~= false) and (opts.includeAddButton == true)
+    if allowLockToggle and ns.UI and ns.UI.Factory and ns.UI.Factory.CreateButton then
+        if not lockBtn then
+            lockBtn = ns.UI.Factory:CreateButton(headerFrame, addBtnSize, addBtnSize, true)
+            headerFrame._wnCustomHeaderLockBtn = lockBtn
+            lockBtn:SetFrameLevel((headerFrame:GetFrameLevel() or 2) + 3)
+            if ns.UI.Factory.ApplyIconOnlyButtonChrome then ns.UI.Factory:ApplyIconOnlyButtonChrome(lockBtn) end
+        end
+        if lockBtn then
+            lockBtn:SetSize(addBtnSize, addBtnSize)
+            local isLocked = CharacterService and CharacterService.IsCustomSectionLocked
+                and CharacterService:IsCustomSectionLocked(addon, groupId)
+            local okA = false
+            if lockBtn.SetNormalAtlas then
+                local lockAtlas = ns.UI_GetIconAtlas("lock") or "communities-icon-lock"
+                okA = pcall(function()
+                    lockBtn:SetNormalAtlas(lockAtlas)
+                    lockBtn:SetHighlightAtlas(lockAtlas)
+                end)
+            end
+            local nt = lockBtn.GetNormalTexture and lockBtn:GetNormalTexture()
+            if not okA or not nt or not nt:GetTexture() then
+                lockBtn:SetNormalTexture("Interface\\Common\\LockIcon")
+                lockBtn:SetHighlightTexture("Interface\\Common\\LockIcon")
+                nt = lockBtn.GetNormalTexture and lockBtn:GetNormalTexture()
+            end
+            if nt then
+                if isLocked then
+                    nt:SetDesaturated(false)
+                    nt:SetVertexColor(1, 0.82, 0.2, 1)
+                    nt:SetAlpha(1)
+                else
+                    -- Unlocked = inactive: monochrome (white dark / black light) at reduced alpha, no grey desaturation.
+                    local v = ns.UI_GetMonochromeIconVertex(0.55)
+                    nt:SetDesaturated(false)
+                    nt:SetVertexColor(v[1], v[2], v[3], v[4])
+                    nt:SetAlpha(1)
+                end
+            end
+            lockBtn:SetScript("OnEnter", function(b)
+                GameTooltip:SetOwner(b, "ANCHOR_LEFT")
+                if isLocked then
+                    GameTooltip:SetText((ns.L and ns.L["CUSTOM_HEADER_UNLOCK_TOOLTIP_TITLE"]) or "Unlock section", 1, 1, 1)
+                    GameTooltip:AddLine((ns.L and ns.L["CUSTOM_HEADER_UNLOCK_TOOLTIP_DESC"]) or "This section is locked against accidental character moves. Click to unlock.", 0.85, 0.85, 0.9, true)
+                else
+                    GameTooltip:SetText((ns.L and ns.L["CUSTOM_HEADER_LOCK_TOOLTIP_TITLE"]) or "Lock section", 1, 1, 1)
+                    GameTooltip:AddLine((ns.L and ns.L["CUSTOM_HEADER_LOCK_TOOLTIP_DESC"]) or "Lock this section to protect its characters from being moved to other sections.", 0.85, 0.85, 0.9, true)
+                end
+                GameTooltip:Show()
+            end)
+            lockBtn:SetScript("OnLeave", GameTooltip_Hide)
+            lockBtn:SetScript("OnClick", function()
+                if CharacterService and CharacterService.ToggleCustomSectionLock then
+                    CharacterService:ToggleCustomSectionLock(addon, groupId)
+                    if addon.SendMessage and E then
+                        addon:SendMessage(E.UI_MAIN_REFRESH_REQUESTED, { tab = opts.refreshTab, skipCooldown = true })
+                    end
+                end
+            end)
+            lockBtn:Show()
+        end
+    elseif lockBtn then
+        lockBtn:Hide()
+    end
+
+    -- Section gold total (left of the [+] button). Last recorded value per character, not live.
+    local goldFs = ns.UI_SetSectionHeaderGoldTotal and ns.UI_SetSectionHeaderGoldTotal(headerFrame, opts.goldTotal)
+
+    -- Section order arrows. Only meaningful while the tab sort is "manual" — that is the one mode
+    -- BuildOrderedCustomCharacterGroups reads the profile array order in.
+    local upBtn, downBtn = headerFrame._wnCustomHeaderUpBtn, headerFrame._wnCustomHeaderDownBtn
+    if opts.showReorder and ns.UI and ns.UI.Factory and ns.UI.Factory.CreateButton then
+        local arrowSize = 20
+        local secIdx = tonumber(opts.sectionIndex) or 0
+        local secCount = tonumber(opts.sectionCount) or 0
+        local function EnsureArrow(existing, atlas, delta, enabled, tipKey, tipFallback)
+            local btn = existing
+            if not btn then
+                btn = ns.UI.Factory:CreateButton(headerFrame, arrowSize, arrowSize, true)
+                if ns.UI.Factory.ApplyIconOnlyButtonChrome then ns.UI.Factory:ApplyIconOnlyButtonChrome(btn) end
+                btn:SetFrameLevel((headerFrame:GetFrameLevel() or 2) + 3)
+                btn:EnableMouse(true)
+            end
+            btn:SetSize(arrowSize, arrowSize)
+            -- Same crisp Blizzard atlas the character-row reorder arrows use (the faint chevron TGAs
+            -- barely showed). Disabled ends use the monochrome disabled tint instead of vanishing.
+            btn:SetNormalAtlas(atlas)
+            btn:SetHighlightAtlas(atlas)
+            local nt = btn.GetNormalTexture and btn:GetNormalTexture()
+            if nt then
+                nt:SetDesaturated(false)
+                if enabled then
+                    nt:SetVertexColor(1, 1, 1, 1)
+                else
+                    local v = ns.UI_GetMonochromeIconVertex(0.35)
+                    nt:SetVertexColor(v[1], v[2], v[3], v[4])
+                end
+                nt:SetAlpha(1)
+            end
+            btn:SetScript("OnEnter", function(b)
+                GameTooltip:SetOwner(b, "ANCHOR_LEFT")
+                GameTooltip:SetText((ns.L and ns.L[tipKey]) or tipFallback, 1, 1, 1)
+                GameTooltip:Show()
+            end)
+            btn:SetScript("OnLeave", GameTooltip_Hide)
+            btn:SetScript("OnClick", function()
+                if not enabled then return end
+                if CharacterService and CharacterService.MoveCustomCharacterSection
+                    and CharacterService:MoveCustomCharacterSection(addon, groupId, delta) then
+                    if addon.SendMessage and E then
+                        addon:SendMessage(E.UI_MAIN_REFRESH_REQUESTED, { tab = opts.refreshTab, skipCooldown = true })
+                    end
+                end
+            end)
+            btn:Show()
+            return btn
+        end
+        -- Grey out (and no-op) the arrow that would run off the ends of the list.
+        local upEnabled = (secIdx == 0) or (secIdx > 1)
+        local downEnabled = (secCount == 0) or (secIdx < secCount)
+        upBtn = EnsureArrow(upBtn, "housing-floor-arrow-up-default", -1, upEnabled,
+            "CUSTOM_HEADER_MOVE_UP", "Move section up")
+        downBtn = EnsureArrow(downBtn, "housing-floor-arrow-down-default", 1, downEnabled,
+            "CUSTOM_HEADER_MOVE_DOWN", "Move section down")
+        headerFrame._wnCustomHeaderUpBtn = upBtn
+        headerFrame._wnCustomHeaderDownBtn = downBtn
+    else
+        if upBtn then upBtn:Hide() end
+        if downBtn then downBtn:Hide() end
+    end
+
+    local allowSectionHighlightToggle = opts.allowSectionHighlightToggle ~= false
+
+    -- Gold-star highlight toggle (left of title, after section icon). Character tab only when allowSectionHighlightToggle.
+    local isHighlighted = CharacterService and CharacterService.IsProfileCustomSectionHighlighted
+        and CharacterService:IsProfileCustomSectionHighlighted(profile, groupId)
+    local goldStar = headerFrame._wnCustomHeaderGoldStarBtn
+    if not allowSectionHighlightToggle then
+        if goldStar then
+            goldStar:Hide()
+            goldStar:SetScript("OnClick", nil)
+            goldStar:EnableMouse(false)
+        end
+    elseif not goldStar and ns.UI_CreateFavoriteButton then
+        goldStar = ns.UI_CreateFavoriteButton(
+            headerFrame,
+            groupId,
+            isHighlighted,
+            starSize,
+            "RIGHT",
+            -48,
+            0,
+            function()
+                local addonRef = opts.addon or ns.ArtisanNexus
+                if not addonRef or not addonRef.db or not addonRef.db.profile then
+                    return false
+                end
+                local now = CharacterService and CharacterService.ToggleFavoriteCustomHeaderHighlight
+                    and CharacterService:ToggleFavoriteCustomHeaderHighlight(addonRef, groupId)
+                if now == nil then
+                    return false
+                end
+                if addonRef.SendMessage then
+                    if opts.refreshTab and opts.refreshTab ~= "" then
+                        addonRef:SendMessage(E.UI_MAIN_REFRESH_REQUESTED, { tab = opts.refreshTab, skipCooldown = true })
+                    else
+                        addonRef:SendMessage(E.UI_MAIN_REFRESH_REQUESTED, { skipCooldown = true })
+                    end
+                end
+                return now
+            end
+        )
+        headerFrame._wnCustomHeaderGoldStarBtn = goldStar
+        if goldStar and goldStar.SetFrameLevel then
+            goldStar:SetFrameLevel((headerFrame:GetFrameLevel() or 2) + 4)
+        end
+    end
+    if allowSectionHighlightToggle and goldStar then
+        goldStar:EnableMouse(true)
+        goldStar.charKey = groupId
+        goldStar.isFavorite = isHighlighted and true or false
+        if goldStar.icon and ns.UI_StyleFavoriteIcon then
+            ns.UI_StyleFavoriteIcon(goldStar.icon, isHighlighted)
+        end
+        goldStar:SetSize(starSize, starSize)
+        if goldStar.icon then
+            local iconSz = starSize * 0.65
+            goldStar.icon:SetSize(iconSz, iconSz)
+        end
+        goldStar:SetScript("OnEnter", function(b)
+            GameTooltip:SetOwner(b, "ANCHOR_LEFT")
+            GameTooltip:SetText((ns.L and ns.L["CUSTOM_HEADER_GOLD_STAR_TITLE"]) or "Gold section highlight", 1, 1, 1)
+            GameTooltip:AddLine((ns.L and ns.L["CUSTOM_HEADER_GOLD_STAR_BODY"]) or "Click to give this section the same gold bar style as Favorites. You can highlight several sections. Click again to turn off for this section.", 0.85, 0.85, 0.9, true)
+            GameTooltip:Show()
+        end)
+        goldStar:SetScript("OnLeave", GameTooltip_Hide)
+        goldStar:Show()
+    end
+
+    -- ===== UNIFIED ANCHOR LAYOUT =====
+    -- Fixed right-edge columns, right -> left: [count] [+ add] [down][up arrows] [gold] .... [title]
+    -- Each element type sits at the SAME inset on every header, so count / add / arrows / gold read as
+    -- aligned vertical columns. Every control is anchored to the header's right edge at its own fixed
+    -- inset (never relative to a sibling), so a missing + / arrows on the built-in headers leaves an
+    -- empty slot instead of shifting the neighbours. The variable-width gold is the leftmost column and
+    -- grows leftward into the title (anchored by UI_SetSectionHeaderGoldTotal at SECTION_GOLD_RIGHT_INSET).
+    countFs:ClearAllPoints()
+    countFs:SetPoint("RIGHT", headerFrame, "RIGHT", -SECTION_COUNT_RIGHT_INSET, 0)
+    if lockBtn and lockBtn:IsShown() then
+        lockBtn:ClearAllPoints()
+        lockBtn:SetPoint("RIGHT", headerFrame, "RIGHT", -SECTION_LOCK_RIGHT_INSET, 0)
+    end
+    if addBtn and addBtn:IsShown() then
+        addBtn:ClearAllPoints()
+        addBtn:SetPoint("RIGHT", headerFrame, "RIGHT", -SECTION_ADD_RIGHT_INSET, 0)
+    end
+    if downBtn and downBtn:IsShown() and upBtn and upBtn:IsShown() then
+        downBtn:ClearAllPoints()
+        downBtn:SetPoint("RIGHT", headerFrame, "RIGHT", -SECTION_ARROW_RIGHT_INSET, 0)
+        upBtn:ClearAllPoints()
+        upBtn:SetPoint("RIGHT", downBtn, "LEFT", -3, 0)
+    end
+    -- Leftmost occupied column governs where the title must stop. Insets grow gold > arrows > add >
+    -- lock > count, so gold is always leftmost when shown, then arrows, then add, lock, then count.
+    local leftmost = countFs
+    if lockBtn and lockBtn:IsShown() then leftmost = lockBtn end
+    if addBtn and addBtn:IsShown() then leftmost = addBtn end
+    if downBtn and downBtn:IsShown() then leftmost = upBtn end
+    if goldFs and goldFs:IsShown() then leftmost = goldFs end
+    headerFrame._wnCustomHeaderRightAnchor = leftmost
+
+    if allowSectionHighlightToggle and goldStar then
+        goldStar:ClearAllPoints()
+        local expandIcon = opts.expandIcon
+        local iconFrame = opts.iconFrame
+        local headerText = opts.headerText
+        if expandIcon and iconFrame then
+            iconFrame:ClearAllPoints()
+            iconFrame:SetPoint("LEFT", expandIcon, "RIGHT", 8, 0)
+            goldStar:SetPoint("LEFT", iconFrame, "RIGHT", 8, 0)
+            if headerText then
+                headerText:ClearAllPoints()
+                headerText:SetPoint("LEFT", goldStar, "RIGHT", 12, 0)
+                if countFs then
+                    headerText:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
+                end
+                headerText:SetJustifyH("LEFT")
+            end
+        elseif expandIcon and headerText and countFs then
+            -- Chevron + star + title + count (no section atlas icon — same left edge as Characters tab intent)
+            goldStar:SetPoint("LEFT", expandIcon, "RIGHT", 8, 0)
+            headerText:ClearAllPoints()
+            headerText:SetPoint("LEFT", goldStar, "RIGHT", 12, 0)
+            headerText:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
+            headerText:SetJustifyH("LEFT")
+        elseif addBtn and addBtn:IsShown() then
+            goldStar:SetPoint("RIGHT", addBtn, "LEFT", -4, 0)
+        else
+            goldStar:SetPoint("RIGHT", leftmost, "LEFT", -6, 0)
+        end
+    elseif opts.headerText and countFs then
+        local ht = opts.headerText
+        -- Match CreateCollapsibleHeader: [chevron] +8 + [atlas icon] +12 + title (do not anchor title to chevron only).
+        if opts.expandIcon and opts.iconFrame then
+            opts.iconFrame:ClearAllPoints()
+            opts.iconFrame:SetPoint("LEFT", opts.expandIcon, "RIGHT", 8, 0)
+            ht:ClearAllPoints()
+            ht:SetPoint("LEFT", opts.iconFrame, "RIGHT", 12, 0)
+            ht:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
+            ht:SetJustifyH("LEFT")
+        elseif opts.expandIcon then
+            ht:ClearAllPoints()
+            ht:SetPoint("LEFT", opts.expandIcon, "RIGHT", 12, 0)
+            ht:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
+            ht:SetJustifyH("LEFT")
+        else
+            ht:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
+        end
+    end
+end
+
+--- Back-compat alias (single roster picker).
+function ns.UI_CreateCustomSectionCreatePicker(parent, width, _scrollH, addon, profile, charactersList)
+    return ns.UI_CreateCustomHeaderRosterPicker(parent, width, addon, profile, charactersList, nil)
+end
+
+assert(ns.UI_CreateCustomHeaderRosterPicker, "SharedWidgets_Search: export missing")

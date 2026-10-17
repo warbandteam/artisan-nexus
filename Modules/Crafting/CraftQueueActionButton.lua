@@ -11,6 +11,14 @@ local CraftQueueActionButton = {}
 
 local button, icon, cooldown
 local currentSpellID
+local refreshPending = false
+
+--- Left button only ("*" = any modifier, so a SHIFT-/CTRL- key binding still resolves):
+--- right-click hides the button and must never resolve a cast action. Resolution order
+--- (prefix..name..suffix, then "*" wildcards) per SecureButton_GetModifiedAttribute,
+--- verified 2026-10-15, wow-ui-source-live Blizzard_FrameXML/SecureTemplates.lua:101-137.
+local ATTR_TYPE = "*type1"
+local ATTR_SPELL = "*spell1"
 
 local function GetDB()
     local db = ns.db and ns.db.profile
@@ -48,7 +56,7 @@ local function TradeOpen()
     if C_TradeSkillUI and C_TradeSkillUI.IsTradeSkillReady then
         return C_TradeSkillUI.IsTradeSkillReady() == true
     end
-    local pf = _G.ProfessionsFrame or _G.TradeSkillFrame
+    local pf = _G.ProfessionsFrame
     return pf and pf.IsShown and pf:IsShown()
 end
 
@@ -61,9 +69,6 @@ local function SpellIcon(sid)
         if ok and tex then
             return tex
         end
-    end
-    if GetSpellTexture then
-        return GetSpellTexture(sid)
     end
     return nil
 end
@@ -122,7 +127,7 @@ local function Refresh()
     button:Show()
     if sid ~= currentSpellID then
         currentSpellID = sid
-        button:SetAttribute("spell", sid)
+        button:SetAttribute(ATTR_SPELL, sid)
         local tex = SpellIcon(sid)
         if tex and icon then
             icon:SetTexture(tex)
@@ -138,8 +143,11 @@ local function EnsureButton()
     button:SetSize(BUTTON_SIZE, BUTTON_SIZE)
     button:SetFrameStrata("MEDIUM")
     button:SetClampedToScreen(true)
-    button:RegisterForClicks("AnyUp")
-    button:SetAttribute("type", "spell")
+    -- Down clicks too: with ActionButtonUseKeyDown=1 a CLICK binding acts on the key-down
+    -- press only (verified 2026-10-15, SecureTemplates.lua:813-814 SecureActionButton_OnClick);
+    -- mouse presses still act on release only (isSecureMousePress).
+    button:RegisterForClicks("AnyUp", "AnyDown")
+    button:SetAttribute(ATTR_TYPE, "spell")
 
     icon = button:CreateTexture(nil, "ARTWORK")
     icon:SetAllPoints()
@@ -171,18 +179,22 @@ local function EnsureButton()
                 db.hidden = true
             end
             self:Hide()
+            if ns.RefreshAddonSettings then
+                ns.RefreshAddonSettings()
+            end
             return
         end
         local sid = ResolveNextSpell()
-        if sid then
-            self:SetAttribute("spell", sid)
+        if sid and sid ~= currentSpellID then
+            self:SetAttribute(ATTR_SPELL, sid)
             currentSpellID = sid
         end
     end)
     button:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:AddLine((ns.L and ns.L["CRAFT_QUEUE_BTN_TITLE"]) or "Craft next in queue", 1, 0.82, 0)
-        GameTooltip:AddLine((ns.L and ns.L["CRAFT_QUEUE_BTN_DESC"]) or "Casts the first incomplete queue recipe.", 0.7, 0.7, 0.7, true)
+        GameTooltip:AddLine((ns.L and ns.L["CRAFT_QUEUE_BTN_DESC"]) or "Crafts the next queued recipe.", 0.7, 0.7, 0.7, true)
+        GameTooltip:AddLine((ns.L and ns.L["FLOAT_BTN_HINT"]) or "Shift+drag to move. Right-click to hide.", 0.62, 0.62, 0.62, true)
         GameTooltip:Show()
     end)
     button:SetScript("OnLeave", function()
@@ -199,6 +211,21 @@ local function EnsureButton()
     end)
     ApplySavedPosition()
     return button
+end
+
+--- Event-driven refresh: the OnUpdate ticker stops once the button is hidden, so a Hide
+--- from a combat-time TRADE_SKILL_SHOW, a not-yet-ready trade skill or an empty queue
+--- would otherwise last the session. Coalesced to one Refresh per frame; Refresh itself
+--- is a no-op in combat and PLAYER_REGEN_ENABLED re-runs it.
+local function QueueRefresh()
+    if refreshPending then
+        return
+    end
+    refreshPending = true
+    C_Timer.After(0, function()
+        refreshPending = false
+        Refresh()
+    end)
 end
 
 function CraftQueueActionButton:Show()
@@ -226,20 +253,36 @@ function CraftQueueActionButton:Enable()
     _G["BINDING_NAME_CLICK " .. BUTTON_NAME .. ":LeftButton"] =
         (L and L["BINDING_CRAFT_QUEUE_CAST"]) or "Craft Next in Queue"
 
-    local E = ns.Constants and ns.Constants.EVENTS
+    local E = ns.Constants.EVENTS
     local owner = ns.NewEventOwner("CraftQueueActionButton")
     self._eventOwner = owner
     owner:RegisterEvent("TRADE_SKILL_SHOW", function()
         CraftQueueActionButton:Show()
+        -- IsTradeSkillReady() can still be false on SHOW; LIST_UPDATE re-checks.
+        QueueRefresh()
     end)
     owner:RegisterEvent("TRADE_SKILL_CLOSE", function()
         CraftQueueActionButton:Hide()
     end)
+    -- verified 2026-10-15, src/docs: TRADE_SKILL_LIST_UPDATE (TradeSkillUIDocumentation.lua),
+    -- SPELLS_CHANGED (SpellBookDocumentation.lua), PLAYER_REGEN_ENABLED (UnitDocumentation.lua).
+    owner:RegisterEvent("TRADE_SKILL_LIST_UPDATE", QueueRefresh)
+    owner:RegisterEvent("SPELLS_CHANGED", QueueRefresh)
+    owner:RegisterEvent("PLAYER_REGEN_ENABLED", QueueRefresh)
     if E and E.CRAFT_QUEUE_UPDATED then
-        owner:RegisterMessage(E.CRAFT_QUEUE_UPDATED, function()
-            Refresh()
-        end)
+        owner:RegisterMessage(E.CRAFT_QUEUE_UPDATED, QueueRefresh)
     end
+end
+
+function CraftQueueActionButton:Disable()
+    local owner = self._eventOwner
+    if owner then
+        owner:UnregisterAllEvents()
+        owner:UnregisterAllMessages()
+        self._eventOwner = nil
+    end
+    -- Hide() already defers while in combat lockdown.
+    self:Hide()
 end
 
 ns.CraftQueueActionButton = CraftQueueActionButton

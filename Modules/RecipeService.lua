@@ -17,8 +17,9 @@
         name       = string,
         profession = string,
         output     = { itemID = number|nil },
-        reagents   = { { itemID = number, qty = number, slotType = number|nil }, ... },
+        reagents   = { { itemID = number, qty = number, slotType = number|nil, required = true|nil }, ... },
         updated    = unix,
+        -- additive (EV engine): hasSingleItemOutput, isEnchantingRecipe, hasQualityIlvlBonuses, recipeType
       }
 ]]
 
@@ -26,7 +27,6 @@ local ADDON_NAME, ns = ...
 
 ---@class RecipeService
 local RecipeService = {
-    _reverseIndex = nil,
     _bagCounts = nil,
     _bagCacheGen = 0,
     _listHarvestPending = false,
@@ -45,6 +45,29 @@ local E = ns.Constants.EVENTS
 local function NormalizeSpellID(id)
     local n = tonumber(id)
     return n or id
+end
+
+local skillLineToProfession
+
+local function SkillLineProfessionMap()
+    if skillLineToProfession then
+        return skillLineToProfession
+    end
+    skillLineToProfession = {}
+    local cat = ns.MidnightRecipeCatalog
+    if type(cat) == "table" then
+        for profName, data in pairs(cat) do
+            if type(data) == "table" then
+                if data.skillLineID then
+                    skillLineToProfession[data.skillLineID] = profName
+                end
+                if data.parentSkillLineID then
+                    skillLineToProfession[data.parentSkillLineID] = profName
+                end
+            end
+        end
+    end
+    return skillLineToProfession
 end
 
 ---@return table<number, string>  spellID -> profession name
@@ -66,7 +89,36 @@ local SPELL_TO_PROF
 ---@return string|nil
 function RecipeService:GetProfession(spellID)
     if not SPELL_TO_PROF then SPELL_TO_PROF = BuildSpellToProfession() end
-    return SPELL_TO_PROF[NormalizeSpellID(spellID)]
+    local normalized = NormalizeSpellID(spellID)
+    local prof = SPELL_TO_PROF[normalized]
+    if prof ~= nil then
+        -- false = cached negative lookup
+        return prof or nil
+    end
+
+    -- Dynamic fallback for recipes missing from the static catalog. Match only the Midnight
+    -- variant skill line (ProfessionInfo.professionID); parentProfessionID is the base line
+    -- shared by every expansion and would pull legacy recipes into the harvest.
+    if not (C_TradeSkillUI and C_TradeSkillUI.GetProfessionInfoByRecipeID) or type(normalized) ~= "number" then
+        return nil
+    end
+    local mapped = false
+    local ok, pInfo = pcall(C_TradeSkillUI.GetProfessionInfoByRecipeID, normalized)
+    if not ok or type(pInfo) ~= "table" then
+        -- Transient failure: do not cache, retry next call.
+        return nil
+    end
+    local cat = ns.MidnightRecipeCatalog
+    if pInfo.professionID and type(cat) == "table" then
+        for profName, data in pairs(cat) do
+            if type(data) == "table" and data.skillLineID == pInfo.professionID then
+                mapped = profName
+                break
+            end
+        end
+    end
+    SPELL_TO_PROF[normalized] = mapped
+    return mapped or nil
 end
 
 ---@param spellID number
@@ -92,6 +144,33 @@ function RecipeService:GetRecipeName(spellID)
     local name = map[spellID] or map[tostring(spellID)]
     if name and name ~= "" then return name end
     return nil
+end
+
+local catalogReagentItemIDs
+
+--- Deduped itemIDs from the static ns.MidnightReagentCatalog (basic reagent quality
+--- variants, tradeable finishing candidates and outputs) so price scans can cover
+--- recipes the player never opened. Built once; callers must not mutate the result.
+---@return number[]
+function RecipeService:GetCatalogReagentItemIDs()
+    if catalogReagentItemIDs then return catalogReagentItemIDs end
+    local out, seen = {}, {}
+    local function add(id)
+        if type(id) == "number" and id > 0 and not seen[id] then
+            seen[id] = true
+            out[#out + 1] = id
+        end
+    end
+    for _, row in pairs(ns.MidnightReagentCatalog or {}) do
+        for _, slot in ipairs(row.b or {}) do
+            for i = 2, #slot do add(slot[i]) end
+        end
+        for _, id in ipairs(row.f or {}) do add(id) end
+        for _, id in ipairs(row.o or {}) do add(id) end
+    end
+    table.sort(out)
+    catalogReagentItemIDs = out
+    return out
 end
 
 --==========================================================================
@@ -153,18 +232,27 @@ end
 --- EVERY quality-tier candidate of a slot as its own row with the full slot
 --- quantity — flat sums over those rows multiply cost/needs by the tier count.
 --- Here tiers collapse into ONE requirement with a candidate list, and
---- non-Basic slots (modifying/finishing — optional) are excluded from cost,
---- craftability and shopping math. Legacy rows without slotType count as
---- Basic; rows without dataSlotIndex each form their own slot.
+--- optional non-Basic slots (modifying/finishing) are excluded from cost,
+--- craftability and shopping math; a non-Basic slot the schematic marks `required`
+--- counts like Basic. Legacy rows without slotType count as
+--- Basic; rows without dataSlotIndex each form their own slot. Slots are keyed by slotIndex (or
+--- dataSlotType + dataSlotIndex for rows harvested before slotIndex was stored).
+--- includeFinishing adds Finishing slots (slotType 2) — Shopping list opt-in only.
 ---@param spellID number
+---@param includeFinishing boolean|nil
 ---@return table[] slots: { qty:number, candidates: table[] (harvested reagent rows) }
-function RecipeService:GetMandatorySlots(spellID)
+function RecipeService:GetMandatorySlots(spellID, includeFinishing)
     local out = {}
     local bySlot = {}
     for _, r in ipairs(self:GetReagents(spellID)) do
         local st = r.slotType
-        if st == nil or st == 1 then
-            local key = r.dataSlotIndex
+        if st == nil or st == 1 or r.required or (includeFinishing and st == 2) then
+            -- One slot per schematic slot: slotIndex when harvested, else dataSlotType + dataSlotIndex
+            -- (dataSlotIndex alone collides: Sunfire Silk Backpack has a Reagent slot 1 and a
+            -- ModifiedReagent slot 1, which merged and priced 10 ranked cloth at a 7s reagent's price).
+            local key = (r.slotIndex and ("s" .. r.slotIndex))
+                or (r.dataSlotIndex ~= nil and ((r.dataSlotType or 0) .. ":" .. r.dataSlotIndex))
+                or nil
             local slot = (key ~= nil) and bySlot[key] or nil
             if not slot then
                 slot = { qty = tonumber(r.qty) or 0, candidates = {} }
@@ -224,44 +312,142 @@ function RecipeService:EstimateOutputValue(spellID)
     return svc:GetPrice(item)
 end
 
----@param itemID number
----@return number[]  list of spellIDs that consume itemID
-function RecipeService:GetRecipesForItem(itemID)
-    if not self._reverseIndex then self:RebuildReverseIndex() end
-    local bucket = self._reverseIndex[itemID]
-    if not bucket then return {} end
+--- Required Basic slots for the EV engine / reagent-quality optimizer. One entry per
+--- dataSlotIndex with its quality candidates ordered lowest -> highest reagent quality.
+--- `passToOperation` mirrors Blizzard's CreateCraftingReagentInfoTbl, which hands only
+--- ModifiedReagent data slots to GetCraftingOperationInfo
+--- (verified 2026-10-14, Blizzard_ProfessionsTransaction.lua:831, 12.1.5.70391).
+--- Legacy rows without dataSlotType are passed when they carry several quality candidates.
+---@param spellID number
+---@return table[] slots { dataSlotIndex?, qty, dataSlotType?, candidates = itemID[], currencyID?, isQuality, passToOperation }
+function RecipeService:GetRequiredBasicSlots(spellID)
     local out = {}
-    for sid in pairs(bucket) do out[#out + 1] = sid end
-    table.sort(out)
+    local slots = self:GetMandatorySlots(spellID)
+    local qualityOf = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
+    for si = 1, #slots do
+        local slot = slots[si]
+        local first = slot.candidates[1]
+        local entry = {
+            slotIndex = first and first.slotIndex or nil,
+            dataSlotIndex = first and first.dataSlotIndex or nil,
+            dataSlotType = first and first.dataSlotType or nil,
+            qty = slot.qty,
+            candidates = {},
+        }
+        local seen, order = {}, {}
+        for ci = 1, #slot.candidates do
+            local c = slot.candidates[ci]
+            if c.itemID and not seen[c.itemID] then
+                seen[c.itemID] = true
+                local q
+                if qualityOf then
+                    local ok, rq = pcall(qualityOf, c.itemID)
+                    q = ok and tonumber(rq) or nil
+                end
+                entry.candidates[#entry.candidates + 1] = c.itemID
+                order[c.itemID] = { q = q or ci, i = ci }
+            elseif c.currencyID and not entry.currencyID then
+                entry.currencyID = c.currencyID
+            end
+        end
+        table.sort(entry.candidates, function(a, b)
+            local oa, ob = order[a], order[b]
+            if oa.q ~= ob.q then return oa.q < ob.q end
+            return oa.i < ob.i
+        end)
+        entry.isQuality = #entry.candidates > 1
+        -- Enum.TradeskillSlotDataType.ModifiedReagent = 2 (TradeSkillUITypesDocumentation 12.1.5.70391).
+        entry.passToOperation = entry.dataSlotIndex ~= nil and #entry.candidates > 0
+            and (entry.dataSlotType == 2 or (entry.dataSlotType == nil and entry.isQuality))
+        out[#out + 1] = entry
+    end
     return out
 end
 
-function RecipeService:RebuildReverseIndex()
-    local idx = {}
-    local s = Store()
-    if s then
-        for spellID, sch in pairs(s) do
-            for _, r in ipairs(sch.reagents or {}) do
-                if r.itemID then
-                    idx[r.itemID] = idx[r.itemID] or {}
-                    idx[r.itemID][spellID] = true
+local recipeFlagsLive = {}
+
+--- Output-shape flags (harvested; live GetRecipeInfo fallback cached for the session).
+---@param spellID number
+---@return table { hasSingleItemOutput:boolean, isEnchantingRecipe:boolean, hasQualityIlvlBonuses:boolean, recipeType:number|nil, known:boolean }
+function RecipeService:GetRecipeFlags(spellID)
+    spellID = NormalizeSpellID(spellID)
+    local sch = self:GetSchematic(spellID)
+    if sch and sch.hasSingleItemOutput ~= nil then
+        return {
+            hasSingleItemOutput = sch.hasSingleItemOutput == true,
+            isEnchantingRecipe = sch.isEnchantingRecipe == true,
+            hasQualityIlvlBonuses = sch.hasQualityIlvlBonuses == true,
+            recipeType = sch.recipeType,
+            known = true,
+        }
+    end
+    local cached = recipeFlagsLive[spellID]
+    if cached then
+        return cached
+    end
+    local flags = { hasSingleItemOutput = false, isEnchantingRecipe = false, hasQualityIlvlBonuses = false,
+        recipeType = sch and sch.recipeType or nil, known = false }
+    if C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo then
+        local ok, info = pcall(C_TradeSkillUI.GetRecipeInfo, spellID)
+        if ok and type(info) == "table" then
+            flags.hasSingleItemOutput = info.hasSingleItemOutput == true
+            flags.isEnchantingRecipe = info.isEnchantingRecipe == true
+            flags.hasQualityIlvlBonuses = type(info.qualityIlvlBonuses) == "table" and #info.qualityIlvlBonuses > 0
+            flags.known = true
+            recipeFlagsLive[spellID] = flags
+        end
+    end
+    return flags
+end
+
+--- Reverse output index for make-vs-buy: itemID -> { {spellID, tier|nil}, ... }.
+---@param itemID number
+---@return table[] producers
+function RecipeService:GetRecipesProducingItem(itemID)
+    itemID = tonumber(itemID)
+    if not itemID then return {} end
+    if not self._outputIndex then
+        local idx = {}
+        local s = Store()
+        if s then
+            for spellID, sch in pairs(s) do
+                if type(sch) == "table" and type(sch.reagents) == "table" and #sch.reagents > 0 then
+                    local seen = {}
+                    if type(sch.qualityItemIDs) == "table" then
+                        for qi = 1, #sch.qualityItemIDs do
+                            local id = tonumber(sch.qualityItemIDs[qi])
+                            if id and not seen[id] then
+                                seen[id] = true
+                                idx[id] = idx[id] or {}
+                                idx[id][#idx[id] + 1] = { spellID = spellID, tier = qi }
+                            end
+                        end
+                    end
+                    local base = sch.output and tonumber(sch.output.itemID)
+                    if base and not seen[base] then
+                        idx[base] = idx[base] or {}
+                        idx[base][#idx[base] + 1] = { spellID = spellID }
+                    end
                 end
             end
         end
+        self._outputIndex = idx
     end
-    self._reverseIndex = idx
+    return self._outputIndex[itemID] or {}
+end
+
+--- Catalog profession name for a skill line (Midnight variant or parent line).
+---@param skillLineID number
+---@return string|nil
+function RecipeService:GetProfessionForSkillLine(skillLineID)
+    skillLineID = tonumber(skillLineID)
+    if not skillLineID then return nil end
+    return SkillLineProfessionMap()[skillLineID]
 end
 
 --==========================================================================
 -- Harvest from C_TradeSkillUI
 --==========================================================================
-
-local function SafeProfessionInfo()
-    if not C_TradeSkillUI or not C_TradeSkillUI.GetProfessionInfo then return nil end
-    local ok, info = pcall(C_TradeSkillUI.GetProfessionInfo)
-    if ok then return info end
-    return nil
-end
 
 local function TradeSkillReady()
     if not C_TradeSkillUI then
@@ -327,8 +513,11 @@ end
 ---@param slotType number|nil
 ---@param dataSlotIndex number|nil
 ---@param dataSlotType number|nil
-local function PushHarvestReagent(reagents, itemID, currencyID, qty, slotType, dataSlotIndex, dataSlotType)
+local function PushHarvestReagent(reagents, itemID, currencyID, qty, slotType, dataSlotIndex, dataSlotType, required)
     qty = tonumber(qty) or 0
+    if qty <= 0 and (slotType == 2 or slotType == 0) then
+        qty = 1
+    end
     if qty <= 0 then
         return
     end
@@ -339,6 +528,7 @@ local function PushHarvestReagent(reagents, itemID, currencyID, qty, slotType, d
             slotType = slotType,
             dataSlotIndex = dataSlotIndex,
             dataSlotType = dataSlotType,
+            required = required or nil,
         }
     elseif type(currencyID) == "number" and currencyID > 0 then
         reagents[#reagents + 1] = {
@@ -347,6 +537,7 @@ local function PushHarvestReagent(reagents, itemID, currencyID, qty, slotType, d
             slotType = slotType,
             dataSlotIndex = dataSlotIndex,
             dataSlotType = dataSlotType,
+            required = required or nil,
         }
     end
 end
@@ -359,7 +550,7 @@ end
 ---@param slotType number|nil
 ---@param dataSlotType number|nil
 ---@param reagents table[]
-local function HarvestQualityReagentLinks(spellID, dataSlotIndex, qty, slotType, dataSlotType, reagents)
+local function HarvestQualityReagentLinks(spellID, dataSlotIndex, qty, slotType, dataSlotType, reagents, required)
     if not C_TradeSkillUI or not C_TradeSkillUI.GetRecipeQualityReagentLink then
         return
     end
@@ -371,7 +562,7 @@ local function HarvestQualityReagentLinks(spellID, dataSlotIndex, qty, slotType,
         local itemID = ParseItemIDFromLink(link)
         local currencyID = (not itemID) and ParseCurrencyIDFromLink(link) or nil
         if itemID or currencyID then
-            PushHarvestReagent(reagents, itemID, currencyID, qty, slotType, dataSlotIndex, dataSlotType)
+            PushHarvestReagent(reagents, itemID, currencyID, qty, slotType, dataSlotIndex, dataSlotType, required)
         end
     end
 end
@@ -386,14 +577,20 @@ local function HarvestSlotReagents(spellID, slot, reagents)
     local slotType = slot.reagentType
     local dataSlotIndex = slot.dataSlotIndex
     local dataSlotType = slot.dataSlotType
+    -- CraftingReagentSlotSchematic.required (warcraft.wiki.gg GetRecipeSchematic, 12.1.5, checked
+    -- 2026-10-17): a non-Basic slot can still be mandatory and must count toward cost.
+    local required = slot.required == true
     local qty = tonumber(slot.quantityRequired) or 0
+    if qty <= 0 and (slotType == 2 or slotType == 0) then
+        qty = 1
+    end
     local before = #reagents
 
     ForEachArrayLike(slot.variableQuantities, function(vq)
         if type(vq) == "table" and type(vq.reagent) == "table" then
             local rq = tonumber(vq.quantity) or qty
             PushHarvestReagent(reagents, vq.reagent.itemID, vq.reagent.currencyID, rq,
-                slotType, dataSlotIndex, dataSlotType)
+                slotType, dataSlotIndex, dataSlotType, required)
         end
     end)
 
@@ -401,13 +598,72 @@ local function HarvestSlotReagents(spellID, slot, reagents)
         ForEachArrayLike(slot.reagents, function(r)
             if type(r) == "table" then
                 PushHarvestReagent(reagents, r.itemID, r.currencyID, qty,
-                    slotType, dataSlotIndex, dataSlotType)
+                    slotType, dataSlotIndex, dataSlotType, required)
             end
         end)
     end
 
     if dataSlotIndex and qty > 0 and #reagents == before then
-        HarvestQualityReagentLinks(spellID, dataSlotIndex, qty, slotType, dataSlotType, reagents)
+        HarvestQualityReagentLinks(spellID, dataSlotIndex, qty, slotType, dataSlotType, reagents, required)
+    end
+    -- dataSlotIndex is numbered per dataSlotType (a Reagent slot and a ModifiedReagent slot can both be
+    -- 1); CraftingReagentSlotSchematic.slotIndex is the slot's own index (TradeSkillUITypes 12.1.5.70448,
+    -- checked 2026-10-17) and the key CraftingOrderReagentInfo.slotIndex refers to.
+    local slotIndex = tonumber(slot.slotIndex)
+    for i = before + 1, #reagents do
+        reagents[i].slotIndex = slotIndex
+    end
+end
+
+local ApplyRecipeFlags
+
+--- Bump to re-read every stored schematic on the next profession window (row layout changed).
+--- 2: reagent rows carry slotIndex (slot keys no longer collide across dataSlotTypes).
+local HARVEST_REV = 2
+
+--- Per-character learned flags: recipe rows live in db.global, so a single `learned` boolean
+--- froze whatever the first harvesting character knew. ns.CharacterData:RecordLearned keeps
+--- `learnedBy[guid]` (AN-native backend) or defers to Warband Nexus' crafter list, and `learned`
+--- becomes "any tracked character knows it".
+---@param row table schematic row
+---@param info table|nil TradeSkillRecipeInfo
+---@param spellID number
+local function ApplyLearnedFlag(row, info, spellID)
+    if not row or type(info) ~= "table" or info.learned == nil then
+        return
+    end
+    -- Linked / guild trade skills show someone else's recipes.
+    if C_TradeSkillUI.IsTradeSkillLinked and C_TradeSkillUI.IsTradeSkillLinked() then
+        return
+    end
+    if C_TradeSkillUI.IsTradeSkillGuild and C_TradeSkillUI.IsTradeSkillGuild() then
+        return
+    end
+    ns.CharacterData:RecordLearned(row, spellID, info.learned == true)
+end
+
+--- Output-shape flags the EV engine needs offline (multicraft eligibility, enchant handling).
+--- Additive schematic fields; backfilled on the cheap cached-row path too.
+--- Fields verified 2026-10-14, TradeSkillUITypesDocumentation (12.1.5.70391):
+--- TradeSkillRecipeInfo.hasSingleItemOutput / isEnchantingRecipe / qualityIlvlBonuses?;
+--- CraftingRecipeSchematic.recipeType (Enum.TradeskillRecipeType Item=1, Salvage=2, Enchant=3, Gathering=4).
+---@param row table schematic row
+---@param info table|nil TradeSkillRecipeInfo
+---@param schematic table|nil CraftingRecipeSchematic
+ApplyRecipeFlags = function(row, info, schematic)
+    if not row then
+        return
+    end
+    if type(info) == "table" then
+        row.hasSingleItemOutput = info.hasSingleItemOutput == true
+        row.isEnchantingRecipe = info.isEnchantingRecipe == true
+        row.hasQualityIlvlBonuses = type(info.qualityIlvlBonuses) == "table" and #info.qualityIlvlBonuses > 0
+        if info.maxQuality and not row.maxQuality then
+            row.maxQuality = info.maxQuality
+        end
+    end
+    if type(schematic) == "table" and schematic.recipeType then
+        row.recipeType = schematic.recipeType
     end
 end
 
@@ -424,7 +680,17 @@ function RecipeService:HarvestOne(spellID, force)
     if not force then
         local sEarly = Store()
         local prev = sEarly and sEarly[spellID]
-        if prev and type(prev.reagents) == "table" and #prev.reagents > 0 then
+        -- Rows harvested on an older client build are re-read once (patches change reagents/outputs).
+        local build = GetBuildInfo and select(2, GetBuildInfo())
+        if prev and type(prev.reagents) == "table" and #prev.reagents > 0
+            and (not build or prev.clientBuild == build) and prev.harvestRev == HARVEST_REV then
+            if C_TradeSkillUI.GetRecipeInfo then
+                local okI, ri = pcall(C_TradeSkillUI.GetRecipeInfo, spellID)
+                if okI then
+                    ApplyLearnedFlag(prev, ri, spellID)
+                    ApplyRecipeFlags(prev, ri, nil)
+                end
+            end
             return true, false
         end
     end
@@ -484,6 +750,10 @@ function RecipeService:HarvestOne(spellID, force)
         end
     end
 
+    local prevLearned = nil
+    if prev then
+        prevLearned = prev.learned
+    end
     s[spellID] = {
         name = name,
         profession = self:GetProfession(spellID),
@@ -498,10 +768,17 @@ function RecipeService:HarvestOne(spellID, force)
         supportsQualities = info and info.supportsQualities or nil,
         maxQuality = info and info.maxQuality or nil,
         qualityItemIDs = qualityItemIDs,
-        learned = (info and info.learned ~= nil) and info.learned or nil,
+        -- Keep the stored flag (false survives); ApplyLearnedFlag updates it only for the
+        -- player's own (non-linked, non-guild) window.
+        learned = prevLearned,
+        learnedBy = prev and prev.learnedBy or nil,
+        clientBuild = GetBuildInfo and select(2, GetBuildInfo()) or nil,
+        harvestRev = HARVEST_REV,
         hasCraftingOperationInfo = schematic.hasCraftingOperationInfo == true,
     }
-    self._reverseIndex = nil
+    ApplyLearnedFlag(s[spellID], info, spellID)
+    ApplyRecipeFlags(s[spellID], info, schematic)
+    self._outputIndex = nil
     return true, true
 end
 
@@ -548,7 +825,8 @@ function RecipeService:HarvestOpenProfession(force)
 end
 
 --- Spread harvest across frames to avoid UI hitches (Scan button / manual refresh).
----@param onComplete fun(count:number, withReagents:number)|nil
+---@param onComplete fun(count:number, withReagents:number, considered:number)|nil
+---   count = schematics fetched now; considered = Midnight recipes in the open window (0 = none open).
 ---@return boolean started
 function RecipeService:HarvestOpenProfessionChunked(onComplete)
     if self._harvestChunkActive then
@@ -602,7 +880,7 @@ function RecipeService:HarvestOpenProfessionChunked(onComplete)
             ns.ArtisanNexus:SendMessage(E.RECIPE_SCHEMATICS_UPDATED, totalWith)
         end
         if onComplete then
-            onComplete(totalFetched, totalWith)
+            onComplete(totalFetched, totalWith, #ids)
         end
     end
     step()
@@ -644,9 +922,6 @@ function RecipeService:ScanBags()
         return counts
     end
     local bags = { 0, 1, 2, 3, 4, 5 }
-    if REAGENTBANK_CONTAINER then
-        bags[#bags + 1] = REAGENTBANK_CONTAINER
-    end
     local profile = ns.db and ns.db.profile
     local includeWarband = not profile or profile.includeWarbandBank ~= false
     if includeWarband and Enum and Enum.BagIndex then
@@ -847,24 +1122,6 @@ function RecipeService:MergeItemCounts(a, b)
     return out
 end
 
---- Bags plus in-memory session totals for a loot tab (`fishing` or gathering category).
----@param sessionTab string|nil
----@return table<number, number>
-function RecipeService:GetBagAndSessionCounts(sessionTab)
-    local counts = self:GetBagCounts()
-    if not sessionTab or not ns.SessionLootService then
-        return counts
-    end
-    local svc = ns.SessionLootService
-    local session = {}
-    if sessionTab == "fishing" then
-        session = svc:GetItemTotals("fishing", nil, false) or {}
-    elseif type(sessionTab) == "string" and sessionTab ~= "" then
-        session = svc:GetItemTotals("gathering", sessionTab, false) or {}
-    end
-    return self:MergeItemCounts(counts, session)
-end
-
 --- Session-only item totals (no bags) for Hub session craft filter.
 ---@param sessionTab string|nil fishing | herb | mine | leather | disenchant | others; nil = all session tabs merged
 ---@return table<number, number>
@@ -926,42 +1183,6 @@ function RecipeService:MaxCraftsForCounts(spellID, counts)
     return maxCrafts or 0
 end
 
---- Recipes fully craftable with merged bag+session counts; optional tab filter via reagent overlap.
----@param opts table|nil { sessionTab?: string, limit?: number }
----@return { fullyCraftable: number, top: { spellID: number, name: string, maxCrafts: number }[] }
-function RecipeService:SummarizeCraftable(opts)
-    opts = opts or {}
-    local counts = self:GetBagAndSessionCounts(opts.sessionTab)
-    local s = Store()
-    local summary = { fullyCraftable = 0, top = {} }
-    if not s then
-        return summary
-    end
-    local rows = {}
-    for spellID, sch in pairs(s) do
-        local maxN = self:MaxCraftsForCounts(spellID, counts)
-        if maxN > 0 then
-            rows[#rows + 1] = {
-                spellID = spellID,
-                name = sch.name or self:GetRecipeName(spellID) or ("Recipe " .. tostring(spellID)),
-                maxCrafts = maxN,
-            }
-        end
-    end
-    table.sort(rows, function(a, b)
-        if a.maxCrafts ~= b.maxCrafts then
-            return a.maxCrafts > b.maxCrafts
-        end
-        return (a.name or "") < (b.name or "")
-    end)
-    summary.fullyCraftable = #rows
-    local limit = opts.limit or 3
-    for i = 1, math.min(limit, #rows) do
-        summary.top[i] = rows[i]
-    end
-    return summary
-end
-
 --==========================================================================
 -- Event wiring
 --==========================================================================
@@ -972,8 +1193,9 @@ function RecipeService:Enable()
     local owner = self._eventOwner or ns.NewEventOwner("RecipeService")
     self._eventOwner = owner
     local AN = ns.ArtisanNexus
-    if AN and AN.RegisterBucketEvent then
-        AN:RegisterBucketEvent("BAG_UPDATE", 0.35, function()
+    if AN and AN.RegisterBucketEvent and not self._bagBucket then
+        --- Keep the handle so Disable can drop the bucket (AceBucket-3.0 returns one).
+        self._bagBucket = AN:RegisterBucketEvent("BAG_UPDATE", 0.35, function()
             RecipeService:InvalidateBagCache()
         end)
     end
@@ -1011,34 +1233,20 @@ function RecipeService:Disable()
         self._eventOwner:UnregisterEvent("TRADE_SKILL_LIST_UPDATE")
         self._eventOwner:UnregisterEvent("TRADE_SKILL_SHOW")
     end
+    local AN = ns.ArtisanNexus
+    if self._bagBucket and AN and AN.UnregisterBucket then
+        AN:UnregisterBucket(self._bagBucket)
+    end
+    self._bagBucket = nil
+    --- No BAG_UPDATE invalidation while disabled; never serve a stale scan later.
+    self:InvalidateBagCache()
 end
 
 --==========================================================================
 -- Craft briefing helpers (quality tiers, operation info, owned professions)
 --==========================================================================
-
-local skillLineToProfession
-
-local function SkillLineProfessionMap()
-    if skillLineToProfession then
-        return skillLineToProfession
-    end
-    skillLineToProfession = {}
-    local cat = ns.MidnightRecipeCatalog
-    if type(cat) == "table" then
-        for profName, data in pairs(cat) do
-            if type(data) == "table" then
-                if data.skillLineID then
-                    skillLineToProfession[data.skillLineID] = profName
-                end
-                if data.parentSkillLineID then
-                    skillLineToProfession[data.parentSkillLineID] = profName
-                end
-            end
-        end
-    end
-    return skillLineToProfession
-end
+-- Owned profession scanning
+--==========================================================================
 
 --- Midnight craft profession names the logged-in character knows (Alchemy, Tailoring, ...).
 ---@return string[]
@@ -1101,7 +1309,15 @@ function RecipeService:BuildCraftingReagentInfo(spellID)
     local slotCandidates = {}
     for i = 1, #sch.reagents do
         local r = sch.reagents[i]
-        if r.itemID and r.dataSlotIndex then
+        -- Basic (1) / legacy nil only: optional Modifying (0) / Finishing (2) reagents change the
+        -- simulated craft (embellishments, stat locks) and must not be auto-allocated.
+        -- Blizzard passes only ModifiedReagent data slots (dataSlotType 2) to GetCraftingOperationInfo
+        -- (Blizzard_ProfessionsTransaction.lua CreateCraftingReagentInfoTbl, 12.1.5.70448, checked
+        -- 2026-10-17), the same filter CraftOpsService uses; rows harvested without dataSlotType keep
+        -- the old Basic rule.
+        local st = r.slotType
+        local passToOp = (r.dataSlotType == nil) or r.dataSlotType == 2
+        if r.itemID and r.dataSlotIndex and passToOp and (st == nil or st == 1 or r.required) then
             local slotIdx = r.dataSlotIndex
             local bucket = slotCandidates[slotIdx]
             if not bucket then
@@ -1135,9 +1351,12 @@ function RecipeService:BuildCraftingReagentInfo(spellID)
     for slotIdx, candidates in pairs(slotCandidates) do
         local pick = pickReagent(candidates)
         if pick then
-            --- CraftingReagentInfo is a FLAT struct: { itemID, dataSlotIndex, quantity }.
+            --- 12.0+ CraftingReagentInfo nests the item: { reagent = { itemID }, dataSlotIndex, quantity }.
+            --- Verified 2026-10-14 against Blizzard_APIDocumentationGenerated TradeSkillUITypesDocumentation
+            --- (12.1.5.70391) and Blizzard_Professions.lua CreateCraftingReagentInfo. The old flat shape
+            --- made GetCraftingOperationInfo ignore the allocation.
             bySlot[slotIdx] = {
-                itemID = pick.itemID,
+                reagent = { itemID = pick.itemID },
                 dataSlotIndex = slotIdx,
                 quantity = pick.qty or 1,
             }
@@ -1172,7 +1391,15 @@ function RecipeService:GetOutputItemID(spellID, qualityTier)
         local reagents = self:BuildCraftingReagentInfo(spellID)
         local ok, od
         if #reagents > 0 then
-            ok, od = pcall(C_TradeSkillUI.GetRecipeOutputItemData, spellID, reagents, nil, qualityTier)
+            -- 4th arg is overrideQualityID (global crafting-quality ID), not the 1-based tier.
+            local qualityID
+            if qualityTier and C_TradeSkillUI.GetRecipeInfo then
+                local okInfo, info = pcall(C_TradeSkillUI.GetRecipeInfo, spellID)
+                if okInfo and type(info) == "table" and type(info.qualityIDs) == "table" then
+                    qualityID = info.qualityIDs[qualityTier]
+                end
+            end
+            ok, od = pcall(C_TradeSkillUI.GetRecipeOutputItemData, spellID, reagents, nil, qualityID)
         else
             ok, od = pcall(C_TradeSkillUI.GetRecipeOutputItemData, spellID)
         end
@@ -1264,34 +1491,6 @@ function RecipeService:CollectSchematicPriceItemIDs()
             local batch = self:CollectPriceItemIDs(spellID, seen)
             for bi = 1, #batch do
                 out[#out + 1] = batch[bi]
-            end
-        end
-    end
-    return out
-end
-
---- Item IDs for owned-profession harvested recipes (AH briefing subset).
----@return number[]
-function RecipeService:CollectBriefingPriceItemIDs()
-    local owned = self:GetOwnedCraftProfessions()
-    local ownedSet = {}
-    for i = 1, #owned do
-        ownedSet[owned[i]] = true
-    end
-    local seen = {}
-    local out = {}
-    local s = Store()
-    if not s then
-        return out
-    end
-    for spellID, sch in pairs(s) do
-        if type(sch) == "table" and sch.reagents and #sch.reagents > 0 then
-            local prof = sch.profession or self:GetProfession(spellID)
-            if prof and ownedSet[prof] and sch.learned ~= false then
-                local batch = self:CollectPriceItemIDs(spellID, seen)
-                for bi = 1, #batch do
-                    out[#out + 1] = batch[bi]
-                end
             end
         end
     end
