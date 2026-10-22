@@ -37,6 +37,8 @@ local GatheringLootService = {
     _lastCastStartAt = nil,
     --- Cast fallback (2) stays open until GATHER_CAST_CONTEXT_SEC or a non-gathering window.
     _castContextOpen = false,
+    --- GetTime() of the first pickup the cast fallback claimed (nil until then).
+    _castContextClaimedAt = nil,
     _enabled = false,
 }
 
@@ -45,6 +47,9 @@ local eventFrame = CreateFrame("Frame")
 --- Bags-pushed gather lines arrive right after the cast; keep the fallback short so a
 --- vendor/quest/mailbox item shortly after gathering is not attributed.
 local GATHER_CAST_CONTEXT_SEC = 10
+--- One node's lines arrive together: after the fallback's first claim it stays open only this long,
+--- so mail/quest/vendor items later in the 10s window are not attributed to the gather.
+local GATHER_CAST_BURST_SEC = 2
 local PENDING_CATEGORY_SEC = 50
 
 local chatLines = ns.Utilities.CreateChatLineDeduper(120)
@@ -176,7 +181,15 @@ end
 
 local function HasCastContext()
     local s = GatheringLootService
-    return s._castContextOpen and s._lastCastAt ~= nil and (GetTime() - s._lastCastAt) <= GATHER_CAST_CONTEXT_SEC
+    if not (s._castContextOpen and s._lastCastAt ~= nil) then
+        return false
+    end
+    local now = GetTime()
+    if (now - s._lastCastAt) > GATHER_CAST_CONTEXT_SEC then
+        return false
+    end
+    local claimedAt = s._castContextClaimedAt
+    return claimedAt == nil or (now - claimedAt) <= GATHER_CAST_BURST_SEC
 end
 
 --- True when this pickup belongs to a gathering action (consumes one window token if any).
@@ -191,7 +204,11 @@ function GatheringLootService:ClaimGatheringPickup(itemID, qty)
     if bridge and bridge.ConsumeToken and bridge:ConsumeToken("gathering", itemID, qty) then
         return true
     end
-    return HasCastContext()
+    if not HasCastContext() then
+        return false
+    end
+    self._castContextClaimedAt = self._castContextClaimedAt or GetTime()
+    return true
 end
 
 ---@return string|nil category of the last successful player gathering cast
@@ -253,6 +270,7 @@ local function OnPlayerGatheringSpellCast(spellID, phase)
     s._lastCastCategory = c
     s._lastCastAt = now
     s._castContextOpen = true
+    s._castContextClaimedAt = nil
     if not s._lastCastStartAt or (now - s._lastCastStartAt) > GATHER_CAST_CONTEXT_SEC then
         s._lastCastStartAt = now
     end
@@ -328,6 +346,7 @@ function GatheringLootService:Disable()
     self._lastCastAt = nil
     self._lastCastStartAt = nil
     self._castContextOpen = false
+    self._castContextClaimedAt = nil
 end
 
 ns.GatheringLootService = GatheringLootService

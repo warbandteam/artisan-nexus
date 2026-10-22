@@ -17,7 +17,7 @@ Join logic
 """
 import csv, json, sys, collections, datetime, os
 
-BUILD = "12.1.5.70391"
+BUILD = "12.1.5.70448"
 d, midp, outp = sys.argv[1], sys.argv[2], sys.argv[3]
 dbg = sys.argv[4] if len(sys.argv) > 4 else None
 

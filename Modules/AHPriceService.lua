@@ -1743,14 +1743,53 @@ local function TryConsumeQuery(qid)
 end
 
 local COMMODITY_BOOK_LEVELS = 8
+-- Thin-undercut filter: the anchor is the price at which COMMODITY_ANCHOR_SHARE of the listed units
+-- (at least COMMODITY_ANCHOR_MIN_UNITS) can be bought; cheaper levels holding fewer units than that
+-- and priced below COMMODITY_OUTLIER_RATIO x anchor are a single seller's bait, not the market.
+local COMMODITY_ANCHOR_SHARE = 0.01
+local COMMODITY_ANCHOR_MIN_UNITS = 5
+local COMMODITY_OUTLIER_RATIO = 0.7
 
---- Read the loaded commodity order book (cheapest first). The reference price is the first
---- level that is not entirely the player's own listing (CommoditySearchResultInfo
---- numOwnerItems / quantity, 12.1.5 AuctionHouseDocumentation), so we never price off ourselves.
+--- Reference price over cheapest-first levels: the first level that is not a thin outlier.
+---@param levels table { { p, q }, ... } cheapest first, others' units only
+---@param totalQty number
+---@return number|nil
+local function CommodityReferencePrice(levels, totalQty)
+    local n = #levels
+    if n == 0 then return nil end
+    local need = math.max(COMMODITY_ANCHOR_MIN_UNITS, math.ceil(totalQty * COMMODITY_ANCHOR_SHARE))
+    -- A market thinner than the anchor depth has no "market" to compare against: keep the true min.
+    if totalQty < need then return levels[1].p end
+    local anchor, cum = levels[n].p, 0
+    for i = 1, n do
+        cum = cum + levels[i].q
+        if cum >= need then
+            anchor = levels[i].p
+            break
+        end
+    end
+    local floorPrice = anchor * COMMODITY_OUTLIER_RATIO
+    cum = 0
+    for i = 1, n do
+        local lvl = levels[i]
+        cum = cum + lvl.q
+        -- A level is kept once it is priced near the anchor or the units up to it reach real depth.
+        if lvl.p >= floorPrice or cum >= need then
+            return lvl.p
+        end
+    end
+    return anchor
+end
+
+--- Read the loaded commodity order book (cheapest first). Levels that are entirely the player's
+--- own listing are skipped (CommoditySearchResultInfo numOwnerItems / quantity, 12.1.5
+--- AuctionHouseDocumentation), so we never price off ourselves; thin undercuts far below the
+--- market are skipped for the reference price (CommodityReferencePrice) but kept in the book,
+--- since BuyCost can really buy them.
 ---@return number|nil unitPrice
 ---@return table|nil market { qty, book }
 local function ReadCommodityBook(itemID, numResults)
-    local refPrice, totalQty, book = nil, 0, {}
+    local totalQty, book, levels = 0, {}, {}
     for i = 1, numResults do
         local okR, r = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, itemID, i)
         if not okR or type(r) ~= "table" then break end
@@ -1760,13 +1799,14 @@ local function ReadCommodityBook(itemID, numResults)
             local othersQty = q - own
             if othersQty > 0 then
                 totalQty = totalQty + othersQty
-                if not refPrice then refPrice = p end
+                levels[#levels + 1] = { p = p, q = othersQty }
                 if #book < COMMODITY_BOOK_LEVELS then
                     book[#book + 1] = { p = p, q = othersQty }
                 end
             end
         end
     end
+    local refPrice = CommodityReferencePrice(levels, totalQty)
     if not refPrice then
         return nil, nil
     end
@@ -1856,15 +1896,20 @@ local function OnItemSearchResults(itemKey, qid)
     if not hasRows then
         MarkNoListings(itemKey.itemID)
     else
-        local ok2, result = pcall(C_AuctionHouse.GetItemSearchResultInfo, itemKey, 1)
-        -- ItemSearchResultInfo.buyoutAmount is already per unit: Blizzard's ItemSellFrame writes it
-        -- straight into the per-item price input (Blizzard_AuctionHouseItemSellFrame.lua:325,
-        -- 12.1.5.70391, verified 2026-10-14). Dividing by quantity under-priced multi-unit listings.
-        if ok2 and result and result.buyoutAmount then
+        -- Rows arrive price-ascending (SEARCH_SORTS). Skip the player's own and their warband's
+        -- listings (ItemSearchResultInfo containsOwnerItem / containsAccountItem,
+        -- AuctionHouseDocumentation 12.1.5.70448, checked 2026-10-22) so we never price off ourselves.
+        for i = 1, num do
+            local ok2, result = pcall(C_AuctionHouse.GetItemSearchResultInfo, itemKey, i)
+            if not ok2 or type(result) ~= "table" then break end
+            -- ItemSearchResultInfo.buyoutAmount is already per unit: Blizzard's ItemSellFrame writes it
+            -- straight into the per-item price input (Blizzard_AuctionHouseItemSellFrame.lua:325,
+            -- 12.1.5.70391, verified 2026-10-14). Dividing by quantity under-priced multi-unit listings.
             local unit = math.floor(tonumber(result.buyoutAmount) or 0)
-            if unit > 0 then
+            if unit > 0 and not result.containsOwnerItem and not result.containsAccountItem then
                 -- One listing's quantity is not market depth: keep it on the row, not in history.
                 SavePrice(itemKey.itemID, unit, true, { qty = tonumber(result.quantity), qsrc = "i" })
+                break
             end
         end
     end

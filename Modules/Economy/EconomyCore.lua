@@ -187,6 +187,22 @@ function Economy:NetSaleValue(itemID, unitPrice, qty)
     return gross - self:ExpectedDepositLossPerUnit(itemID) * qty
 end
 
+--- Unit price a new listing actually gets: one legal undercut below the market reference, rounded
+--- to what the AH accepts. Craft revenue at the bare reference assumed we sell at the current
+--- cheapest listing instead of beneath it.
+---@param unitPrice number market reference price
+---@return number copper (0 when unitPrice is not positive)
+function Economy:SaleUnitPrice(unitPrice)
+    unitPrice = tonumber(unitPrice) or 0
+    if unitPrice <= 0 then return 0 end
+    -- The highest legal price strictly below the reference (whole silver unless copper is accepted).
+    local step = self:UndercutStep()
+    local posted = math.ceil(unitPrice / step) * step - step
+    -- At the AH's minimum price there is no room to undercut: match the reference.
+    if posted <= 0 then return unitPrice end
+    return posted
+end
+
 ---@param itemID number
 ---@return table|nil raw ahPrices row { buyout, updatedAt, qty?, book? }
 function Economy:GetMarketRow(itemID)

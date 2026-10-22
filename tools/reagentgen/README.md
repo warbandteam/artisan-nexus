@@ -1,4 +1,9 @@
-# Reagent catalog generator
+# Recipe + reagent catalog generators
+
+`Modules/Data/MidnightRecipeCatalog.lua` lists every Midnight recipe per profession
+(`gen_recipe_catalog.py`: SkillLineAbility rows whose `SkillupSkillLineID` is a Midnight child
+skill line 2906-2918, names from SpellName). `build.sh` regenerates it first, then the reagent
+catalog from it, so both always come from the same build.
 
 `Modules/Data/MidnightReagentCatalog.lua` lists the required reagents (with quality variants),
 tradeable optional reagents and outputs of every Midnight recipe in

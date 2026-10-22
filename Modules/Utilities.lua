@@ -194,6 +194,10 @@ function Utilities.IsSelfLootChatMessage(msg)
     if not msg:find("|Hitem:", 1, true) then
         return false
     end
+    -- Every locale's LOOT_ITEM_SELF / _MULTIPLE / PUSHED_SELF / PUSHED_SELF_MULTIPLE has a literal
+    -- prefix before a plain %s (no positional %1$s), while other players' LOOT_ITEM* lines start
+    -- with %s (the name), so the prefix alone separates them (GlobalStrings, all 11 locales,
+    -- 12.1.5.70448, verified 2026-10-22). An empty prefix is refused rather than matching anything.
     local function prefixMatch(globalFmt)
         if not globalFmt or type(globalFmt) ~= "string" or (issecretvalue and issecretvalue(globalFmt)) then
             return false

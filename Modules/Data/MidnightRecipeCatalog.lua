@@ -1,18 +1,15 @@
---[[
-    Artisan Nexus — Midnight (12.1.0) recipe catalog.
-    Source: wago.tools DB2 dumps (SkillLine, SkillLineAbility, SpellName).
-    Build 12.1.0.69497 (verified 2026-08-29). Midnight child skill-lines
-    2906-2918 mapped to their base profession parent skill-lines; recipes are
-    matched on SkillLineAbility.SkillupSkillLineID (not SkillLine).
-    12.1 “Coiled Isle” patch added 81 recipes; empty string = spell has no
-    SpellName row in this build (unnamed/placeholder, kept for ID parity).
+--[[ Generated 2026-10-22 from wago.tools DB2 build 12.1.5.70448 (tables: SkillLineAbility, SpellName).
+     Do not edit by hand; regenerate with tools/reagentgen/build.sh <build>.
+     Midnight child skill-lines 2906-2918 mapped to their base profession parent skill-lines;
+     recipes are matched on SkillLineAbility.SkillupSkillLineID (not SkillLine).
+     Empty string = spell has no SpellName row in this build (kept for ID parity).
 
-    Schema: ns.MidnightRecipeCatalog[profession] = {
-      skillLineID       = <midnight child SLID>,
-      parentSkillLineID = <base profession SLID>,
-      recipes           = { [spellID] = name, ... }
-    }
-]]
+     Schema: ns.MidnightRecipeCatalog[profession] = {
+       skillLineID       = <midnight child SLID>,
+       parentSkillLineID = <base profession SLID>,
+       recipes           = { [spellID] = name, ... }
+     }
+     1043 recipes. ]]
 
 local ADDON_NAME, ns = ...
 
@@ -593,7 +590,7 @@ ns.MidnightRecipeCatalog = {
             [1248621] = "Floating Void-Touched Tome",
             [1248622] = "Homely Sin'dorei Shelf",
             [1248623] = "Lively Songwriter's Quill",
-            [1248624] = "Opened Sin'dorei Scroll",
+            [1248624] = "Open Sin'dorei Scroll",
             [1248625] = "Gilded Eversong Book",
             [1248626] = "Sin'dorei Phoenix Quill",
             [1248627] = "Homely Wall Shelves",
@@ -619,6 +616,7 @@ ns.MidnightRecipeCatalog = {
             [1296505] = "\"Cursed Gaze of Ula'tek\" Mural",
             [1296506] = "Chiseled Amani Tablet",
             [1303151] = "Contract: Zul'jarra's Forces",
+            [1315433] = "Apple Bobbing Bucket",
         },
     },
     Jewelcrafting = {
@@ -719,7 +717,7 @@ ns.MidnightRecipeCatalog = {
             [1297680] = "Piercing Amani Lapis",
             [1297681] = "Roaring Amani Garnet",
             [1307462] = "Refine Crystalline Glass |A:Professions-ChatIcon-Quality-12-Tier2:20:20|a",
-            [1307466] = "Refine Duskshrouded Stone |A:Professions-ChatIcon-Quality-12-Tier2:20:20|a",
+            [1307466] = "Refine Dusk-Shrouded Stone |A:Professions-ChatIcon-Quality-12-Tier2:20:20|a",
         },
     },
     Leatherworking = {
@@ -943,6 +941,7 @@ ns.MidnightRecipeCatalog = {
             [1288335] = "Snakeskin Lining",
             [1296512] = "Twilight's Blade Bedroll",
             [1296514] = "Tortollan Slingsack",
+            [1315440] = "Spidery Witch Hat",
         },
     },
     Fishing = {

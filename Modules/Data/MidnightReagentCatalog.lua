@@ -1,4 +1,4 @@
---[[ Generated 2026-10-15 from wago.tools DB2 build 12.1.5.70391 (tables: SpellReagents, ModifiedCraftingSpellSlot,
+--[[ Generated 2026-10-22 from wago.tools DB2 build 12.1.5.70448 (tables: SpellReagents, ModifiedCraftingSpellSlot,
      ModifiedCraftingReagentSlot, MCRSlotXMCRCategory, CraftingReagentQuality, ModifiedCraftingReagentItem,
      ModifiedCraftingItem, SpellEffect, CraftingData, CraftingDataItemQuality, CraftingDataEnchantQuality, Item, ItemSparse).
      Do not edit by hand; regenerate with gen_reagent_catalog.py.
@@ -8,7 +8,7 @@
        f = { itemID, ... },                    -- optional finishing/modifying candidates (tradeable only)
        o = { itemID, ... },                    -- output item(s) / quality variants
      }
-     783 recipes. Currencies excluded. ]]
+     785 recipes. Currencies excluded. ]]
 
 local ADDON_NAME, ns = ...
 
@@ -796,4 +796,6 @@ ns.MidnightReagentCatalog = {
     [1305148] = { b={{10,253303},{10,274777},{20,243581,243582}}, o={275676} },
     [1307462] = { b={{10,242787}}, o={242786} },
     [1307466] = { b={{18,242788}}, o={242789} },
+    [1315433] = { b={{10,256963},{15,33226},{5,253043},{20,245882}}, o={282190} },
+    [1315440] = { b={{6,251665},{6,256963},{20,33226},{5,252990},{2,239198,239200}}, o={282184} },
 }

@@ -387,6 +387,7 @@ function CraftEVService:Evaluate(spellID, opts)
         -- output's price would value a rank-2 craft at the rank-1 price, or the other way round).
         local item = OutputItemForTier(sch, tier > 0 and tier or nil)
         local unit, fromHistory = OutputUnitPrice(item, ctx.useAverage)
+        local saleUnit = unit and econ:SaleUnitPrice(unit) or nil
         for i = 1, #missing do
             if not missingSeen[missing[i]] then
                 missingSeen[missing[i]] = true
@@ -400,8 +401,8 @@ function CraftEVService:Evaluate(spellID, opts)
             unitPrice = unit,
             fromHistory = fromHistory,
             yield = yield,
-            revenueGross = unit and unit * yield or nil,
-            revenueNet = unit and econ:NetSaleValue(item, unit, yield) or nil,
+            revenueGross = saleUnit and saleUnit * yield or nil,
+            revenueNet = saleUnit and econ:NetSaleValue(item, saleUnit, yield) or nil,
             reagentCost = cost,
             alloc = used,
             slotPicks = picks,
@@ -410,7 +411,8 @@ function CraftEVService:Evaluate(spellID, opts)
             missing = missing,
             verified = src.verified,
         }
-        if row.revenueNet then row.profit = row.revenueNet - cost end
+        -- An unpriced reagent is left out of `cost`, so a profit over it would be inflated: no data.
+        if row.revenueNet and #missing == 0 then row.profit = row.revenueNet - cost end
         if conc then
             row.concCost = tonumber(src.concCost) or 0
             -- Ingenuity refunds CraftingOperationInfo.ingenuityRefund concentration points on a proc
