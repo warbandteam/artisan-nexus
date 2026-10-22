@@ -262,6 +262,50 @@ H.FormatDuration = FormatDuration
 H.ItemLink = ItemLink
 H.HarvestNotice = HarvestNotice
 
+--- Page status in the window footer, right side (left of the version), e.g. "Cached recipes 236 / 1020".
+--- UI_TabHost clears it before every tab draw; a tab sets its own. tooltip: optional hover text.
+function ns.UI_SetFooterStatus(text, tooltip)
+    local mf = ns.ArtisanNexus and ns.ArtisanNexus.UI and ns.ArtisanNexus.UI.mainFrame
+    local ver = mf and mf.footerVersionText
+    if not ver then return end
+    local fs = mf._anFooterStatus
+    if not fs then
+        local bar = ver:GetParent()
+        local hit = CreateFrame("Frame", nil, bar)
+        fs = ns.FontManager:CreateFontString(hit, "small", "OVERLAY")
+        fs:SetPoint("RIGHT", ver, "LEFT", -14, 0)
+        fs:SetJustifyH("RIGHT")
+        fs:SetWordWrap(false)
+        hit:SetAllPoints(fs)
+        hit:SetScript("OnEnter", function(self)
+            if not fs._anTip then return end
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(fs._anTip, 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        fs._anHit = hit
+        mf._anFooterStatus = fs
+    end
+    local left = mf.footerLeftText
+    if not text or text == "" then
+        fs:SetText("")
+        fs._anTip = nil
+        fs._anHit:EnableMouse(false)
+        if left then
+            left:SetPoint("RIGHT", ver, "LEFT", -14, 0)
+        end
+        return
+    end
+    fs:SetText(text)
+    ns.UI_SetTextColorRole(fs, "Muted", 0.95)
+    fs._anTip = tooltip
+    fs._anHit:EnableMouse(tooltip ~= nil)
+    if left then
+        left:SetPoint("RIGHT", fs, "LEFT", -14, 0)
+    end
+end
+
 --- Short tooltips with a Shift view (WN tooltips: summary first, detail on demand). Re-runs
 --- redraw(owner) when Shift is pressed or released while GameTooltip still belongs to owner.
 local shiftWatch = {}

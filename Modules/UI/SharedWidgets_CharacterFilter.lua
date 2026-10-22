@@ -1,0 +1,862 @@
+--[[
+    Warband Nexus - Character tab sort/filter flyouts and section pick menus.
+    Split from SharedWidgets.lua to reduce main chunk size (Lua 5.1 local limit).
+    Loaded from WarbandNexus.toc immediately after Modules/UI/SharedWidgets.lua.
+]]
+
+local _, ns = ...
+-- Pixel-perfect frames (SharedWidgets_Pixel: SetPoint/SetSize snap to whole physical pixels).
+local CreateFrame = function(...) return (ns.UI_CreateFrame or _G.CreateFrame)(...) end
+local FontManager = ns.FontManager
+local UI_SPACING = ns.UI_SPACING or {}
+local UI_LAYOUT = ns.UI_LAYOUT or UI_SPACING
+-- CHARACTER LIST SORT DROPDOWN (Reusable Icon Button)
+
+local activeSortDropdownMenu = nil
+local activePickMenu = nil
+
+local function ChromeBackdrop()
+    return ns.UI_GetControlChromeBackdrop and ns.UI_GetControlChromeBackdrop() or { 0.12, 0.12, 0.15, 1 }
+end
+
+local function ChromeHoverBackdrop()
+    return ns.UI_GetControlChromeHoverBackdrop and ns.UI_GetControlChromeHoverBackdrop() or { 0.15, 0.15, 0.15, 0.8 }
+end
+
+local function MenuShellBackdrop()
+    local c = ns.UI_COLORS
+    local row = c and (c.surfaceRowOdd or c.bg) or { 0.08, 0.08, 0.10, 0.98 }
+    return { row[1], row[2], row[3], row[4] or 0.98 }
+end
+
+local function MenuShellBorder()
+    local c = ns.UI_COLORS and ns.UI_COLORS.accent or { 0.5, 0.5, 0.5 }
+    return { c[1] * 0.6, c[2] * 0.6, c[3] * 0.6, 0.8 }
+end
+
+local function UsesClassicFilterChrome()
+    return ns.UI_ShouldUseBlizzardChrome and ns.UI_ShouldUseBlizzardChrome()
+end
+
+--- Filter host button: UIPanelButtonTemplate in Classic — skip stacked ApplyVisuals borders.
+local function ApplyFilterHostButtonChrome(btn, hover)
+    if UsesClassicFilterChrome() then
+        return
+    end
+    if not ns.UI_ApplyVisuals then return end
+    local bg = hover and ChromeHoverBackdrop() or ChromeBackdrop()
+    local ac = ns.UI_COLORS and ns.UI_COLORS.accent or { 0.5, 0.5, 0.5 }
+    local borderA = hover and 0.8 or 0.6
+    ns.UI_ApplyVisuals(btn, bg, { ac[1], ac[2], ac[3], borderA })
+end
+
+--- Flyout menu shell: CreateContainer(true) already applies classic card chrome once.
+local function ApplyFlyoutMenuChrome(menu)
+    if UsesClassicFilterChrome() then
+        return
+    end
+    if ns.UI_ApplyVisuals then
+        ns.UI_ApplyVisuals(menu, MenuShellBackdrop(), MenuShellBorder())
+    end
+end
+
+local function ResolveSortMenuCurrentKey(dbSortTable, sortOptions)
+    local itemCount = sortOptions and #sortOptions or 0
+    local CS = ns.CharacterService
+    local rawKey = dbSortTable and dbSortTable.key
+    if CS and CS.NormalizeCharacterSortKey then
+        rawKey = CS:NormalizeCharacterSortKey(rawKey, "default")
+    elseif not rawKey or rawKey == "" then
+        rawKey = "default"
+    end
+    if type(rawKey) == "string" and rawKey ~= "" then
+        for j = 1, itemCount do
+            if sortOptions[j].key == rawKey then
+                return rawKey
+            end
+        end
+    end
+    if sortOptions[1] and sortOptions[1].key then
+        return sortOptions[1].key
+    end
+    return "default"
+end
+
+local function ApplyTabSortPick(dbSortTable, sortTabId, optKey)
+    local CS = ns.CharacterService
+    local profile = WarbandNexus and WarbandNexus.db and WarbandNexus.db.profile
+    if profile and CS and CS.SetTabSortKey and sortTabId then
+        CS:SetTabSortKey(profile, sortTabId, optKey)
+    elseif dbSortTable then
+        if CS and CS.NormalizeCharacterSortKey then
+            dbSortTable.key = CS:NormalizeCharacterSortKey(optKey, "default")
+        else
+            dbSortTable.key = optKey
+        end
+    end
+end
+
+local function CreateCharacterSortDropdown(parent, sortOptions, dbSortTable, onSortChanged, sortTabId)
+    -- Symmetric Filter button: fixed size, label centered (no icon)
+    local buttonHeight = ns.UI_CONSTANTS and ns.UI_CONSTANTS.BUTTON_HEIGHT or 32
+    local btnWidth = 90
+    local btn = ns.UI.Factory:CreateButton(parent, btnWidth, buttonHeight, false)
+
+    ApplyFilterHostButtonChrome(btn, false)
+
+    local text = FontManager:CreateFontString(btn, "body", "OVERLAY")
+    text:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    text:SetJustifyH("CENTER")
+    text:SetText((ns.L and ns.L["FILTER_LABEL"]) or "Filter")
+    ns.UI_SetTextColorRole(text, "Bright")
+
+    btn:SetScript("OnEnter", function(self)
+        ns.UI_SetTextColorRole(text, "Bright")
+        ApplyFilterHostButtonChrome(self, true)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText((ns.L and ns.L["SORT_BY_LABEL"]) or "Sort By:")
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function(self)
+        ns.UI_SetTextColorRole(text, "Bright")
+        ApplyFilterHostButtonChrome(self, false)
+        GameTooltip:Hide()
+    end)
+
+    btn:SetScript("OnClick", function(self)
+        if activeSortDropdownMenu and activeSortDropdownMenu:IsShown() then
+            activeSortDropdownMenu:Hide()
+            activeSortDropdownMenu = nil
+            if self._sortClickCatcher then
+                self._sortClickCatcher:Hide()
+            end
+            return
+        end
+        if activeSortDropdownMenu then
+            activeSortDropdownMenu:Hide()
+            activeSortDropdownMenu = nil
+        end
+
+        local itemCount = #sortOptions
+        local itemHeight = (UI_SPACING and UI_SPACING.DROPDOWN_MENU_ROW_HEIGHT) or (UI_SPACING and UI_SPACING.ROW_HEIGHT) or 26
+        local sideMargin = (UI_SPACING and UI_SPACING.SIDE_MARGIN) or 10
+        local radioArea = 8 + 16 + 6  -- left pad + radio width + gap
+        local minMenuWidth = math.max(btn:GetWidth(), 120)
+        local maxLabelW = 0
+        do
+            local measure = self:CreateFontString(nil, "OVERLAY")
+            if ns.FontManager then FontManager:ApplyFont(measure, "body") end
+            for j = 1, itemCount do
+                local label = sortOptions[j].label or ""
+                measure:SetText(label)
+                local w = measure:GetStringWidth()
+                if w and w > maxLabelW then maxLabelW = w end
+            end
+            measure:SetText("")
+        end
+        local menuWidth = math.max(minMenuWidth, math.ceil(maxLabelW) + sideMargin * 2 + radioArea + 16)
+
+        local menu = ns.UI.Factory:CreateContainer(UIParent, menuWidth, 200, true)
+        menu:SetFrameStrata("FULLSCREEN_DIALOG")
+        menu:SetFrameLevel(300)
+        menu:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 0, -2)
+        menu:SetClampedToScreen(true)
+        menu:SetWidth(menuWidth)
+        ApplyFlyoutMenuChrome(menu)
+        activeSortDropdownMenu = menu
+
+        local currentKey = ResolveSortMenuCurrentKey(dbSortTable, sortOptions)
+
+        local scrollChild = select(2, ns.UI_ApplyDropdownScrollLayout(menu, itemCount, itemHeight))
+        local btnContentWidth = (scrollChild and scrollChild:GetWidth()) or (menuWidth - sideMargin * 2)
+        local yPos = (UI_SPACING and UI_SPACING.DROPDOWN_INSET_TOP) or 4
+
+        for i = 1, itemCount do
+            local opt = sortOptions[i]
+            local optionBtn = ns.UI.Factory:CreateButton(scrollChild or menu, btnContentWidth, itemHeight, true)
+            optionBtn:SetPoint("TOPLEFT", sideMargin, -yPos)
+
+            local isSelected = (currentKey == opt.key)
+            local radio = (ns.UI_CreateThemedRadioButton and ns.UI_CreateThemedRadioButton(optionBtn, isSelected)) or nil
+            local textX = 10
+            if radio then
+                radio:SetPoint("LEFT", 8, 0)
+                if radio.innerDot then
+                    radio.innerDot:SetShown(isSelected)
+                end
+                textX = 8 + 16 + 6  -- left of radio + radio width + gap
+            end
+
+            local optionText = FontManager:CreateFontString(optionBtn, "body", "OVERLAY")
+            if radio then
+                optionText:SetPoint("LEFT", radio, "RIGHT", 6, 0)
+            else
+                optionText:SetPoint("LEFT", textX, 0)
+            end
+            optionText:SetJustifyH("LEFT")
+            optionText:SetText(opt.label)
+            if isSelected then
+                optionText:SetTextColor(ns.UI_COLORS.accent[1], ns.UI_COLORS.accent[2], ns.UI_COLORS.accent[3])
+            else
+                ns.UI_SetTextColorRole(optionText, "Bright")
+            end
+
+            if ns.UI_ApplyVisuals then
+                ns.UI_ApplyVisuals(optionBtn, {0.08, 0.08, 0.10, 0}, {0, 0, 0, 0})
+            end
+            if ns.UI.Factory.ApplyHighlight then
+                ns.UI.Factory:ApplyHighlight(optionBtn)
+            end
+
+            optionBtn:SetScript("OnClick", function()
+                ApplyTabSortPick(dbSortTable, sortTabId, opt.key)
+                menu:Hide()
+                activeSortDropdownMenu = nil
+                if self._sortClickCatcher then
+                    self._sortClickCatcher:Hide()
+                end
+                if onSortChanged then onSortChanged() end
+            end)
+            yPos = yPos + itemHeight
+        end
+
+        ns.UI_ApplyDropdownScrollLayout(menu, itemCount, itemHeight)
+
+        menu:Show()
+
+        local clickCatcher = btn._sortClickCatcher
+        if not clickCatcher then
+            clickCatcher = CreateFrame("Frame", nil, UIParent)
+            clickCatcher:SetAllPoints()
+            clickCatcher:SetFrameStrata("FULLSCREEN_DIALOG")
+            clickCatcher:SetFrameLevel(menu:GetFrameLevel() - 1)
+            clickCatcher:EnableMouse(true)
+            clickCatcher:SetScript("OnMouseDown", function()
+                if activeSortDropdownMenu then
+                    activeSortDropdownMenu:Hide()
+                    activeSortDropdownMenu = nil
+                end
+                clickCatcher:Hide()
+            end)
+            btn._sortClickCatcher = clickCatcher
+        end
+        clickCatcher:Show()
+
+        local origHide = menu:GetScript("OnHide")
+        menu:SetScript("OnHide", function(m)
+            if clickCatcher then clickCatcher:Hide() end
+            activeSortDropdownMenu = nil
+            if origHide then origHide(m) end
+        end)
+    end)
+
+    return btn
+end
+
+-- CHARACTERS / PROFESSIONS: Filter + sort + section view (nested flyouts)
+
+---@param ownerBtn Button|nil
+local function WnCloseFullAdvFilter(ownerBtn)
+    if ownerBtn then
+        if ownerBtn._wnAdvSub and ownerBtn._wnAdvSub.Hide then
+            ownerBtn._wnAdvSub:Hide()
+        end
+        ownerBtn._wnAdvSub = nil
+        if ownerBtn._wnAdvRoot and ownerBtn._wnAdvRoot.Hide then
+            ownerBtn._wnAdvRoot:Hide()
+        end
+        ownerBtn._wnAdvRoot = nil
+        if ownerBtn._sortClickCatcher then ownerBtn._sortClickCatcher:Hide() end
+    end
+    if activeSortDropdownMenu and activeSortDropdownMenu.Hide then
+        activeSortDropdownMenu:Hide()
+    end
+    activeSortDropdownMenu = nil
+end
+
+--- Close Filter flyouts and row pick menus (resize / scroll / tab rebuild).
+---@return boolean closed
+function ns.UI_CloseCharacterTabFlyoutMenus()
+    local closed = false
+    if activeSortDropdownMenu and activeSortDropdownMenu.IsShown and activeSortDropdownMenu:IsShown() then
+        closed = true
+    end
+    if activePickMenu and activePickMenu.IsShown and activePickMenu:IsShown() then
+        closed = true
+    end
+    WnCloseFullAdvFilter(nil)
+    if activePickMenu and activePickMenu.Hide then
+        activePickMenu:Hide()
+    end
+    activePickMenu = nil
+    return closed
+end
+
+--- Characters / Professions title card: sort modes + section filter + optional delete custom header.
+--- opts: sortOptions, dbSortTable, dbSectionFilter, getCustomSections(), onRefresh(), onDeleteSection(groupId, groupName)
+---@return Button|nil
+local function CreateCharacterTabAdvancedFilterButton(parent, opts)
+    if not parent or not opts or not ns.UI or not ns.UI.Factory or not ns.UI.Factory.CreateButton then
+        return nil
+    end
+    local sortOptions = opts.sortOptions
+    local dbSortTable = opts.dbSortTable
+    local dbSectionFilter = opts.dbSectionFilter
+    local getCustomSections = opts.getCustomSections
+    local onRefresh = opts.onRefresh
+    local onDeleteSection = opts.onDeleteSection
+    local sortTabId = opts.sortTabId
+    if not sortOptions or not dbSortTable or not dbSectionFilter or not onRefresh then
+        return nil
+    end
+
+    local buttonHeight = ns.UI_CONSTANTS and ns.UI_CONSTANTS.BUTTON_HEIGHT or 32
+    local btnWidth = ns.UI_GetTitleToolbarPresetWidth and ns.UI_GetTitleToolbarPresetWidth("filter") or 96
+    local btn = ns.UI.Factory:CreateButton(parent, btnWidth, buttonHeight, false)
+    ApplyFilterHostButtonChrome(btn, false)
+    local text = FontManager:CreateFontString(btn, "body", "OVERLAY")
+    text:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    text:SetJustifyH("CENTER")
+    text:SetText((ns.L and ns.L["FILTER_LABEL"]) or "Filter")
+    ns.UI_SetTextColorRole(text, "Bright")
+
+    local itemHeight = (UI_SPACING and UI_SPACING.DROPDOWN_MENU_ROW_HEIGHT) or (UI_SPACING and UI_SPACING.ROW_HEIGHT) or 26
+    local sideMargin = (UI_SPACING and UI_SPACING.SIDE_MARGIN) or 10
+    local radioArea = 8 + 16 + 6
+
+    local function measureMaxLabelWidth(labels)
+        local maxW = 0
+        local measure = btn:CreateFontString(nil, "OVERLAY")
+        if ns.FontManager then FontManager:ApplyFont(measure, "body") end
+        for i = 1, #labels do
+            measure:SetText(labels[i] or "")
+            local w = measure:GetStringWidth()
+            if w and w > maxW then maxW = w end
+        end
+        measure:SetText("")
+        return maxW
+    end
+
+    local function openFlyoutFrom(anchorMenu, rows, anchorYOffset)
+        if btn._wnAdvSub and btn._wnAdvSub.Hide then
+            btn._wnAdvSub:Hide()
+        end
+        btn._wnAdvSub = nil
+        if not rows or #rows == 0 then return end
+        local labels = {}
+        for i = 1, #rows do labels[i] = rows[i].label or "" end
+        local mw = math.max(160, math.ceil(measureMaxLabelWidth(labels)) + sideMargin * 2 + radioArea + 16)
+        local mh = #rows * itemHeight + ((UI_SPACING and UI_SPACING.AFTER_ELEMENT) or 8)
+        local sub = ns.UI.Factory:CreateContainer(UIParent, mw, mh, true)
+        sub:SetFrameStrata("FULLSCREEN_DIALOG")
+        sub:SetFrameLevel((anchorMenu and anchorMenu:GetFrameLevel() or 300) + 5)
+        sub:SetPoint("TOPLEFT", anchorMenu, "TOPRIGHT", 4, anchorYOffset or 0)
+        sub:SetClampedToScreen(true)
+        ApplyFlyoutMenuChrome(sub)
+        btn._wnAdvSub = sub
+        local bw = mw - sideMargin * 2
+        for i = 1, #rows do
+            local row = rows[i]
+            local optionBtn = ns.UI.Factory:CreateButton(sub, bw, itemHeight, true)
+            optionBtn:SetPoint("TOPLEFT", sideMargin, -(i - 1) * itemHeight - 4)
+            local isSel = row.selected == true
+            local radio = (ns.UI_CreateThemedRadioButton and ns.UI_CreateThemedRadioButton(optionBtn, isSel)) or nil
+            local optionText = FontManager:CreateFontString(optionBtn, "body", "OVERLAY")
+            if radio then
+                radio:SetPoint("LEFT", 8, 0)
+                if radio.innerDot then radio.innerDot:SetShown(isSel) end
+                optionText:SetPoint("LEFT", radio, "RIGHT", 6, 0)
+            else
+                optionText:SetPoint("LEFT", 10, 0)
+            end
+            optionText:SetJustifyH("LEFT")
+            optionText:SetText(row.label or "")
+            if isSel then
+                optionText:SetTextColor(ns.UI_COLORS.accent[1], ns.UI_COLORS.accent[2], ns.UI_COLORS.accent[3])
+            else
+                ns.UI_SetTextColorRole(optionText, "Bright")
+            end
+            if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(optionBtn, {0.08, 0.08, 0.10, 0}, {0, 0, 0, 0}) end
+            if ns.UI.Factory.ApplyHighlight then ns.UI.Factory:ApplyHighlight(optionBtn) end
+            optionBtn:SetScript("OnClick", function()
+                if row.onPick then row.onPick() end
+                WnCloseFullAdvFilter(btn)
+                onRefresh()
+            end)
+        end
+        sub:Show()
+        return sub
+    end
+
+    btn:SetScript("OnEnter", function(self)
+        ns.UI_SetTextColorRole(text, "Bright")
+        ApplyFilterHostButtonChrome(self, true)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText((ns.L and ns.L["FILTER_MENU_TOOLTIP"]) or "Sort and filter which sections are visible.", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function(self)
+        ns.UI_SetTextColorRole(text, "Bright")
+        ApplyFilterHostButtonChrome(self, false)
+        GameTooltip:Hide()
+    end)
+
+    btn:SetScript("OnClick", function(self)
+        if self._wnAdvRoot and self._wnAdvRoot:IsShown() then
+            WnCloseFullAdvFilter(self)
+            return
+        end
+        if activeSortDropdownMenu and activeSortDropdownMenu:IsShown() then
+            activeSortDropdownMenu:Hide()
+            activeSortDropdownMenu = nil
+        end
+        WnCloseFullAdvFilter(self)
+
+        local L = ns.L
+        local rootLabels = {
+            (L and L["FILTER_SUBMENU_SORT"]) or "Sort…",
+            (L and L["FILTER_SUBMENU_VIEW"]) or "Show section…",
+        }
+        local rw = math.max(btn:GetWidth(), math.ceil(measureMaxLabelWidth(rootLabels)) + sideMargin * 2 + 24)
+        local rootRowCount = 2
+        local rh = rootRowCount * itemHeight + ((UI_SPACING and UI_SPACING.AFTER_ELEMENT) or 8)
+        local root = ns.UI.Factory:CreateContainer(UIParent, rw, rh, true)
+        root._wnAdvRoot = true
+        root:SetFrameStrata("FULLSCREEN_DIALOG")
+        root:SetFrameLevel(300)
+        root:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 0, -2)
+        root:SetClampedToScreen(true)
+        ApplyFlyoutMenuChrome(root)
+        activeSortDropdownMenu = root
+        btn._wnAdvRoot = root
+
+        local bw = rw - sideMargin * 2
+        local function makeRootRow(index, label, onActivate)
+            local rowBtn = ns.UI.Factory:CreateButton(root, bw, itemHeight, true)
+            rowBtn:SetPoint("TOPLEFT", sideMargin, -(index - 1) * itemHeight - 4)
+            if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(rowBtn, {0.08, 0.08, 0.10, 0}, {0, 0, 0, 0}) end
+            if ns.UI.Factory.ApplyHighlight then ns.UI.Factory:ApplyHighlight(rowBtn) end
+            local fs = FontManager:CreateFontString(rowBtn, "body", "OVERLAY")
+            fs:SetPoint("LEFT", 10, 0)
+            fs:SetJustifyH("LEFT")
+            ns.UI_SetTextColorRole(fs, "Bright")
+            fs:SetText(label)
+            rowBtn:SetScript("OnClick", function()
+                onActivate(rowBtn)
+            end)
+            return rowBtn
+        end
+
+        makeRootRow(1, rootLabels[1], function()
+            local rawKey = ResolveSortMenuCurrentKey(dbSortTable, sortOptions)
+            local rows = {}
+            for si = 1, #sortOptions do
+                local opt = sortOptions[si]
+                rows[#rows + 1] = {
+                    label = opt.label,
+                    selected = (rawKey == opt.key),
+                    onPick = function()
+                        ApplyTabSortPick(dbSortTable, sortTabId, opt.key)
+                    end,
+                }
+            end
+            openFlyoutFrom(root, rows, 0)
+        end)
+
+        makeRootRow(2, rootLabels[2], function()
+            local cur = dbSectionFilter.sectionKey or "all"
+            local rows = {
+                {
+                    label = (L and L["SECTION_FILTER_ALL"]) or "All sections",
+                    selected = (cur == "all"),
+                    onPick = function() dbSectionFilter.sectionKey = "all" end,
+                },
+                {
+                    label = (L and L["SECTION_FILTER_FAVORITES"]) or "Favorites only",
+                    selected = (cur == "favorites"),
+                    onPick = function() dbSectionFilter.sectionKey = "favorites" end,
+                },
+                {
+                    label = (L and L["SECTION_FILTER_REGULAR"]) or "Characters (ungrouped) only",
+                    selected = (cur == "regular"),
+                    onPick = function() dbSectionFilter.sectionKey = "regular" end,
+                },
+            }
+            local customs = getCustomSections and getCustomSections() or {}
+            for ci = 1, #customs do
+                local g = customs[ci]
+                local gid = g.id
+                local lk = (ns.CharacterService and ns.CharacterService.GetCustomGroupListKey and ns.CharacterService:GetCustomGroupListKey(gid)) or ("group_" .. tostring(gid))
+                local gname = g.name or gid
+                rows[#rows + 1] = {
+                    label = gname,
+                    selected = (cur == lk),
+                    onPick = function() dbSectionFilter.sectionKey = lk end,
+                }
+            end
+            rows[#rows + 1] = {
+                label = (L and L["SECTION_FILTER_UNTRACKED"]) or "Untracked only",
+                selected = (cur == "untracked"),
+                onPick = function() dbSectionFilter.sectionKey = "untracked" end,
+            }
+            openFlyoutFrom(root, rows, 0)
+        end)
+
+        root:Show()
+
+        local clickCatcher = btn._sortClickCatcher
+        if not clickCatcher then
+            clickCatcher = CreateFrame("Frame", nil, UIParent)
+            clickCatcher:SetAllPoints()
+            clickCatcher:SetFrameStrata("FULLSCREEN_DIALOG")
+            clickCatcher:SetFrameLevel((root:GetFrameLevel() or 300) - 2)
+            clickCatcher:EnableMouse(true)
+            clickCatcher:SetScript("OnMouseDown", function()
+                WnCloseFullAdvFilter(btn)
+            end)
+            btn._sortClickCatcher = clickCatcher
+        end
+        clickCatcher:Show()
+
+        local origHide = root:GetScript("OnHide")
+        root:SetScript("OnHide", function(m)
+            WnCloseFullAdvFilter(btn)
+            if origHide then origHide(m) end
+        end)
+    end)
+
+    return btn
+end
+
+--- Shared vertical pick menu (Factory rows). Row: { label, onPick?, noRadio?, selected?, isHeader? }
+local function WnShowLabeledPickMenu(anchorFrame, rows, onDone)
+    if not anchorFrame or type(rows) ~= "table" or #rows < 1 then return end
+    local itemHeight = (UI_SPACING and UI_SPACING.DROPDOWN_MENU_ROW_HEIGHT) or 26
+    local sideMargin = 10
+    local labels = {}
+    for i = 1, #rows do
+        if rows[i].label then
+            labels[#labels + 1] = rows[i].label
+        end
+    end
+    if #labels < 1 then return end
+    local mw = math.max(220, 40 + sideMargin * 2 + (function()
+        local maxW = 0
+        local measure = anchorFrame:CreateFontString(nil, "OVERLAY")
+        if ns.FontManager then FontManager:ApplyFont(measure, "body") end
+        for j = 1, #labels do
+            measure:SetText(labels[j])
+            local w = measure:GetStringWidth()
+            if w and w > maxW then maxW = w end
+        end
+        measure:SetText("")
+        return math.ceil(maxW)
+    end)())
+    local totalH = 8
+    for i = 1, #rows do
+        totalH = totalH + (rows[i].isHeader and (itemHeight - 6) or itemHeight)
+    end
+    if activePickMenu and activePickMenu.Hide then
+        activePickMenu:Hide()
+    end
+    local catcher = CreateFrame("Frame", nil, UIParent)
+    local menu = ns.UI.Factory:CreateContainer(UIParent, mw, totalH, true)
+    activePickMenu = menu
+    menu:SetFrameStrata("FULLSCREEN_DIALOG")
+    menu:SetFrameLevel(320)
+    menu:SetPoint("TOPLEFT", anchorFrame, "BOTTOMRIGHT", 4, -2)
+    menu:SetClampedToScreen(true)
+    ApplyFlyoutMenuChrome(menu)
+    local bw = mw - sideMargin * 2
+    local y = 4
+    for i = 1, #rows do
+        local r = rows[i]
+        if r.isHeader then
+            local bar = CreateFrame("Frame", nil, menu)
+            bar:SetSize(bw, itemHeight - 6)
+            bar:SetPoint("TOPLEFT", sideMargin, -y)
+            local fs = FontManager:CreateFontString(bar, FontManager:GetFontRole("tabSubtitle"), "OVERLAY")
+            fs:SetPoint("LEFT", 0, 0)
+            fs:SetWidth(bw)
+            fs:SetJustifyH("LEFT")
+            fs:SetText(r.label or "")
+            ns.UI_SetTextColorRole(fs, "Muted")
+            y = y + (itemHeight - 6)
+        else
+            local optionBtn = ns.UI.Factory:CreateButton(menu, bw, itemHeight, true)
+            optionBtn:SetPoint("TOPLEFT", sideMargin, -y)
+            local radio = nil
+            if not r.noRadio then
+                radio = (ns.UI_CreateThemedRadioButton and ns.UI_CreateThemedRadioButton(optionBtn, r.selected)) or nil
+            end
+            local optionText = FontManager:CreateFontString(optionBtn, "body", "OVERLAY")
+            if radio then
+                radio:SetPoint("LEFT", 8, 0)
+                if radio.innerDot then radio.innerDot:SetShown(r.selected) end
+                optionText:SetPoint("LEFT", radio, "RIGHT", 6, 0)
+            else
+                optionText:SetPoint("LEFT", 10, 0)
+            end
+            optionText:SetJustifyH("LEFT")
+            optionText:SetText(r.label or "")
+            if r.disabled then
+                ns.UI_SetTextColorRole(optionText, "Dim")
+                optionBtn:EnableMouse(false)
+            elseif r.selected then
+                optionText:SetTextColor(ns.UI_COLORS.accent[1], ns.UI_COLORS.accent[2], ns.UI_COLORS.accent[3])
+            else
+                ns.UI_SetTextColorRole(optionText, "Bright")
+            end
+            if ns.UI_ApplyVisuals then ns.UI_ApplyVisuals(optionBtn, {0.08, 0.08, 0.10, 0}, {0, 0, 0, 0}) end
+            if ns.UI.Factory.ApplyHighlight and not r.disabled then ns.UI.Factory:ApplyHighlight(optionBtn) end
+            if not r.disabled and r.onPick then
+                optionBtn:SetScript("OnClick", function()
+                    menu:Hide()
+                    if catcher then catcher:Hide() end
+                    r.onPick()
+                    if onDone then onDone() end
+                end)
+            else
+                optionBtn:SetScript("OnClick", nil)
+            end
+            y = y + itemHeight
+        end
+    end
+    catcher:SetAllPoints()
+    catcher:SetFrameStrata("FULLSCREEN_DIALOG")
+    catcher:SetFrameLevel(menu:GetFrameLevel() - 1)
+    catcher:EnableMouse(true)
+    catcher:SetScript("OnMouseDown", function()
+        menu:Hide()
+        catcher:Hide()
+    end)
+    catcher:Show()
+    menu:SetScript("OnHide", function()
+        catcher:Hide()
+        if activePickMenu == menu then
+            activePickMenu = nil
+        end
+    end)
+    menu:Show()
+end
+
+--- Right-click menu on a character row: tracking toggle + delete.
+--- Both actions already exist as row icons; the menu makes them findable, which is the actual
+--- complaint (a stale row left behind by a faction change looks unremovable).
+---@param anchorFrame Frame Row that was right-clicked
+---@param charKey string
+---@param opts table { charName?, isTracked?, isCurrent?, deleteButton?, onDone? }
+function ns.UI_ShowCharacterRowContextMenu(anchorFrame, charKey, opts)
+    if not anchorFrame or not charKey or not ns.CharacterService then return end
+    opts = opts or {}
+    local L = ns.L
+    local addon = ns.ArtisanNexus
+    if not addon then return end
+    local rows = {}
+
+    local name = opts.charName
+    if name and issecretvalue and issecretvalue(name) then name = nil end
+    rows[#rows + 1] = { isHeader = true, label = name or ((L and L["UNKNOWN"]) or "Unknown") }
+
+    local isTracked = opts.isTracked ~= false
+    rows[#rows + 1] = {
+        label = isTracked
+            and ((L and L["CHARACTER_MENU_STOP_TRACKING"]) or "Stop tracking")
+            or ((L and L["CHARACTER_MENU_START_TRACKING"]) or "Start tracking"),
+        noRadio = true,
+        onPick = function()
+            if ns.CharacterService.ConfirmCharacterTracking then
+                ns.CharacterService:ConfirmCharacterTracking(addon, charKey, not isTracked)
+            end
+            if addon.SendMessage and ns.Constants then
+                addon:SendMessage(ns.Constants.EVENTS.UI_MAIN_REFRESH_REQUESTED, { tab = "chars", skipCooldown = true })
+            end
+        end,
+    }
+
+    -- Reuse the row's own delete button so the confirm dialog stays in one place.
+    local delBtn = opts.deleteButton
+    if not opts.isCurrent and delBtn and delBtn.Click then
+        rows[#rows + 1] = {
+            label = (L and L["CHARACTER_MENU_DELETE"]) or "Delete character",
+            noRadio = true,
+            onPick = function()
+                local function open() delBtn:Click() end
+                if C_Timer and C_Timer.After then C_Timer.After(0, open) else open() end
+            end,
+        }
+    end
+
+    WnShowLabeledPickMenu(anchorFrame, rows, opts.onDone)
+end
+
+--- Popup: move character to / from a custom section (any tracked character, favorites included).
+function ns.UI_ShowCharacterSectionAssignMenu(anchorFrame, charKey, profile, onDone)
+    if not anchorFrame or not charKey or not profile or not ns.CharacterService then return end
+    ns.CharacterService:EnsureCustomCharacterSectionsProfile(profile)
+    local L = ns.L
+    local rows = {}
+    local addon = ns.ArtisanNexus
+    -- Resolve through the service: raw indexing misses assignments stored under the canonical key.
+    local assignedGroupId = ns.CharacterService:GetCharacterCustomSectionId(addon, charKey)
+    local isCharLocked = ns.CharacterService:IsCharacterSectionLocked(addon, charKey)
+
+    local function GetLockAtlasMarkup(sz)
+        sz = sz or 12
+        local markup = ns.UI_GetIconMarkup and ns.UI_GetIconMarkup("lock", sz, sz)
+        if markup and markup ~= "" then
+            return markup
+        end
+        return string.format("|TInterface\\Common\\LockIcon:%d:%d:0:0|t", sz, sz)
+    end
+
+    if assignedGroupId then
+        local lockText = isCharLocked
+            and ((L and L["CUSTOM_HEADER_UNLOCK_CHAR"]) or "Unlock this character")
+            or ((L and L["CUSTOM_HEADER_LOCK_CHAR"]) or "Lock character to section")
+        rows[#rows + 1] = {
+            label = GetLockAtlasMarkup(12) .. " " .. lockText,
+            noRadio = true,
+            onPick = function()
+                ns.CharacterService:ToggleCharacterSectionLock(addon, charKey)
+            end,
+        }
+
+        rows[#rows + 1] = {
+            label = (L and L["CUSTOM_HEADER_REMOVE_ASSIGN"]) or "Remove from custom header",
+            selected = false,
+            noRadio = true,
+            disabled = isCharLocked,
+            onPick = function()
+                if isCharLocked then return end
+                ns.CharacterService:SetCharacterCustomSection(addon, charKey, nil)
+            end,
+        }
+    end
+    local groups = profile.characterCustomGroups or {}
+    for i = 1, #groups do
+        local g = groups[i]
+        local isCurrent = (assignedGroupId == g.id)
+        local disabled = (not isCurrent) and isCharLocked
+        local label = g.name or g.id
+        if disabled then
+            label = label .. " " .. GetLockAtlasMarkup(12)
+        end
+        rows[#rows + 1] = {
+            label = label,
+            selected = isCurrent,
+            disabled = disabled,
+            onPick = function()
+                if disabled then return end
+                ns.CharacterService:SetCharacterCustomSection(addon, charKey, g.id)
+            end,
+        }
+    end
+    WnShowLabeledPickMenu(anchorFrame, rows, onDone)
+end
+
+--- Title-bar menu: new/delete custom headers + optional gold header highlight for one section (visual only).
+function ns.UI_ShowCharacterSectionsToolbarMenu(anchorFrame, profile)
+    if not anchorFrame or not profile or not ns.CharacterService then return end
+    ns.CharacterService:EnsureCustomCharacterSectionsProfile(profile)
+    local L = ns.L
+    local addon = ns.ArtisanNexus
+    local rows = {}
+    rows[#rows + 1] = { isHeader = true, label = (L and L["CUSTOM_HEADER_MENU_SECTION_HEADERS"]) or "Custom headers" }
+    rows[#rows + 1] = {
+        label = (L and L["CUSTOM_HEADER_MENU_NEW"]) or "New custom section…",
+        noRadio = true,
+        onPick = function()
+            local function openNewHeaderDialog()
+                local a = ns.ArtisanNexus
+                if a and a.OpenCustomCharacterHeaderDialog then
+                    a:OpenCustomCharacterHeaderDialog()
+                end
+            end
+            -- Defer one tick so pick menu + click catcher finish hiding before the modal opens.
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0, openNewHeaderDialog)
+            else
+                openNewHeaderDialog()
+            end
+        end,
+    }
+    local groups = profile.characterCustomGroups or {}
+    if #groups == 0 then
+        rows[#rows + 1] = {
+            label = (L and L["CUSTOM_HEADER_MENU_NONE_YET"]) or "No sections yet - use New custom section above.",
+            noRadio = true,
+            disabled = true,
+        }
+    else
+        rows[#rows + 1] = { isHeader = true, label = (L and L["CUSTOM_HEADER_MENU_RENAME_GROUP"]) or "Rename a section" }
+        for i = 1, #groups do
+            local g = groups[i]
+            rows[#rows + 1] = {
+                label = string.format((L and L["CUSTOM_HEADER_MENU_RENAME_FMT"]) or "Rename: %s", g.name or g.id),
+                noRadio = true,
+                onPick = function()
+                    -- Defer a tick so the pick menu and its click catcher finish hiding first.
+                    local function open()
+                        if addon and addon.OpenRenameCustomSectionDialog then
+                            addon:OpenRenameCustomSectionDialog(g.id, g.name)
+                        end
+                    end
+                    if C_Timer and C_Timer.After then C_Timer.After(0, open) else open() end
+                end,
+            }
+        end
+        rows[#rows + 1] = { isHeader = true, label = (L and L["CUSTOM_HEADER_MENU_DELETE_GROUP"]) or "Delete a section" }
+        for i = 1, #groups do
+            local g = groups[i]
+            rows[#rows + 1] = {
+                label = string.format((L and L["CUSTOM_HEADER_MENU_DELETE_FMT"]) or "Delete: %s", g.name or g.id),
+                noRadio = true,
+                onPick = function()
+                    if addon and addon.ConfirmDeleteCustomCharacterHeader then
+                        addon:ConfirmDeleteCustomCharacterHeader(g.id, g.name)
+                    end
+                end,
+            }
+        end
+    end
+    WnShowLabeledPickMenu(anchorFrame, rows, nil)
+end
+
+local function SortOptionLabel(key, fallback)
+    return (ns.L and ns.L[key]) or fallback
+end
+
+--- Shared character-list sort modes (same order on every tab).
+function ns.UI_BuildCharacterSortOptions()
+    local out = {}
+    out[#out + 1] = { key = "default", label = SortOptionLabel("SORT_MODE_DEFAULT", "Default Order") }
+    out[#out + 1] = { key = "manual", label = SortOptionLabel("SORT_MODE_MANUAL", "Manual (Custom Order)") }
+    out[#out + 1] = { key = "name", label = SortOptionLabel("SORT_MODE_NAME", "Name (A-Z)") }
+    out[#out + 1] = { key = "class", label = SortOptionLabel("SORT_MODE_CLASS", "Class (A-Z)") }
+    out[#out + 1] = { key = "level", label = SortOptionLabel("SORT_MODE_LEVEL", "Level (Highest)") }
+    out[#out + 1] = { key = "ilvl", label = SortOptionLabel("SORT_MODE_ILVL", "Item Level (Highest)") }
+    out[#out + 1] = { key = "gold", label = SortOptionLabel("SORT_MODE_GOLD", "Gold (Highest)") }
+    out[#out + 1] = { key = "realm", label = SortOptionLabel("SORT_MODE_REALM", "Realm (A-Z)") }
+    out[#out + 1] = { key = "guild", label = SortOptionLabel("SORT_MODE_GUILD", "Guild (A-Z)") }
+    return out
+end
+
+--- PvP Warband Overview: roster sort modes + best rated bracket.
+function ns.UI_BuildPvpOverviewSortOptions()
+    local out = {}
+    out[#out + 1] = { key = "pvpRating", label = SortOptionLabel("SORT_MODE_PVP_RATING", "Rating (Highest)") }
+    out[#out + 1] = { key = "default", label = SortOptionLabel("SORT_MODE_DEFAULT", "Default Order") }
+    out[#out + 1] = { key = "manual", label = SortOptionLabel("SORT_MODE_MANUAL", "Manual (Custom Order)") }
+    out[#out + 1] = { key = "name", label = SortOptionLabel("SORT_MODE_NAME", "Name (A-Z)") }
+    out[#out + 1] = { key = "class", label = SortOptionLabel("SORT_MODE_CLASS", "Class (A-Z)") }
+    out[#out + 1] = { key = "level", label = SortOptionLabel("SORT_MODE_LEVEL", "Level (Highest)") }
+    out[#out + 1] = { key = "ilvl", label = SortOptionLabel("SORT_MODE_ILVL", "Item Level (Highest)") }
+    out[#out + 1] = { key = "gold", label = SortOptionLabel("SORT_MODE_GOLD", "Gold (Highest)") }
+    out[#out + 1] = { key = "realm", label = SortOptionLabel("SORT_MODE_REALM", "Realm (A-Z)") }
+    out[#out + 1] = { key = "guild", label = SortOptionLabel("SORT_MODE_GUILD", "Guild (A-Z)") }
+    return out
+end
+
+ns.UI_CreateCharacterSortDropdown = CreateCharacterSortDropdown
+ns.UI_CreateCharacterTabAdvancedFilterButton = CreateCharacterTabAdvancedFilterButton

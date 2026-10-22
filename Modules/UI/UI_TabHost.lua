@@ -325,6 +325,10 @@ local function PopulateContentBody(self, forceRepaint)
 
     -- Dev-only: wall time for scroll-heavy mains (WN-PERF checklist). Complements tab-switch clickâ†’populate log + `Pop_drawTab`.
     local drawPerfT0 = (isTracked and IsTabPerfMonitorEnabled() and TAB_DRAW_PERF_TRACE[tab]) and GetTime() or nil
+    -- Artisan Nexus: the footer page status belongs to the drawn tab (HubData ns.UI_SetFooterStatus).
+    if ns.UI_SetFooterStatus then
+        ns.UI_SetFooterStatus(nil)
+    end
     if not isTracked and trackedOnlyTabs[tab] then
         height = self:DrawTrackingRequiredBanner(scrollChild)
     -- Artisan Hub tabs (MAIN_TAB_ORDER); each Hub/Pages file defines its Draw*Tab method.

@@ -23,6 +23,7 @@ verbatim Modules/UI/SharedWidgets_RowPool.lua
 verbatim Modules/UI/SharedWidgets_TableKit.lua
 verbatim Modules/UI/SharedWidgets_Search.lua
 verbatim Modules/UI/SharedWidgets_EmptyState.lua
+verbatim Modules/UI/SharedWidgets_CharacterFilter.lua
 verbatim Modules/UI/SharedWidgets_TitleToolbar.lua
 verbatim Modules/UI/LayoutCoordinator.lua
 verbatim Modules/UI/FramePoolFactory.lua

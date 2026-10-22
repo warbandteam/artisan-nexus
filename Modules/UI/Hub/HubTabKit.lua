@@ -639,9 +639,13 @@ end
 
 --- Chains `buttons` right to left on the title card (first = rightmost) and reserves their width
 --- for the title / subtitle text.
-function H.LayoutToolbar(titleCard, textContainer, buttons)
-    local anchor
+--- rightmost: an already right-anchored control (e.g. the WN sort dropdown); buttons chain to its left.
+function H.LayoutToolbar(titleCard, textContainer, buttons, rightmost)
+    local anchor = rightmost
     local widths = {}
+    if rightmost then
+        widths[1] = rightmost:GetWidth() or 0
+    end
     for i = 1, #buttons do
         local b = buttons[i]
         if b then

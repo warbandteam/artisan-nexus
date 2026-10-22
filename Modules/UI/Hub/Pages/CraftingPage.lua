@@ -35,11 +35,12 @@
     Hub/HubTabKit.lua).
 
     Profile keys (read with code fallbacks): hubKnownBy ("me" | "any", default "any"),
-    hubProfitSort ("margin" | "concentration", default "margin"; "concentration" sorts by gold per
-    concentration), hubPriceBasis ("spot" | "avg",
+    hubCraftSort ({ key = "profit" | "pct" | "gpc" | "cost" | "name" }, written by the WN sort dropdown at
+    the title card's right edge; seeded from the legacy hubProfitSort), hubPriceBasis ("spot" | "avg",
     default "spot"), hubSessionOnly (boolean; UI_RefreshRouter repaints on SESSION_LOOT_UPDATED
     while it is on), hubProfessionFilter (shared). Session only keeps rows with
     RecipeService:MaxCraftsForCounts(spellID, GetSessionCounts(profile.lootHistoryActiveTab)) >= 1.
+    The column strip only labels the columns; "Cached recipes X / Y" is the window footer status.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -260,13 +261,10 @@ local function Columns()
     if not COLS then
         COLS = {
             H.IconColumn(),
-            { key = "recipe", label = SafeL("HUB_COL_RECIPE", "Recipe"), flex = 1, min = COL_NAME_MIN, sortable = true },
-            { key = "cost", label = SafeL("HUB_CRAFT_COL_COST", "Craft cost"), width = COL_MONEY, align = "RIGHT",
-                sortable = true },
-            { key = "profit", label = SafeL("HUB_COL_PROFIT", "Profit"), width = COL_MONEY, align = "RIGHT",
-                sortable = true },
-            { key = "pct", label = SafeL("HUB_CRAFT_COL_PROFIT_PCT", "Profit %"), width = COL_PCT, align = "RIGHT",
-                sortable = true },
+            { key = "recipe", label = SafeL("HUB_COL_RECIPE", "Recipe"), flex = 1, min = COL_NAME_MIN },
+            { key = "cost", label = SafeL("HUB_CRAFT_COL_COST", "Craft cost"), width = COL_MONEY, align = "RIGHT" },
+            { key = "profit", label = SafeL("HUB_COL_PROFIT", "Profit"), width = COL_MONEY, align = "RIGHT" },
+            { key = "pct", label = SafeL("HUB_CRAFT_COL_PROFIT_PCT", "Profit %"), width = COL_PCT, align = "RIGHT" },
         }
     end
     return COLS
@@ -304,12 +302,36 @@ local function Compare(a, b)
     return tostring(a.name or "") < tostring(b.name or "")
 end
 
+--- Sort modes of the title-toolbar sort button (WN SharedWidgets_CharacterFilter sort dropdown).
+local SORT_OPTIONS = {
+    { key = "profit", label = SafeL("HUB_SORT_PROFIT", "Profit (highest)"), sortKey = "profit", asc = false },
+    { key = "pct", label = SafeL("HUB_SORT_PROFIT_PCT", "Profit % (highest)"), sortKey = "pct", asc = false },
+    { key = "gpc", label = SafeL("HUB_SORT_GPC", "Gold per concentration"), sortKey = "gpc", asc = false },
+    { key = "cost", label = SafeL("HUB_SORT_COST", "Craft cost (lowest)"), sortKey = "cost", asc = true },
+    { key = "name", label = SafeL("HUB_SORT_NAME", "Name (A-Z)"), sortKey = "recipe", asc = true },
+}
+
+--- profile.hubCraftSort = { key = <SORT_OPTIONS key> } (the dropdown writes .key); legacy
+--- hubProfitSort == "concentration" maps to gold per concentration.
+local function SortTable()
+    local p = Profile()
+    if not p then return { key = "profit" } end
+    if type(p.hubCraftSort) ~= "table" then
+        p.hubCraftSort = { key = (SortMode() == "concentration") and "gpc" or "profit" }
+    end
+    return p.hubCraftSort
+end
+
 local function ResolveSort()
     if state.sortKey then
         return state.sortKey, state.sortAsc == true
     end
-    if SortMode() == "concentration" then
-        return "gpc", false
+    local key = SortTable().key
+    for i = 1, #SORT_OPTIONS do
+        local o = SORT_OPTIONS[i]
+        if o.key == key then
+            return o.sortKey, o.asc
+        end
     end
     return "profit", false
 end
@@ -782,7 +804,7 @@ local function DrawTable(rc, y, width, rows)
     PlaceWide(strip, rc, y)
     strip:SetWidth(width)
     strip:SetColumns(cols, cache.widths, cache.offsets, n)
-    strip:SetSort(SORT_KEY, SORT_ASC)
+    strip:SetSort(nil)
     y = y + strip:GetStripHeight()
     local rh = pool.height
     local gap = H.SECTION_GAP or 12
@@ -832,10 +854,6 @@ local function DrawResults(rc, width, rows)
         return EmptyCard(rc, y, "crafting_recipes", "Professions-Icon-Accept-Order",
             SafeL("HUB_CRAFT_EMPTY_RECIPES", "No recipes read yet"),
             SafeL("HUB_CRAFT_EMPTY_RECIPES_DESC", "Open your profession window once."))
-    end
-    local harvest = H.HarvestNotice()
-    if harvest then
-        y = NoticeLine(rc, y, "harvest", harvest, "Muted")
     end
     if NoPrices() then
         y = NoticeLine(rc, y, "prices", SafeL("HUB_OV_NEED_PRICES", "Open the Auction House and press Sync AH Prices."), "Muted")
@@ -977,7 +995,17 @@ function ArtisanNexus:DrawCraftingTab(parent)
                 Refresh()
             end, SafeL("HUB_CRAFT_CLEAR_LINK_TT", "Unpin the linked recipe."))
         end
-        H.LayoutToolbar(titleCard, textContainer, buttons)
+        -- WN Professions tab: the sort dropdown sits at the title card's right edge, the other
+        -- toolbar buttons chain to its left (ProfessionsUI_DrawTab.lua toolbarLeft).
+        local sortBtn = ns.UI_CreateCharacterSortDropdown and ns.UI_CreateCharacterSortDropdown(titleCard,
+            SORT_OPTIONS, SortTable(), function()
+                state.sortKey, state.sortAsc = nil, nil
+                Refresh()
+            end, nil)
+        if sortBtn then
+            ns.UI_AnchorTitleToolbarControlRight(titleCard, sortBtn)
+        end
+        H.LayoutToolbar(titleCard, textContainer, buttons, sortBtn)
         local headerY = ns.UI_PageStack_Place(chrome, titleCard)
 
         local searchBox = ns.UI_CreateSearchBox(chrome.headerParent, contentW,
@@ -985,6 +1013,15 @@ function ArtisanNexus:DrawCraftingTab(parent)
         C.searchBox = searchBox
         headerY = ns.UI_PageStack_Place(chrome, searchBox, ns.UI_LAYOUT.PAGE_STACK.SEARCH_HEIGHT or 32)
         ns.UI_CommitTabFixedHeader(mf, headerY)
+    end
+
+    local rs = ns.RecipeService
+    local stats = rs and rs.GetStats and rs:GetStats()
+    if stats and (stats.total or 0) > 0 then
+        ns.UI_SetFooterStatus(string.format(SafeL("HUB_FOOTER_CACHED_FMT", "Cached recipes %d / %d"),
+            stats.harvested or 0, stats.total),
+            (stats.harvested or 0) < stats.total and SafeL("HUB_FOOTER_CACHED_TT",
+                "Open each profession once on each character to read its recipes.") or nil)
     end
 
     local bodyTop = BodyTop()

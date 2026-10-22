@@ -426,7 +426,8 @@ function ArtisanNexus:DrawLedgerTab(parent)
         local titleCard = select(1, ns.UI_CreateStandardTabTitleCard(chrome.headerParent, {
             tabKey = "ledger",
             titleText = H.AccentTitle(SafeL("HUB_TAB_SHORT_LEDGER", "Ledger")),
-            subtitleText = string.format(SafeL("HUB_LEDGER_SUB_FMT", "What you earned in the last %d days"), LedgerDays()),
+            subtitleText = string.format(SafeL("HUB_LEDGER_PURPOSE_FMT",
+                "Gold you actually made in the last %d days: AH sales, crafts and your gold total"), LedgerDays()),
             showUnderline = false,
         }))
         titleCard:Show()
