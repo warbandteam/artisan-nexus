@@ -72,6 +72,25 @@ local STALE_TTL_SEC         = 60 * 60 * 24  -- 24 hours
 --- hammer the AH and trip Blizzard's rate limit.
 local SCAN_STEP_MAX_SEC = 1.5
 
+--- The client queues a throttled message itself (AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED,
+--- AuctionHouseDocumentation 12.1.5.70448): waiting longer than this on
+--- IsThrottledMessageSystemReady only stalls the scan, so the query is sent anyway.
+local THROTTLE_WAIT_MAX_SEC = 5
+
+--- Watchdog: no send / AH event for this long while scanning = stuck in a state no timeout covers.
+--- The scan is paused (in-flight items requeued) and resumed; after STALL_MAX_RECOVERIES it stays paused.
+local STALL_CHECK_SEC = 5
+local STALL_RECOVER_SEC = 30
+local STALL_MAX_RECOVERIES = 3
+
+--- Pause after a failed SearchForItemKeys batch before the next one (the server just refused us).
+local BATCH_RETRY_DELAY_SEC = 1
+
+--- Per-item path: requeue an item whose itemKey info is not cached yet up to this many times
+--- (GetItemKeyInfo requests it) before searching anyway.
+local ITEM_KEY_INFO_MAX_WAITS = 3
+local ITEM_KEY_INFO_WAIT_SEC = 0.1
+
 --- Native sync button (UIPanelButtonTemplate) — CategoriesList footer (below category scroll / WoW Token).
 local AH_SYNC_BTN_H = 22
 local AH_SYNC_CAT_PAD_X = 8
@@ -130,6 +149,14 @@ end
 local ScheduleAHSyncAnchorRefresh
 
 local querySentAt = {}
+local throttleWaitSince = nil
+
+--- Watchdog heartbeat: a query went out, is waiting for its slot, or an AH event arrived.
+local function MarkScanActivity()
+    if AHPriceService then
+        AHPriceService._activityAt = GetTime()
+    end
+end
 
 --- Seconds until another AH query may be sent (0 = now).
 local function QuerySlotDelay()
@@ -138,17 +165,23 @@ local function QuerySlotDelay()
         table.remove(querySentAt, 1)
     end
     if #querySentAt >= QUERY_BUDGET_PER_WINDOW then
+        throttleWaitSince = nil
         return (querySentAt[1] + QUERY_WINDOW_SEC) - now + 0.05
     end
     if C_AuctionHouse and C_AuctionHouse.IsThrottledMessageSystemReady
         and not C_AuctionHouse.IsThrottledMessageSystemReady() then
-        return 0.25
+        throttleWaitSince = throttleWaitSince or now
+        if now - throttleWaitSince < THROTTLE_WAIT_MAX_SEC then
+            return 0.25
+        end
     end
+    throttleWaitSince = nil
     return 0
 end
 
 --- Run `fn` as soon as the query budget and the client throttle allow; counts one query.
 local function WhenQuerySlot(fn)
+    MarkScanActivity()
     local delay = QuerySlotDelay()
     if delay <= 0 then
         querySentAt[#querySentAt + 1] = GetTime()
@@ -220,6 +253,14 @@ local function ShowAHSyncTooltip(owner)
         local label = AHPriceService._paused and L("AH_TT_PAUSED", "Paused") or L("AH_TT_SCANNING", "Scanning")
         GameTooltip:AddDoubleLine(label, string.format("%d / %d  (%d%%)", done, total, math.floor(frac * 100 + 0.5)),
             AHPriceService._paused and 1 or 0.7, AHPriceService._paused and 0.84 or 0.7, AHPriceService._paused and 0 or 0.7, W, W, W)
+        -- Current-expansion gear is priced by one paged browse at the end and credited when it
+        -- finishes, so progress holds still meanwhile (then jumps by the gear share).
+        local gs = AHPriceService._gearScan
+        if AHPriceService._scanning and gs and gs.pending then
+            local n = 0
+            for _ in pairs(gs.pending) do n = n + 1 end
+            Row("AH_TT_GEAR_PHASE", "Gear browse", string.format(L("AH_TT_GEAR_PHASE_FMT", "%d items, page %d"), n, (gs.pages or 0) + 1))
+        end
         if AHPriceService._scanning and eta then
             Row("AH_TT_ETA", "Time left (est.)", "~" .. FormatRemaining(eta))
         end
@@ -233,6 +274,9 @@ local function ShowAHSyncTooltip(owner)
     Row("AH_TT_PRICED_FRESH", "Priced (fresh)", string.format("%d", plan.pricedFresh))
     if plan.unlisted > 0 then
         Row("AH_TT_NO_LISTINGS", "No listings on the AH", string.format("%d", plan.unlisted))
+    end
+    if (plan.unsellable or 0) > 0 then
+        Row("AH_TT_NOT_ON_AH", "Soulbound (not on the AH)", string.format("%d", plan.unsellable))
     end
     Row("AH_TT_STALE_QUEUE", "Stale queue", string.format("%d", plan.queued))
     local H = ns.HubUI_Internal
@@ -698,13 +742,15 @@ local function BuildItemQueue(includeFresh)
         ids = filtered
     end
     -- Soulbound / quest outputs and non-items never reach the AH: no query, no "no listings" count.
-    local sellable = {}
+    local sellable, unsellable = {}, 0
     for i = 1, #ids do
-        if not IsUnsellable(ids[i]) then
+        if IsUnsellable(ids[i]) then
+            unsellable = unsellable + 1
+        else
             sellable[#sellable + 1] = ids[i]
         end
     end
-    return sellable
+    return sellable, unsellable
 end
 
 --- Catalog size vs stale queue (tooltips / scan start message). freshSkipped splits into
@@ -713,7 +759,7 @@ end
 ---@param includeFresh boolean|nil When true, counts all tracked items (force full).
 ---@return table tracked, queued, freshSkipped, pricedFresh, unlisted (numbers)
 function AHPriceService:GetScanPlan(includeFresh)
-    local tracked = BuildItemQueue(true)
+    local tracked, unsellable = BuildItemQueue(true)
     local queued = includeFresh and tracked or BuildItemQueue(false)
     local pricedFresh, unlisted = 0, 0
     if not includeFresh then
@@ -735,6 +781,7 @@ function AHPriceService:GetScanPlan(includeFresh)
         freshSkipped = #tracked - #queued,
         pricedFresh = pricedFresh,
         unlisted = unlisted,
+        unsellable = unsellable,
     }
 end
 
@@ -1100,8 +1147,9 @@ function AHPriceService:StartNextBatch()
             end
         end
     end
+    -- Items without a query key are done once dequeued (CompleteBatch only credits pending keys).
+    self._scannedItems = self._scannedItems + noKey
     if #keys < 1 then
-        self._scannedItems = self._scannedItems + noKey
         UpdateAHButtonText()
         self:StartNextBatch()
         return
@@ -1158,8 +1206,11 @@ function AHPriceService:CompleteBatch(bid)
     self._batchChunkSize = 0
     UpdateAHButtonText()
     if #self._queue > 0 then
+        local run = self._runSeq
         After(0.02, function()
-            AHPriceService:StartNextBatch()
+            if AHPriceService._runSeq == run then
+                AHPriceService:StartNextBatch()
+            end
         end)
     else
         self:FinishBatchPhase()
@@ -1294,29 +1345,47 @@ function AHPriceService:ProcessGearBrowse(gid)
     end
 end
 
+--- A batch failed (browse failure, dropped query, or silence past BATCH_RESULT_TIMEOUT_SEC). Its items
+--- are retried once in a new batch; items failing twice go to the per-item tail at the end of the
+--- scan. The rest of the queue keeps batching: switching the whole remaining queue to the 100/min
+--- per-item path here is what made a scan crawl from the first failed batch on.
 function AHPriceService:FallbackBatchToLegacy(bid)
     if self._batchExpectId ~= bid then
         return
     end
     local pending = self._batchPendingSet
     self._batchExpectId = nil
+    self._batchSentId = nil
     self._batchMode = false
     self._batchPendingSet = nil
-    if pending then
-        local restore = {}
-        for itemID, _ in pairs(pending) do
-            restore[#restore + 1] = itemID
-        end
-        table.sort(restore)
-        for i = #restore, 1, -1 do
-            table.insert(self._queue, 1, restore[i])
-        end
-    end
     self._batchChunkSize = 0
-    if ns.DebugPrint then
-        ns.DebugPrint("|cff9370DB[AN AH]|r batch fallback to per-item scan")
+    local retried = self._batchRetried or {}
+    self._batchRetried = retried
+    local retry, tail = {}, 0
+    if pending then
+        for itemID in pairs(pending) do
+            if retried[itemID] then
+                QueueLegacyFollowup(itemID)
+                tail = tail + 1
+            else
+                retried[itemID] = true
+                retry[#retry + 1] = itemID
+            end
+        end
     end
-    self:ScanNext()
+    table.sort(retry)
+    for i = #retry, 1, -1 do
+        table.insert(self._queue, 1, retry[i])
+    end
+    if ns.DebugPrint then
+        ns.DebugPrint(string.format("|cff9370DB[AN AH]|r batch failed: %d retried, %d to per-item tail", #retry, tail))
+    end
+    local run = self._runSeq
+    After(BATCH_RETRY_DELAY_SEC, function()
+        if AHPriceService._runSeq == run then
+            AHPriceService:StartNextBatch()
+        end
+    end)
 end
 
 local function ProcessBrowseBatchResults(bid)
@@ -1422,6 +1491,22 @@ function AHPriceService:ScanNext()
     end
 
     local itemID = table.remove(self._queue, 1)
+    -- A search for an itemKey the client has not cached is ignored without any result event
+    -- (Auctionator AH/Mixins/SearchScan.lua note; GetItemKeyInfo requests the info and fires
+    -- ITEM_KEY_ITEM_INFO_RECEIVED). Send it back behind the queue a few times before searching.
+    local waitKey = MakeQueryItemKey(itemID)
+    local okInfo, keyInfo = pcall(C_AuctionHouse.GetItemKeyInfo, waitKey)
+    if waitKey and not (okInfo and keyInfo) then
+        self._keyInfoWaits = self._keyInfoWaits or {}
+        local waits = self._keyInfoWaits[itemID] or 0
+        if waits < ITEM_KEY_INFO_MAX_WAITS and #self._queue > 0 then
+            self._keyInfoWaits[itemID] = waits + 1
+            self._queue[#self._queue + 1] = itemID
+            MarkScanActivity()
+            After(ITEM_KEY_INFO_WAIT_SEC, function() AHPriceService:ScanNext() end)
+            return
+        end
+    end
     self._currentItemID = itemID
     self._scannedItems = self._scannedItems + 1
     UpdateAHButtonText()
@@ -1491,6 +1576,67 @@ function AHPriceService:_ArmItemTimeout(qid)
     end)
 end
 
+--- AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED (no payload, AuctionHouseDocumentation 12.1.5.70448): the
+--- server discarded a throttled request, so its results never arrive. The event does not say whose
+--- request it was; retrying ours costs one query, waiting costs a timeout and a wrong "no listings".
+function AHPriceService:OnQueryDropped()
+    if not self._scanning or self._paused then
+        return
+    end
+    if self._batchExpectId and self._batchSentId == self._batchExpectId then
+        self:FallbackBatchToLegacy(self._batchExpectId)
+        return
+    end
+    local itemID = self._currentItemID
+    if self._expectQueryId and itemID then
+        local retried = self._batchRetried or {}
+        self._batchRetried = retried
+        if retried[itemID] == "item" then
+            return -- dropped twice: the per-item timeout moves on
+        end
+        retried[itemID] = "item"
+        self._expectQueryId = nil
+        self._currentItemID = nil
+        table.insert(self._queue, 1, itemID)
+        self._scannedItems = math.max(0, (self._scannedItems or 0) - 1)
+        self._currentStepSec = math.min(SCAN_STEP_MAX_SEC, math.max(0.5, (self._currentStepSec or SCAN_STEP_SEC) * 2))
+        After(self._currentStepSec, function() AHPriceService:ScanNext() end)
+    end
+end
+
+--- Safety net for a scan stuck in a state none of the batch / gear / per-item timeouts cover.
+function AHPriceService:ArmWatchdog()
+    MarkScanActivity()
+    self._watchdogSeq = (self._watchdogSeq or 0) + 1
+    local seq = self._watchdogSeq
+    local function tick()
+        if AHPriceService._watchdogSeq ~= seq or not AHPriceService._scanning then
+            return
+        end
+        if GetTime() - (AHPriceService._activityAt or 0) < STALL_RECOVER_SEC then
+            After(STALL_CHECK_SEC, tick)
+            return
+        end
+        AHPriceService._stallRecoveries = (AHPriceService._stallRecoveries or 0) + 1
+        if ns.DebugPrint then
+            ns.DebugPrint(string.format("|cff9370DB[AN AH]|r scan stalled; recovery %d", AHPriceService._stallRecoveries))
+        end
+        AHPriceService:Pause()
+        if #AHPriceService._queue == 0 then
+            FinishScan()
+            return
+        end
+        if AHPriceService._stallRecoveries > STALL_MAX_RECOVERIES then
+            Notify(string.format(L("AH_SCAN_STALLED_FMT",
+                "AH scan stopped responding; paused with %d items left. Click Sync AH Prices to resume."),
+                #AHPriceService._queue))
+            return
+        end
+        AHPriceService:Resume() -- re-arms the watchdog
+    end
+    After(STALL_CHECK_SEC, tick)
+end
+
 --- Pause/resume controls for the right-click menu and scan-on-AH-close logic.
 function AHPriceService:Pause()
     if not self._scanning then
@@ -1522,6 +1668,14 @@ function AHPriceService:Pause()
         end
     end
     self._gearPending, self._gearScan = nil, nil
+    -- The per-item tail would otherwise be lost when the queue is empty on resume.
+    local tail = self._legacyTail
+    if tail then
+        for i = 1, #tail do
+            self._queue[#self._queue + 1] = tail[i]
+        end
+        self._legacyTail = {}
+    end
     self._batchMode = false
     self._batchExpectId = nil
     self._batchSentId = nil
@@ -1531,6 +1685,8 @@ function AHPriceService:Pause()
     self._scanning = false
     self._expectQueryId = nil
     self._currentItemID = nil
+    -- Delayed steps of the paused run (batch retry / next batch timers) must not start a second pipeline.
+    self._runSeq = (self._runSeq or 0) + 1
     UpdateAHButtonText()
 end
 
@@ -1550,6 +1706,7 @@ function AHPriceService:Resume()
     self._suppressPriceMessages = true
     self._scanStartedAt = GetTime and GetTime() or 0
     UpdateAHButtonText()
+    self:ArmWatchdog()
     self:BeginScanPipeline()
 end
 
@@ -1654,6 +1811,9 @@ function AHPriceService:StartScan(force, fullScan)
     self._batchMode = false
     self._batchExpectId = nil
     self._legacyTail = {}
+    self._batchRetried = {}
+    self._keyInfoWaits = {}
+    self._stallRecoveries = 0
     self._depthTargets = nil
     -- Commodities the shopping list still has to buy get a per-item order-book search
     -- after their batch row, so Shopping / profit costs walk real price levels.
@@ -1681,6 +1841,7 @@ function AHPriceService:StartScan(force, fullScan)
     else
         Notify(string.format(L("AH_SCAN_STARTED", "Starting AH price scan (%d items)."), n))
     end
+    self:ArmWatchdog()
     self:BeginScanPipeline()
 end
 
@@ -1981,7 +2142,15 @@ eventFrame:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
 eventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 eventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
 eventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_FAILURE")
+eventFrame:RegisterEvent("AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED")
 eventFrame:SetScript("OnEvent", function(_, event, arg1, ...)
+    if AHPriceService._scanning and event ~= "ADDON_LOADED" then
+        MarkScanActivity()
+    end
+    if event == "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED" then
+        AHPriceService:OnQueryDropped()
+        return
+    end
     if event == "ADDON_LOADED" then
         if arg1 == "Blizzard_AuctionHouseUI" or arg1 == ADDON_NAME then
             TryCreateAHButton()
