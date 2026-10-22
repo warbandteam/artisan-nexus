@@ -86,6 +86,11 @@ local STALL_MAX_RECOVERIES = 3
 --- Pause after a failed SearchForItemKeys batch before the next one (the server just refused us).
 local BATCH_RETRY_DELAY_SEC = 1
 
+--- After a scan finishes (or finds nothing to refresh) the button reads "Completed" this long.
+--- Atlas markup, not an emoji: WoW fonts have no emoji glyphs (atlas also used by UI.lua / WN lists).
+local COMPLETED_SHOW_SEC = 60
+local COMPLETED_ICON = "|A:common-icon-checkmark:14:14|a "
+
 --- Per-item path: requeue an item whose itemKey info is not cached yet up to this many times
 --- (GetItemKeyInfo requests it) before searching anyway.
 local ITEM_KEY_INFO_MAX_WAITS = 3
@@ -939,6 +944,8 @@ local function UpdateAHButtonText()
         text = string.format(L("AH_SYNC_PAUSED_SHORT_FMT", "Paused %d%%"), pctInt)
     elseif AHPriceService._scanning then
         text = string.format(L("AH_SYNC_PROGRESS_SHORT_FMT", "Syncing %d%%"), pctInt)
+    elseif AHPriceService._completedAt and GetTime() - AHPriceService._completedAt < COMPLETED_SHOW_SEC then
+        text = COMPLETED_ICON .. L("AH_SYNC_COMPLETED", "Completed")
     else
         text = L("AH_SYNC_PRICES", "Sync AH Prices")
     end
@@ -1043,6 +1050,18 @@ local function ScheduleBrowseRestore(snapshot)
     end)
 end
 
+--- Show "Completed" on the sync button, then fall back to the normal label.
+local function MarkScanCompleted()
+    local at = GetTime()
+    AHPriceService._completedAt = at
+    UpdateAHButtonText()
+    After(COMPLETED_SHOW_SEC + 0.1, function()
+        if AHPriceService._completedAt == at then
+            UpdateAHButtonText()
+        end
+    end)
+end
+
 local function FinishScan()
     local self = AHPriceService
     self._scanning = false
@@ -1058,7 +1077,7 @@ local function FinishScan()
     self._suppressPriceMessages = false
     self._consecutiveTimeouts = 0
     self._currentStepSec = SCAN_STEP_SEC
-    UpdateAHButtonText()
+    MarkScanCompleted()
     local scanned = self._scannedItems or 0
     local priced = self._pricedThisScan or 0
     local legacy = self._legacyQueuedThisScan or 0
@@ -1703,6 +1722,7 @@ function AHPriceService:Resume()
     end
     self._paused = false
     self._scanning = true
+    self._completedAt = nil
     self._suppressPriceMessages = true
     self._scanStartedAt = GetTime and GetTime() or 0
     UpdateAHButtonText()
@@ -1785,7 +1805,9 @@ function AHPriceService:StartScan(force, fullScan)
         self._queue = BuildQuickItemQueue()
     end
     local n = #self._queue
+    self._completedAt = nil
     if n == 0 then
+        MarkScanCompleted()
         local plan = self:GetScanPlan(false)
         Notify(string.format(L("AH_SCAN_UP_TO_DATE_FMT", "AH prices are up to date: %d priced, %d with no listings."),
             plan.pricedFresh, plan.unlisted))

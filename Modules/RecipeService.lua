@@ -1222,16 +1222,17 @@ function RecipeService:GetStockByLocation(itemID)
     return row
 end
 
---- Alt characters' bag + bank counts from Warband Nexus (nil when WN is not loaded).
+--- Other characters' bag + bank counts through ns.CharacterData: Warband Nexus when it tracks items,
+--- else AN's own per-character reagent snapshot (CharacterData:CaptureItems).
 ---@param itemID number
 ---@return { total:number, details:table[] }|nil
 function RecipeService:GetAltStock(itemID)
-    local wn = ns.WarbandNexusBridge
-    local res = wn and wn.GetDetailedItemCounts and wn:GetDetailedItemCounts(itemID)
+    local cd = ns.CharacterData
+    local res = cd and cd.GetItemCountsAcrossCharacters and cd:GetItemCountsAcrossCharacters(itemID)
     if type(res) ~= "table" then
         return nil
     end
-    return { total = tonumber(res.altTotal) or 0, details = res.altDetails or {} }
+    return { total = tonumber(res.total) or 0, details = res.chars or {} }
 end
 
 --- itemID -> crafting-usable count for every candidate of the recipe's required slots.
