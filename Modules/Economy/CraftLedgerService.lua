@@ -526,6 +526,24 @@ end
 ---@return table { crafts, orderCrafts (crafting-order crafts, not valued), value, net, cost, returnedValue, profit, unpriced, concentrationSpent,
 ---   predictedRevenue, predictedProfit, predictedCrafts (rows with a CraftEV prediction),
 ---   ingenuityRefund, procs = { mc, res, ing }, byProfession = { [prof] = { crafts, value, net, cost } } }
+--- Craft rows newest first (stored tables; read-only), crafting-order crafts excluded (not valued).
+--- Realized profit of a row = net - cost + returnedValue (nil parts when unpriced).
+---@param days number|nil default 7
+---@return table[]
+function CraftLedgerService:GetCrafts(days)
+    local since = time() - (tonumber(days) or 7) * 86400
+    local out = {}
+    local store = Store()
+    if not store then return out end
+    local rows = store.rows
+    for i = #rows, 1, -1 do
+        local r = rows[i]
+        if (tonumber(r.t) or 0) < since then break end
+        if not r.order then out[#out + 1] = r end
+    end
+    return out
+end
+
 function CraftLedgerService:GetSummary(days)
     days = tonumber(days) or 7
     local since = time() - days * 86400

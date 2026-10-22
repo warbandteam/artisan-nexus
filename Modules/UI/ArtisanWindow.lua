@@ -503,6 +503,7 @@ end
 ---@field onClose function|nil runs before the window hides (close button / ESC)
 ---@field onLive function|nil live resize reflow (frame)
 ---@field onCommit function|nil resize released / satellite commit (frame)
+---@field companionOf boolean|nil docked to a Blizzard window: the caller sets its strata / level from that host
 ---@field hud boolean|nil HUD panel: FLOATING strata, not registered with WindowManager (no ESC close)
 ---@field combatHide boolean|nil HUD only: hide while in combat; after combat onCombatEnd(frame), else re-show
 ---@field onCombatEnd function|nil HUD only: decides visibility when combat ends (frame)
@@ -549,6 +550,14 @@ function W.Create(cfg)
     else
         frame:SetFrameStrata("HIGH")
         frame:SetFrameLevel(120)
+    end
+    -- Every floating window shares HIGH @ 120: without raising, two overlapping windows interleave
+    -- (one window's text drawn over the other's buttons) and a clicked window stays behind. Toplevel
+    -- frames raise above their strata siblings when clicked; Raise on show does the same on open.
+    -- A companion docked to a Blizzard frame (cfg.companionOf) takes that frame's layer instead.
+    if not cfg.companionOf then
+        frame:SetToplevel(true)
+        frame:HookScript("OnShow", function(self) self:Raise() end)
     end
 
     -- HUD combat hide (WindowManager's PLAYER_REGEN rule for registered windows; a HUD is not one).

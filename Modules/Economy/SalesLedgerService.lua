@@ -806,6 +806,22 @@ function SalesLedgerService:GetSales(days)
     return rows
 end
 
+--- AH purchase rows newest first (stored tables; read-only): { t, itemID, qty, total, src, est? }.
+---@param days number|nil default 30
+---@return table[]
+function SalesLedgerService:GetBuys(days)
+    local store = Store()
+    return store and Since(store.buys, days) or {}
+end
+
+--- Crafting-order tip rows newest first (stored tables; read-only): { t, item, customer?, tip, qty }.
+---@param days number|nil default 30
+---@return table[]
+function SalesLedgerService:GetOrderTips(days)
+    local store = Store()
+    return store and Since(store.orders, days) or {}
+end
+
 --- Realized totals for the last `days`.
 ---@param days number|nil default 30
 ---@return table { revenue, cut, deposits, depositsPaid, depositsRefunded, buys, orderTips, net,

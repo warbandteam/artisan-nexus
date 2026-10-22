@@ -93,6 +93,15 @@ local function Money(copper)
     return (ns.FormatCopper and ns.FormatCopper(math.floor((copper or 0) + 0.5))) or "0"
 end
 
+--- Character name in class colour (RAID_CLASS_COLORS colorStr, "ffRRGGBB").
+local function ClassName(name, classFile)
+    local c = classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile]
+    if c and c.colorStr then
+        return "|c" .. c.colorStr .. name .. "|r"
+    end
+    return name
+end
+
 local function RedHex()
     local H = ns.HubUI_Internal
     return "|cff" .. ((H and H.InkHex and H.InkHex("danger")) or "ff5555")
@@ -163,10 +172,11 @@ local function AddSectionHeader(body, y, text, first)
 end
 
 --- ProfessionInfoWindow.lua:243 AddLine: muted label column + value.
-local function AddLine(body, y, label, value)
+local function AddLine(body, y, label, value, indent)
+    indent = indent or 0
     local lbl = Acquire(body, "body", "body")
-    lbl:SetPoint("TOPLEFT", body, "TOPLEFT", 0, -y)
-    lbl:SetWidth(LABEL_WIDTH)
+    lbl:SetPoint("TOPLEFT", body, "TOPLEFT", indent, -y)
+    lbl:SetWidth(LABEL_WIDTH - indent)
     lbl:SetWordWrap(false)
     lbl:SetText(RoleHex("Muted") .. label .. "|r")
     local val = Acquire(body, "body", "body")
@@ -265,6 +275,9 @@ end
 --- (Blizzard_ProfessionsRecipeList.lua:137 / Blizzard_ProfessionsCrafting.lua:34, wow-ui-source live
 --- 12.1.5.70448, checked 2026-10-22).
 local MAX_RECIPE_REAGENTS = 6
+local MAX_CRAFTER_NAMES = 3
+local MAX_HOLDER_ALTS = 3
+local HOLDER_INDENT = 14
 
 local function AddRecipeSection(body, y, first)
     local sel = ProfessionSidecarUI._recipe
@@ -304,24 +317,70 @@ local function AddRecipeSection(body, y, first)
             y = AddLine(body, y, SafeL("HUB_TT_CAN_CRAFT", "Can craft"), txt)
         end
     end
-    -- Reagents: have (bags + bank + warband bank) / need per craft.
+    -- Who can craft it (Warband Nexus crafters or AN's learnedBy), like WN's Recipe Companion.
+    local cd = ns.CharacterData
+    local knowers = cd and cd.GetRecipeKnowers and cd:GetRecipeKnowers(spellID) or {}
+    if #knowers > 0 then
+        local names = {}
+        for i = 1, math.min(#knowers, MAX_CRAFTER_NAMES) do
+            local k = knowers[i]
+            names[#names + 1] = ClassName(SafeUiLine(k.charName, "?"), k.classFile)
+        end
+        if #knowers > MAX_CRAFTER_NAMES then
+            names[#names + 1] = RoleHex("Muted") .. "+" .. (#knowers - MAX_CRAFTER_NAMES) .. "|r"
+        end
+        y = AddLine(body, y, SafeL("SIDECAR_LINE_CRAFTERS", "Crafters"), table.concat(names, ", "))
+    end
+    -- Reagents (WN Recipe Companion): check / cross, have / need, then who holds it: this character
+    -- (bags + bank), the warband bank, each alt (CharacterData: Warband Nexus or AN's snapshot).
     local slots = rs.GetRequiredBasicSlots and rs:GetRequiredBasicSlots(spellID) or {}
+    local myName = UnitName and UnitName("player") or "?"
+    local myClass = UnitClass and select(2, UnitClass("player")) or nil
     for i = 1, math.min(#slots, MAX_RECIPE_REAGENTS) do
         local slot = slots[i]
         local need = tonumber(slot.qty) or 0
-        local have, firstID = 0, nil
+        local mine, warband, firstID = 0, 0, nil
+        local alts, altOrder = {}, {}
         for ci = 1, #slot.candidates do
             local id = slot.candidates[ci]
             id = type(id) == "table" and id.itemID or id
             if id then
                 firstID = firstID or id
-                have = have + rs:GetStockByLocation(id).total
+                local s = rs:GetStockByLocation(id)
+                mine = mine + s.bags + s.bank
+                warband = warband + s.warband
+                local other = cd and cd.GetItemCountsAcrossCharacters and cd:GetItemCountsAcrossCharacters(id)
+                for _, c in ipairs(other and other.chars or {}) do
+                    local key = c.name or "?"
+                    if not alts[key] then
+                        alts[key] = { name = key, classFile = c.classFile, n = 0 }
+                        altOrder[#altOrder + 1] = alts[key]
+                    end
+                    alts[key].n = alts[key].n + (tonumber(c.total) or 0)
+                end
             end
         end
         if firstID and need > 0 then
+            local have = mine + warband
+            local ok = have >= need
+            local mark = ok and "|A:common-icon-checkmark:12:12|a " or "|A:common-icon-redx:12:12|a "
             local itemName = SafeUiLine(ns.GetItemDisplayName and ns.GetItemDisplayName(firstID), "?")
-            y = AddLine(body, y, itemName,
-                (have >= need and GreenHex() or RedHex()) .. have .. "|r" .. RoleHex("Muted") .. " / " .. need .. "|r")
+            y = AddLine(body, y, mark .. itemName,
+                (ok and GreenHex() or RedHex()) .. have .. "|r" .. RoleHex("Muted") .. " / " .. need .. "|r")
+            if mine > 0 then
+                y = AddLine(body, y, ClassName(myName, myClass), RoleHex("Bright") .. mine .. "|r", HOLDER_INDENT)
+            end
+            if warband > 0 then
+                y = AddLine(body, y, SafeL("SIDECAR_WARBAND_BANK", "Warband bank"), RoleHex("Bright") .. warband .. "|r",
+                    HOLDER_INDENT)
+            end
+            table.sort(altOrder, function(a, b) return a.n > b.n end)
+            for ai = 1, math.min(#altOrder, MAX_HOLDER_ALTS) do
+                local a = altOrder[ai]
+                if a.n > 0 then
+                    y = AddLine(body, y, ClassName(a.name, a.classFile), RoleHex("Muted") .. a.n .. "|r", HOLDER_INDENT)
+                end
+            end
         end
     end
     return y, true
@@ -425,6 +484,13 @@ local function Anchor()
         f:Hide()
         return
     end
+    -- Part of the profession window: a child of it (its strata, raised with it when clicked, hidden
+    -- with it), just above its own content. Other Artisan Nexus windows (HIGH) then cover it cleanly
+    -- instead of interleaving with it. The position stays an absolute UIParent anchor (Place).
+    if f:GetParent() ~= host then
+        f:SetParent(host)
+    end
+    f:SetFrameLevel((host:GetFrameLevel() or 0) + 20)
     if not f:IsShown() then
         Place(f, host)
         f:Show()
@@ -450,6 +516,7 @@ function ProfessionSidecarUI:Ensure()
         name = "ArtisanNexusProfessionSidecar",
         title = SafeL("SIDECAR_TITLE", "Artisan Nexus"),
         posKey = POS_KEY,
+        companionOf = true,
         width = WINDOW_W,
         height = 160,
         resizable = false,

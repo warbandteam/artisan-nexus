@@ -40,7 +40,8 @@
     default "spot"), hubSessionOnly (boolean; UI_RefreshRouter repaints on SESSION_LOOT_UPDATED
     while it is on), hubProfessionFilter (shared). Session only keeps rows with
     RecipeService:MaxCraftsForCounts(spellID, GetSessionCounts(profile.lootHistoryActiveTab)) >= 1.
-    The column strip only labels the columns; "Cached recipes X / Y" is the window footer status.
+    No column strip (groups start right under the search box); "Cached recipes X / Y" is the window
+    footer status.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -801,11 +802,9 @@ local function DrawTable(rc, y, width, rows)
     local n = #cols
     local strip, pool = cache.strip, cache.pool
     TK.ResolveWidths(cols, width, cache.widths, cache.offsets)
-    PlaceWide(strip, rc, y)
-    strip:SetWidth(width)
-    strip:SetColumns(cols, cache.widths, cache.offsets, n)
-    strip:SetSort(nil)
-    y = y + strip:GetStripHeight()
+    -- No column strip: the first group header starts at the WN body start (the same fixed gap under
+    -- the search box as every WN tab); what each value is lives in the row tooltip.
+    strip:Hide()
     local rh = pool.height
     local gap = H.SECTION_GAP or 12
     cache.cull = cache.cull or {}
@@ -816,8 +815,6 @@ local function DrawTable(rc, y, width, rows)
         local g = groups[gi]
         if gi > 1 then
             y = y + gap
-        else
-            y = y + 4
         end
         local expanded = GroupHeader(rc, y, width, g)
         y = y + GROUP_H
