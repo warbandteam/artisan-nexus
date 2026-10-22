@@ -334,12 +334,24 @@ C.OnSortClick = OnSortClick
 
 --- Plain recipe name; the pinned (linked) recipe is drawn in accent ink. Tier, known-by and price
 --- markers live in the row tooltip.
+--- Name ink by craft status: red = not learned here, gold = learned but short of reagents
+--- (bags + bank + warband bank), green = craftable now.
+local STATUS_INK = { unlearned = "danger", short = "gold", craftable = "success" }
+
+function C.CraftStatus(r)
+    local rs = ns.RecipeService
+    if not (rs and rs.GetCraftStatus and r.spellID) then return nil, 0 end
+    return rs:GetCraftStatus(r.spellID, r.knownByMe == true)
+end
+
 local function RecipeCell(r)
     local name = RecipeRowName(r)
     if r._anPinned then
         return Hex(name, "accent")
     end
-    return name
+    local status = C.CraftStatus(r)
+    local ink = status and STATUS_INK[status]
+    return ink and Hex(name, ink) or name
 end
 
 local function CellValue(col, r)
@@ -435,6 +447,7 @@ local function RowOnEnter(row)
         GameTooltip:AddLine(SafeL("HUB_TT_STALE_NOTE", "Price is older than the freshness window."), 1, 0.5, 0.3)
     end
     C.AddBreakdown(GameTooltip, r, EvalOpts())
+    C.AddStock(GameTooltip, r)
     GameTooltip:AddLine(" ")
     if CanOpenRecipe(r) then
         Hint(SafeL("HUB_CRAFT_TT_CLICK_OPEN", "Click: open the recipe"))

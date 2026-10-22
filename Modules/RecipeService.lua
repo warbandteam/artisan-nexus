@@ -1184,6 +1184,130 @@ function RecipeService:MaxCraftsForCounts(spellID, counts)
 end
 
 --==========================================================================
+-- Crafting stock (bags + bank + warband bank, + alts via Warband Nexus)
+--==========================================================================
+
+--- C_Item.GetItemCount(itemID, includeBank, includeUses, includeReagentBank, includeAccountBank)
+--- (ItemDocumentation 12.1.5.70448). Blizzard's crafting count is the all-true-but-uses call
+--- (ItemUtil.GetCraftingReagentCount, wow-ui-source live 12.1.5.70448, checked 2026-10-22).
+---@return number bags, number bank, number warband
+local function LocationCounts(itemID)
+    if not (C_Item and C_Item.GetItemCount) then
+        return 0, 0, 0
+    end
+    local okB, bags = pcall(C_Item.GetItemCount, itemID, false, false, false, false)
+    local okK, withBank = pcall(C_Item.GetItemCount, itemID, true, false, true, false)
+    local okA, withAccount = pcall(C_Item.GetItemCount, itemID, true, false, true, true)
+    bags = okB and tonumber(bags) or 0
+    withBank = okK and tonumber(withBank) or bags
+    withAccount = okA and tonumber(withAccount) or withBank
+    return bags, math.max(0, withBank - bags), math.max(0, withAccount - withBank)
+end
+
+--- Per-item location counts, cached until the next bag-cache generation (BAG_UPDATE bucket).
+---@param itemID number
+---@return { bags:number, bank:number, warband:number, total:number }
+function RecipeService:GetStockByLocation(itemID)
+    local gen = self._bagCacheGen or 0
+    if self._stockGen ~= gen then
+        self._stockGen = gen
+        self._stock = {}
+    end
+    local row = self._stock[itemID]
+    if not row then
+        local b, k, w = LocationCounts(itemID)
+        row = { bags = b, bank = k, warband = w, total = b + k + w }
+        self._stock[itemID] = row
+    end
+    return row
+end
+
+--- Alt characters' bag + bank counts from Warband Nexus (nil when WN is not loaded).
+---@param itemID number
+---@return { total:number, details:table[] }|nil
+function RecipeService:GetAltStock(itemID)
+    local wn = ns.WarbandNexusBridge
+    local res = wn and wn.GetDetailedItemCounts and wn:GetDetailedItemCounts(itemID)
+    if type(res) ~= "table" then
+        return nil
+    end
+    return { total = tonumber(res.altTotal) or 0, details = res.altDetails or {} }
+end
+
+--- itemID -> crafting-usable count for every candidate of the recipe's required slots.
+---@param spellID number
+---@param withAlts boolean|nil also add alt characters' stock (Warband Nexus)
+---@return table<number, number>
+function RecipeService:GetCraftStockCounts(spellID, withAlts)
+    local counts = {}
+    local slots = self:GetMandatorySlots(spellID)
+    for si = 1, #slots do
+        local cands = slots[si].candidates
+        for ci = 1, #cands do
+            local id = cands[ci].itemID
+            if id and counts[id] == nil then
+                local n = self:GetStockByLocation(id).total
+                if withAlts then
+                    local alt = self:GetAltStock(id)
+                    n = n + (alt and alt.total or 0)
+                end
+                counts[id] = n
+            end
+        end
+    end
+    return counts
+end
+
+--- Complete crafts covered by `counts`. A basic slot's candidates are quality tiers of one reagent
+--- and an allocation may mix them, so a slot's stock is the sum over its candidates (the tooltip's
+--- have / need uses the same sum).
+---@param spellID number
+---@param counts table<number, number> from GetCraftStockCounts
+---@return number|nil nil when the recipe has no harvested reagent slots
+function RecipeService:MaxCraftsFromStock(spellID, counts)
+    local slots = self:GetMandatorySlots(spellID)
+    local maxCrafts
+    for si = 1, #slots do
+        local slot = slots[si]
+        local need = tonumber(slot.qty) or 0
+        if need > 0 then
+            local have, seen = 0, {}
+            for ci = 1, #slot.candidates do
+                local id = slot.candidates[ci].itemID
+                if id and not seen[id] then
+                    seen[id] = true
+                    have = have + (counts[id] or 0)
+                end
+            end
+            if next(seen) then
+                local n = math.floor(have / need)
+                if not maxCrafts or n < maxCrafts then
+                    maxCrafts = n
+                end
+            end
+        end
+    end
+    return maxCrafts
+end
+
+--- "unlearned" (this character does not know it), "short" (known, not enough reagents in bags /
+--- bank / warband bank), "craftable", or "unknown" (known, reagents not harvested yet).
+---@param spellID number
+---@param knownByMe boolean
+---@return string status
+---@return number maxCrafts with this character's reachable stock
+function RecipeService:GetCraftStatus(spellID, knownByMe)
+    local n = self:MaxCraftsFromStock(spellID, self:GetCraftStockCounts(spellID, false))
+    if not knownByMe then
+        return "unlearned", n or 0
+    end
+    if n == nil then
+        return "unknown", 0
+    end
+    return (n >= 1) and "craftable" or "short", n
+end
+
+--==========================================================================
 -- Event wiring
 --==========================================================================
 
@@ -1197,6 +1321,7 @@ function RecipeService:Enable()
         --- Keep the handle so Disable can drop the bucket (AceBucket-3.0 returns one).
         self._bagBucket = AN:RegisterBucketEvent("BAG_UPDATE", 0.35, function()
             RecipeService:InvalidateBagCache()
+            AN:SendMessage(E.BAG_STOCK_UPDATED)
         end)
     end
     owner:RegisterEvent("TRADE_SKILL_LIST_UPDATE", function()

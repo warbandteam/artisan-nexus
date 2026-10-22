@@ -75,6 +75,8 @@ function ns.UI_RefreshRouter.RegisterMainShellListeners(ctx)
         { "CONCENTRATION_PLAN_UPDATED", { concentration = true, crafting = true, plan = true, overview = true, settings = true } },
         -- Warband Nexus alt inventories / concentration (bridge already coalesces 0.5s).
         { "WN_DATA_UPDATED", { plan = true, concentration = true, overview = true } },
+        -- Crafting row names are inked by craft status (reagents in bags / bank / warband bank).
+        { "BAG_STOCK_UPDATED", { crafting = true } },
     }
     for i = 1, #AN_TAB_REFRESH do
         local msg = Constants.EVENTS[AN_TAB_REFRESH[i][1]]

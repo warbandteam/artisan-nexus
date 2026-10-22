@@ -98,6 +98,8 @@ local Constants = {
         --- Coalesced (0.5s) relay of Warband Nexus item/bag/concentration/recipe/tracking messages.
         --- Payload: `{ items?, bags?, concentration?, recipes?, tracking? }` (true for each kind seen).
         WN_DATA_UPDATED = "AN_WN_DATA_UPDATED",
+        --- Bags / bank / warband bank changed (RecipeService BAG_UPDATE bucket, 0.35s). No payload.
+        BAG_STOCK_UPDATED = "AN_BAG_STOCK_UPDATED",
         --- ns.CharacterData switched a capability between Warband Nexus and AN-native collection.
         --- Payload: `{ [capability] = "wn"|"native" }` for every capability (characters, concentration,
         --- recipes, items, cooldowns).

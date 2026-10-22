@@ -15,6 +15,8 @@
 
     Adds to ns.HubCrafting (created by CraftingPage.lua):
       AddBreakdown(tooltip, row, opts)    opts = { useAverage, knownBy }
+      AddStock(tooltip, row)              have / need per slot by location (bags, bank, warband
+                                          bank, Warband Nexus alts) and how many crafts that covers
       OutputItem(row, opts) -> itemID|nil the evaluated output item (price history)
 ]]
 
@@ -409,6 +411,86 @@ function C.AddBreakdown(tt, r, opts)
         AddConcentration(tt, r, base, ev.bestConc)
     end
     AddFooter(tt, ev)
+end
+
+local MAX_ALT_NAMES = 3
+
+--- "Name 10, Name2 5" for the alts holding the most of a slot's items.
+local function AltNames(perAlt)
+    local list = {}
+    for name, n in pairs(perAlt) do
+        list[#list + 1] = { name = name, n = n }
+    end
+    table.sort(list, function(a, b) return a.n > b.n end)
+    local parts = {}
+    for i = 1, math.min(#list, MAX_ALT_NAMES) do
+        parts[#parts + 1] = list[i].name .. " " .. list[i].n
+    end
+    if #list > MAX_ALT_NAMES then
+        parts[#parts + 1] = "..."
+    end
+    return table.concat(parts, ", ")
+end
+
+--- Stock section: per required slot, have / need with where it is (bags, bank, warband bank and
+--- Warband Nexus alts), then how many crafts this character can do and how many the alts' stock adds.
+function C.AddStock(tt, r)
+    local rs = ns.RecipeService
+    if not (rs and rs.GetMandatorySlots and rs.GetStockByLocation and r.spellID) then return end
+    local slots = rs:GetMandatorySlots(r.spellID)
+    if #slots == 0 then return end
+    local status, maxCrafts = C.CraftStatus(r)
+    Head(tt, SafeL("HUB_TT_STOCK", "Your stock"))
+    if status == "unlearned" then
+        tt:AddLine(Hex(SafeL("HUB_TT_NOT_LEARNED", "Not learned on this character"), "danger"))
+    end
+    local anyAlt = false
+    for i = 1, math.min(#slots, MAX_REAGENT_LINES) do
+        local slot = slots[i]
+        local need = SafeNumber(slot.qty) or 0
+        local bags, bank, warband, alts, perAlt, firstID = 0, 0, 0, 0, {}, nil
+        for ci = 1, #slot.candidates do
+            local id = slot.candidates[ci].itemID
+            if id then
+                firstID = firstID or id
+                local s = rs:GetStockByLocation(id)
+                bags, bank, warband = bags + s.bags, bank + s.bank, warband + s.warband
+                local alt = rs.GetAltStock and rs:GetAltStock(id)
+                if alt and alt.total > 0 then
+                    alts = alts + alt.total
+                    for d = 1, #alt.details do
+                        local det = alt.details[d]
+                        local nm = det.name or "?"
+                        perAlt[nm] = (perAlt[nm] or 0) + (SafeNumber(det.total) or 0)
+                    end
+                end
+            end
+        end
+        if firstID and need > 0 then
+            local have = bags + bank + warband
+            local name = C.IconMarkup(ItemIcon(firstID), 14) .. " " .. ItemName(firstID)
+            Pair(tt, name, Hex(string.format("%d / %d", have, need), have >= need and "success" or "danger"))
+            local where = string.format(SafeL("HUB_TT_STOCK_WHERE_FMT", "Bags %d · Bank %d · Warband %d"),
+                bags, bank, warband)
+            if alts > 0 then
+                anyAlt = true
+                where = where .. " · " .. string.format(SafeL("HUB_TT_STOCK_ALTS_FMT", "Alts %d (%s)"),
+                    alts, AltNames(perAlt))
+            end
+            tt:AddLine("    " .. Dim(where))
+        end
+    end
+    if #slots > MAX_REAGENT_LINES then
+        tt:AddLine("...", LBL_R, LBL_G, LBL_B)
+    end
+    Pair(tt, SafeL("HUB_TT_CAN_CRAFT", "Can craft"),
+        Hex(tostring(maxCrafts or 0), (maxCrafts or 0) >= 1 and "success" or "danger"))
+    if anyAlt and rs.GetCraftStockCounts and rs.MaxCraftsFromStock then
+        local withAlts = rs:MaxCraftsFromStock(r.spellID, rs:GetCraftStockCounts(r.spellID, true)) or 0
+        if withAlts > (maxCrafts or 0) then
+            Pair(tt, SafeL("HUB_TT_CAN_CRAFT_ALTS", "With alts' stock"), tostring(withAlts))
+        end
+    end
 end
 
 --- Output item of the evaluated craft (tier item when the EV picked one), else the recipe output.
