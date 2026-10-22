@@ -261,3 +261,21 @@ H.Signed = Signed
 H.FormatDuration = FormatDuration
 H.ItemLink = ItemLink
 H.HarvestNotice = HarvestNotice
+
+--- Short tooltips with a Shift view (WN tooltips: summary first, detail on demand). Re-runs
+--- redraw(owner) when Shift is pressed or released while GameTooltip still belongs to owner.
+local shiftWatch = {}
+local shiftFrame
+function H.WatchShift(owner, redraw)
+    shiftWatch.owner, shiftWatch.redraw = owner, redraw
+    if shiftFrame then return end
+    shiftFrame = CreateFrame("Frame")
+    shiftFrame:RegisterEvent("MODIFIER_STATE_CHANGED")
+    shiftFrame:SetScript("OnEvent", function(_, _, key)
+        if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
+        local o, fn = shiftWatch.owner, shiftWatch.redraw
+        if o and fn and GameTooltip:IsShown() and GameTooltip:IsOwned(o) then
+            fn(o)
+        end
+    end)
+end

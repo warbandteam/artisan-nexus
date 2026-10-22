@@ -302,13 +302,30 @@ local function PlanFor(profession)
     return planner and planner.GetPlan and planner:GetPlan(profession), true
 end
 
-local function AddPlanLines(profession)
+--- Plan lines under a pool. detailed = Shift view (budget, point value, unallocated, MAX_PLAN_LINES
+--- rows); the short view lists only the top SHORT_PLAN_LINES crafts.
+local SHORT_PLAN_LINES = 3
+local function AddPlanLines(profession, detailed)
     local plan, hasCatalog = PlanFor(profession)
     if not hasCatalog then return end
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine(SafeL("HUB_CONC_PLAN_HEAD", "Concentration plan (all characters)"), 1, 0.82, 0)
     if not plan then
         GameTooltip:AddLine(SafeL("HUB_PLAN_BUILDING", "Building plan..."), 0.7, 0.7, 0.7)
+        return
+    end
+    local rows = plan.rows or {}
+    if not detailed then
+        if #rows == 0 then
+            GameTooltip:AddLine(SafeL("HUB_PLAN_EMPTY", "No recipe gains gold from concentration at current prices."),
+                0.7, 0.7, 0.7, true)
+            return
+        end
+        for i = 1, math.min(#rows, SHORT_PLAN_LINES) do
+            local r = rows[i]
+            GameTooltip:AddDoubleLine(string.format("%dx %s", r.crafts or 0, RecipeName(r.spellID)),
+                SignedMoney(r.expectedProfit, true), 0.9, 0.9, 0.9, 1, 1, 1)
+        end
         return
     end
     GameTooltip:AddLine(string.format(SafeL("HUB_PLAN_BUDGET_FMT", "%d concentration over %s"),
@@ -319,7 +336,6 @@ local function AddPlanLines(profession)
         GameTooltip:AddLine(string.format(SafeL("HUB_PLAN_UNALLOCATED_FMT", "%d points unallocated"), plan.unallocated),
             0.75, 0.75, 0.75)
     end
-    local rows = plan.rows or {}
     if #rows == 0 then
         GameTooltip:AddLine(SafeL("HUB_PLAN_EMPTY", "No recipe gains gold from concentration at current prices."),
             0.7, 0.7, 0.7, true)
@@ -336,14 +352,28 @@ local function AddPlanLines(profession)
     if #rows > MAX_PLAN_LINES then
         GameTooltip:AddLine("...", 0.7, 0.7, 0.7)
     end
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(SafeL("HUB_CONC_TT_CTRL_QUEUE_PLAN", "Ctrl-click: queue the planned crafts"), 0.7, 0.7, 0.7)
 end
 
 local function PoolEnter(row, p)
     GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
     GameTooltip:AddLine(UiString(p.professionName, p.profession or "?"), 1, 1, 1)
     GameTooltip:AddLine(string.format("%s: %d / %d", p.charName or "?", p.current or 0, p.max or 0), 0.9, 0.8, 0.5)
+    local detailed = IsShiftKeyDown()
+    if not detailed then
+        if p.capped then
+            GameTooltip:AddLine(SafeL("HUB_CONC_TT_FULL", "Full: spend it before it is wasted."), 1, 0.5, 0.3)
+        elseif p.secondsToCap and p.secondsToCap > 0 then
+            GameTooltip:AddLine(string.format(SafeL("HUB_CONC_TT_FULL_IN_FMT", "Full in %s"), FormatDuration(p.secondsToCap)),
+                0.7, 0.7, 0.7)
+        end
+        AddPlanLines(p.profession, false)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(SafeL("HUB_TT_SHIFT_DETAILS", "Shift: full breakdown"), 0.7, 0.7, 0.7)
+        GameTooltip:AddLine(SafeL("HUB_CONC_TT_CTRL_QUEUE_PLAN", "Ctrl-click: queue the planned crafts"), 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+        H.WatchShift(row, function(o) PoolEnter(o, p) end)
+        return
+    end
     if p.ratePerHour and p.ratePerHour > 0 then
         GameTooltip:AddLine(string.format(SafeL("HUB_CONC_RATE_FMT", "+%d per hour"), math.floor(p.ratePerHour + 0.5)), 0.7, 0.7, 0.7)
     end
@@ -352,8 +382,11 @@ local function PoolEnter(row, p)
     end
     GameTooltip:AddLine(p.source == "wn" and SafeL("HUB_CONC_SRC_WN", "Source: Warband Nexus")
         or SafeL("HUB_CONC_SRC_AN", "Source: Artisan Nexus snapshot"), 0.6, 0.6, 0.6)
-    AddPlanLines(p.profession)
+    AddPlanLines(p.profession, true)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine(SafeL("HUB_CONC_TT_CTRL_QUEUE_PLAN", "Ctrl-click: queue the planned crafts"), 0.7, 0.7, 0.7)
     GameTooltip:Show()
+    H.WatchShift(row, function(o) PoolEnter(o, p) end)
 end
 
 local function CooldownEnter(row, c)

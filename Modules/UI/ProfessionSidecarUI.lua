@@ -3,6 +3,10 @@
     window (concentration, concentration plan, crafting queue, equipment hint for the open
     profession). Clicking the body opens the Artisan Hub's queue page; nothing else closes.
 
+    Sections, most relevant first: the selected recipe (profit, reagent cost, crafts possible from
+    bags + bank + warband bank, have / need per reagent), the open profession (concentration, unspent
+    knowledge, best concentration use), queue progress, equipment hint.
+
     Warband Nexus companion pattern:
       shell / title band / close / ESC + combat hide -> ns.ArtisanWindow.Create (PlansTrackerWindow shell)
       shown with ProfessionsFrame, hidden with it   -> RecipeCompanionWindow.lua:850-874
@@ -87,6 +91,20 @@ end
 
 local function Money(copper)
     return (ns.FormatCopper and ns.FormatCopper(math.floor((copper or 0) + 0.5))) or "0"
+end
+
+local function RedHex()
+    local H = ns.HubUI_Internal
+    return "|cff" .. ((H and H.InkHex and H.InkHex("danger")) or "ff5555")
+end
+
+--- Signed copper: green gain, red loss.
+local function SignedMoney(copper)
+    copper = math.floor((copper or 0) + 0.5)
+    if copper < 0 then
+        return RedHex() .. "-|r" .. Money(-copper)
+    end
+    return GreenHex() .. "+|r" .. Money(copper)
 end
 
 -- ── Row pool: the sidecar repaints often (queue / snapshot / plan messages), so the
@@ -242,6 +260,73 @@ local function EquipmentHint()
     return nil
 end
 
+--- The recipe selected in the profession window: is it worth crafting and can I craft it now.
+--- Set from EventRegistry "ProfessionsRecipeListMixin.Event.OnRecipeSelected" (recipeInfo, recipeList)
+--- (Blizzard_ProfessionsRecipeList.lua:137 / Blizzard_ProfessionsCrafting.lua:34, wow-ui-source live
+--- 12.1.5.70448, checked 2026-10-22).
+local MAX_RECIPE_REAGENTS = 6
+
+local function AddRecipeSection(body, y, first)
+    local sel = ProfessionSidecarUI._recipe
+    local spellID = sel and sel.recipeID
+    local rs = ns.RecipeService
+    if not spellID or not rs then
+        return y, false
+    end
+    local name = SafeUiLine(sel.name, "")
+    if name == "" then
+        name = SafeUiLine(rs.GetRecipeName and rs:GetRecipeName(spellID), "?")
+    end
+    y = AddSectionHeader(body, y, name, first)
+    local ev
+    local evSvc = ns.CraftEVService
+    if evSvc and evSvc.Evaluate then
+        local ok, res = pcall(evSvc.Evaluate, evSvc, spellID, { noLiveOps = true })
+        ev = ok and res or nil
+    end
+    local base = ev and ev.bestNoConc
+    if base then
+        y = AddLine(body, y, SafeL("HUB_COL_PROFIT", "Profit"),
+            base.profit and SignedMoney(base.profit) or (RoleHex("Muted") .. SafeL("HUB_NO_PRICE", "no price") .. "|r"))
+        y = AddLine(body, y, SafeL("SIDECAR_LINE_COST", "Reagent cost"), Money(base.reagentCost))
+    end
+    if sel.learned == false then
+        y = AddLine(body, y, SafeL("SIDECAR_LINE_STATUS", "Status"),
+            RedHex() .. SafeL("SIDECAR_NOT_LEARNED", "Not learned") .. "|r")
+    elseif rs.GetCraftStatus then
+        local status, n = rs:GetCraftStatus(spellID, true)
+        if status ~= "unknown" then
+            local txt = ((n or 0) >= 1 and GreenHex() or RedHex()) .. tostring(n or 0) .. "|r"
+            local withAlts = rs.MaxCraftsFromStock and rs:MaxCraftsFromStock(spellID, rs:GetCraftStockCounts(spellID, true)) or 0
+            if withAlts > (n or 0) then
+                txt = txt .. RoleHex("Muted") .. " (" .. string.format(SafeL("HUB_TT_WITH_ALTS_FMT", "%d with alts"), withAlts) .. ")|r"
+            end
+            y = AddLine(body, y, SafeL("HUB_TT_CAN_CRAFT", "Can craft"), txt)
+        end
+    end
+    -- Reagents: have (bags + bank + warband bank) / need per craft.
+    local slots = rs.GetRequiredBasicSlots and rs:GetRequiredBasicSlots(spellID) or {}
+    for i = 1, math.min(#slots, MAX_RECIPE_REAGENTS) do
+        local slot = slots[i]
+        local need = tonumber(slot.qty) or 0
+        local have, firstID = 0, nil
+        for ci = 1, #slot.candidates do
+            local id = slot.candidates[ci]
+            id = type(id) == "table" and id.itemID or id
+            if id then
+                firstID = firstID or id
+                have = have + rs:GetStockByLocation(id).total
+            end
+        end
+        if firstID and need > 0 then
+            local itemName = SafeUiLine(ns.GetItemDisplayName and ns.GetItemDisplayName(firstID), "?")
+            y = AddLine(body, y, itemName,
+                (have >= need and GreenHex() or RedHex()) .. have .. "|r" .. RoleHex("Muted") .. " / " .. need .. "|r")
+        end
+    end
+    return y, true
+end
+
 local function Paint()
     local f = ProfessionSidecarUI.frame
     if not f or not f._anBody then
@@ -252,12 +337,19 @@ local function Paint()
     local y = 0
     local any = false
 
+    -- Selected recipe first: it is what the player is looking at.
+    local hadRecipe
+    y, hadRecipe = AddRecipeSection(body, y, true)
+    any = hadRecipe
+
     -- Open profession: concentration pool + unspent knowledge.
+    local snapShown = false
     local snap = ns.ProfessionSnapshotService and ns.ProfessionSnapshotService:GetSnapshot()
     if snap and (snap.concMax or (snap.knowledgeUnspent and snap.knowledgeUnspent > 0)) then
         local profName = SafeUiLine(snap.profession, SafeL("SIDECAR_TITLE", "Artisan Nexus"))
         y = AddSectionHeader(body, y, profName, not any)
         any = true
+        snapShown = true
         if snap.concCurrent ~= nil and snap.concMax ~= nil then
             y = AddLine(body, y, SafeL("SIDECAR_LINE_CONCENTRATION", "Concentration"),
                 ValueMax(snap.concCurrent, snap.concMax))
@@ -269,23 +361,18 @@ local function Paint()
     end
 
     -- Concentration plan: best gold-per-concentration recipe + plan totals.
+    -- Concentration: where it earns most (the full plan is on the Hub's Concentration page).
     local rows = PlannerRows()
     if rows then
         local best = rows[1]
-        local crafts, profit = 0, 0
-        for i = 1, #rows do
-            crafts = crafts + (rows[i].crafts or 0)
-            profit = profit + (rows[i].expectedProfit or 0)
-        end
         local rs = ns.RecipeService
         local name = SafeUiLine(rs and rs:GetRecipeName(best.spellID),
             string.format(SafeL("RECIPE_ID_FMT", "Recipe %s"), tostring(best.spellID)))
-        y = AddSectionHeader(body, y, SafeL("SIDECAR_SEC_PLAN", "Concentration plan"), not any)
+        if not snapShown then
+            y = AddSectionHeader(body, y, SafeL("SIDECAR_SEC_PLAN", "Concentration plan"), not any)
+        end
         any = true
-        y = AddLine(body, y, SafeL("SIDECAR_LINE_BEST", "Best recipe"), RoleHex("Bright") .. name .. "|r")
-        y = AddLine(body, y, SafeL("SIDECAR_LINE_PER_POINT", "Gold per point"), Money(best.gpc))
-        y = AddLine(body, y, SafeL("SIDECAR_LINE_PLAN", "Plan"),
-            string.format(SafeL("SIDECAR_PLAN_VALUE_FMT", "%d crafts, %s"), crafts, Money(profit)))
+        y = AddLine(body, y, SafeL("SIDECAR_LINE_BEST_CONC", "Best use"), RoleHex("Bright") .. name .. "|r")
     end
 
     -- Crafting queue progress.
@@ -295,7 +382,6 @@ local function Paint()
         y = AddSectionHeader(body, y, SafeL("HUB_PLAN_QUEUE_TITLE", "Crafting queue"), not any)
         any = true
         y = AddLine(body, y, SafeL("SIDECAR_LINE_CRAFTED", "Crafted"), ValueMax(sum.completed or 0, sum.total or 0))
-        y = AddLine(body, y, SafeL("SIDECAR_LINE_RECIPES", "Recipes"), RoleHex("Bright") .. sum.recipes .. "|r")
     end
 
     -- Profession equipment hint.
@@ -463,6 +549,7 @@ function ProfessionSidecarUI:Enable()
         ProfessionSidecarUI:Refresh()
     end)
     owner:RegisterEvent("TRADE_SKILL_CLOSE", function()
+        ProfessionSidecarUI._recipe = nil
         local f = ProfessionSidecarUI.frame
         if f then
             f._anDismissed = nil
@@ -474,9 +561,19 @@ function ProfessionSidecarUI:Enable()
     end
     for _, msg in ipairs({
         E.CRAFT_QUEUE_UPDATED, E.PROFESSION_SNAPSHOT_UPDATED, E.PROFESSION_EQUIPMENT_UPDATED,
-        E.CONCENTRATION_PLAN_UPDATED, E.CRAFT_BRIEFING_UPDATED,
+        E.CONCENTRATION_PLAN_UPDATED, E.CRAFT_BRIEFING_UPDATED, E.BAG_STOCK_UPDATED, E.AH_PRICES_UPDATED,
     }) do
         owner:RegisterMessage(msg, refresh)
+    end
+    if EventRegistry and EventRegistry.RegisterCallback and not self._recipeCallback then
+        self._recipeCallback = true
+        EventRegistry:RegisterCallback("ProfessionsRecipeListMixin.Event.OnRecipeSelected", function(_, recipeInfo)
+            if type(recipeInfo) ~= "table" or not recipeInfo.recipeID then return end
+            ProfessionSidecarUI._recipe = {
+                recipeID = recipeInfo.recipeID, name = recipeInfo.name, learned = recipeInfo.learned,
+            }
+            ProfessionSidecarUI:ScheduleRefresh()
+        end, ProfessionSidecarUI)
     end
     --- Theme / font: re-skin the shell and repaint (row inks and heights change).
     local function restyle()

@@ -433,6 +433,24 @@ local function RowOnEnter(row)
         title = title .. " " .. C.TierBadge(r.qualityTier, 14)
     end
     GameTooltip:AddLine(title, 1, 1, 1)
+    if not IsShiftKeyDown() then
+        -- Short view: what a crafter decides on. The full breakdown is one Shift away.
+        if r.knownByMe == false then
+            GameTooltip:AddLine(SafeL("HUB_TT_NOT_LEARNED", "Not learned on this character"), 1, 0.4, 0.4)
+        end
+        if r.fresh == false and r.outputItem then
+            GameTooltip:AddLine(SafeL("HUB_TT_STALE_NOTE", "Price is older than the freshness window."), 1, 0.5, 0.3)
+        end
+        if C.AddSummary then
+            C.AddSummary(GameTooltip, r, EvalOpts())
+        end
+        GameTooltip:AddLine(" ")
+        Hint(SafeL("HUB_TT_SHIFT_DETAILS", "Shift: full breakdown"))
+        Hint(SafeL("HUB_CRAFT_TT_HINTS_SHORT", "Click: open  ·  Ctrl: queue  ·  Right-click: shopping list"))
+        GameTooltip:Show()
+        H.WatchShift(row, RowOnEnter)
+        return
+    end
     if r.outputItem then
         GameTooltip:AddLine(string.format(SafeL("HUB_TT_ITEM_FMT", "Item: %s"), ItemName(r.outputItem)), 0.7, 0.7, 0.7)
     end
@@ -457,6 +475,7 @@ local function RowOnEnter(row)
     Hint(SafeL("HUB_CRAFT_TT_ALT_HISTORY", "Alt-click: price history"))
     Hint(SafeL("HUB_TT_RIGHT_CLICK_SHOP", "Right-click: add to shopping list"))
     GameTooltip:Show()
+    H.WatchShift(row, RowOnEnter)
 end
 
 -- ─────────────────────────────────────────────────────────────────

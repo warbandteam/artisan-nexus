@@ -184,6 +184,22 @@ local function OrderRowEnter(row, o)
     local function Pair(label, value)
         GameTooltip:AddDoubleLine(label, value, 0.75, 0.75, 0.75, 1, 1, 1)
     end
+    -- Short view: net, the tip and what it costs you, plus warnings; the rest is the Shift view.
+    if not IsShiftKeyDown() then
+        Pair(SafeL("HUB_COL_NET", "Net"), Money(o.net or 0, nil, true))
+        Pair(SafeL("HUB_ORDER_TIP", "Tip (after cut)"), Money(o.tipNet or 0, nil, true))
+        Pair(SafeL("HUB_ORDER_REAGENTS", "Your reagents"), "-" .. Money(o.reagentCost or 0, nil, true))
+        if HasFlags(o) and svc and svc.GetFlagLabel then
+            for i = 1, #o.flags do
+                GameTooltip:AddLine("(!) " .. svc:GetFlagLabel(o.flags[i]), 1, 0.7, 0.3)
+            end
+        end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(SafeL("HUB_TT_SHIFT_DETAILS", "Shift: full breakdown"), 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+        H.WatchShift(row, function(r) OrderRowEnter(r, o) end)
+        return
+    end
     Pair(SafeL("HUB_ORDER_TIP", "Tip (after cut)"), Money(o.tipNet or 0, nil, true))
     if o.tipAvg then
         Pair(SafeL("HUB_ORDER_TIP_AVG", "Average tip"), Money(o.tipAvg, nil, true))
@@ -211,6 +227,7 @@ local function OrderRowEnter(row, o)
         end
     end
     GameTooltip:Show()
+    H.WatchShift(row, function(r) OrderRowEnter(r, o) end)
 end
 
 local function OrderRowClick(row, o, button)

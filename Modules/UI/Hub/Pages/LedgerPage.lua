@@ -7,17 +7,15 @@
 
       fixedHeader  UI_BeginTabChromeLayout -> UI_CreateStandardTabTitleCard (+ title-toolbar period
                    button) -> UI_PageStack_Place -> UI_CommitTabFixedHeader
-      Stat cards   H.NewTabBody StatCards: Net / Revenue / AH cut; deposits, purchases and tips are in
-                   the Net card tooltip
-                   (SalesLedgerService:GetSummary(days) + GetObservedCutRate(), Economy:CutRate())
-      Groups       body kit collapsible headers with a right-side summary; expand state in
-                   profile.hubLedgerExpanded:
-        Crafts     right = craft count and realized profit; tooltip = predicted vs actual, output
-                   value, reagent cost, returned reagents, proc counts; rows = proc calibration per
-                   profession (observed factors in green, settings dim)
-        Gold       daily gold total (chart card)
+      Stat cards   H.NewTabBody StatCards: Sales (net) / Crafting profit / Gold (now, change this period);
+                   a card without data shows a dash and says how it fills; breakdowns are card tooltips
+                   (SalesLedgerService:GetSummary(days), CraftLedgerService:GetSummary(days), GetGoldHistory)
+      Empty        nothing recorded in the period -> one WN empty-state card instead of empty sections
+      Groups       body kit collapsible headers with a right-side summary, shown only when they have data;
+                   expand state in profile.hubLedgerExpanded:
+        Gold       daily total bars on one WN card, baseline below the low, day labels, bar tooltips
         Top items  sold / revenue / net per item (sortable)
-      Gold         SalesLedgerService:GetGoldHistory(days).total -> bars on one WN card
+        Crafts     profession / crafts / profit; proc factors (observed or settings) in the row tooltip
     Refresh: UI_RefreshRouter.lua maps SALES_LEDGER_UPDATED / CRAFT_LEDGER_UPDATED (and
     ECONOMY_CONFIG_CHANGED for the visible tab) to this tab.
 ]]
@@ -56,17 +54,7 @@ local function Cost(c)
     return (c > 0) and ("-" .. Money(c)) or Dim("0")
 end
 
-local function Tone(c)
-    c = tonumber(c) or 0
-    return (c > 0 and "success") or (c < 0 and "danger") or "dim"
-end
 
-local function Pct(n, d)
-    if not d or d <= 0 then
-        return 0
-    end
-    return math.floor((n or 0) / d * 100 + 0.5)
-end
 
 local function CellValue(col, d)
     return d[col.key], d.role
@@ -135,13 +123,11 @@ local body = H.NewTabBody("ledger", "hubLedgerExpanded")
 -- Columns
 -- ─────────────────────────────────────────────────────────────────
 
-local CALIB_COLS = {
+--- Crafts by profession: what each profession earned. Proc factors live in the row tooltip.
+local PROF_COLS = {
     { key = "prof", label = SafeL("HUB_COL_PROFESSION", "Profession"), flex = 1, min = COL.NAME_MIN_NARROW },
     { key = "crafts", label = SafeL("HUB_COL_CRAFTS", "Crafts"), width = COL.COUNT, align = "RIGHT" },
-    { key = "mc", label = SafeL("HUB_COL_MULTICRAFT", "Multicraft"), width = 104, align = "RIGHT" },
-    { key = "res", label = SafeL("HUB_COL_RESOURCEFULNESS", "Resourcefulness"), width = 116, align = "RIGHT" },
-    { key = "ing", label = SafeL("HUB_COL_INGENUITY", "Ingenuity"), width = 104, align = "RIGHT" },
-    { key = "src", label = SafeL("HUB_COL_SOURCE", "Source"), width = 80, align = "RIGHT" },
+    { key = "profit", label = SafeL("HUB_COL_PROFIT", "Profit"), width = COL.MONEY_WIDE, align = "RIGHT" },
 }
 
 local TOP_COLS = {
@@ -170,143 +156,131 @@ local TOP_SORT = {
 -- Stat cards
 -- ─────────────────────────────────────────────────────────────────
 
---- Cut rate in use and where it comes from (observed / setting), for the AH cut card tooltip.
-local function CutCardSub(samples)
-    local econ = ns.Economy
-    local used, src = 0.05, "config"
-    if econ and econ.CutRate then
-        used, src = econ:CutRate()
-    end
-    local fmt = (src == "observed")
-        and SafeL("HUB_LEDGER_CUT_OBSERVED_FMT", "(observed, %d invoices)")
-        or SafeL("HUB_LEDGER_CUT_CONFIG_FMT", "(setting, %d invoices seen)")
-    return string.format("%.1f%%", (used or 0) * 100), string.format(fmt, samples or 0)
+--- "label: value" tooltip line.
+local function TipLine(label, value)
+    return label .. ": " .. value
 end
 
---- Three cards (Net, Revenue, AH cut) without card lines; the rest of the period breakdown
---- (deposits, purchases, order tips, sales count, cut source) lives in the card tooltips.
+--- Gold series of the period: first, last, low, high (nil when fewer than two days are known).
+local function GoldRange(pts)
+    if not pts or #pts < 2 then return nil end
+    local mn, mx = pts[1].m, pts[1].m
+    for i = 2, #pts do
+        local m = pts[i].m
+        if m < mn then mn = m end
+        if m > mx then mx = m end
+    end
+    return { first = pts[1].m, last = pts[#pts].m, low = mn, high = mx }
+end
+
+--- Three cards answering "did I earn?": sales, crafting, gold. A card with no data shows a dash, not
+--- "0 copper"; breakdowns (cut, deposits, purchases, tips, predicted profit, low / high) are tooltips.
 local statList = { {}, {}, {} }
-local function StatList(sum)
+local function StatList(sum, cs, gold)
     local list = statList
     for i = 1, #list do
         wipe(list[i])
     end
-    local ledger = ns.SalesLedgerService
-    local rate, samples
-    if ledger and ledger.GetObservedCutRate then
-        rate, samples = ledger:GetObservedCutRate()
-    end
     local c = list[1]
-    c.icon = "Interface\\Icons\\Achievement_General"
-    c.label = SafeL("HUB_COL_NET", "Net")
-    c.value = Signed(sum.net)
-    c.tooltip = table.concat({
-        SafeL("HUB_LEDGER_DEPOSITS", "Deposits lost") .. ": " .. Cost(sum.deposits),
-        string.format(SafeL("HUB_LDG_DEPOSITS_SUB_FMT", "Paid %s, refunded %s"),
-            Money(sum.depositsPaid, nil, true), Money(sum.depositsRefunded, nil, true)),
-        string.format(SafeL("HUB_LEDGER_BUYS_FMT", "Purchases (%d)"), sum.purchases or 0) .. ": " .. Cost(sum.buys),
-        SafeL("HUB_LEDGER_ORDER_TIPS", "Order tips") .. ": " .. Money(sum.orderTips),
-    }, "\n")
-    c = list[2]
     c.icon = "Interface\\Icons\\INV_Misc_Coin_01"
-    c.label = SafeL("HUB_LEDGER_REVENUE", "Revenue")
-    c.value = Money(sum.revenue)
-    c.tooltip = string.format(SafeL("HUB_LDG_SALES_SUB_FMT", "%d sales"), sum.sales or 0)
+    c.label = SafeL("HUB_LDG_CARD_SALES", "Sales")
+    if (sum.sales or 0) > 0 or (sum.purchases or 0) > 0 then
+        c.value = Signed(sum.net)
+        c.sub = string.format(SafeL("HUB_LDG_SALES_SUB_FMT", "%d sales"), sum.sales or 0)
+        c.tooltip = table.concat({
+            TipLine(SafeL("HUB_LEDGER_REVENUE", "Revenue"), Money(sum.revenue, nil, true)),
+            TipLine(SafeL("HUB_LEDGER_CUT", "AH cut"), Cost(sum.cut)),
+            TipLine(SafeL("HUB_LEDGER_DEPOSITS", "Deposits lost"), Cost(sum.deposits)),
+            TipLine(string.format(SafeL("HUB_LEDGER_BUYS_FMT", "Purchases (%d)"), sum.purchases or 0), Cost(sum.buys)),
+            TipLine(SafeL("HUB_LEDGER_ORDER_TIPS", "Order tips"), Money(sum.orderTips, nil, true)),
+        }, "\n")
+    else
+        c.value = Dim("-")
+        c.sub = SafeL("HUB_LDG_NO_SALES_SUB", "No sales yet")
+        c.tooltip = SafeL("HUB_LDG_SALES_HOW", "Sales are read from your Auction House mail.")
+    end
+    c = list[2]
+    c.icon = "Interface\\Icons\\Trade_BlackSmithing"
+    c.label = SafeL("HUB_LDG_CARD_CRAFTS", "Crafting profit")
+    local nCrafts = cs.crafts or 0
+    if nCrafts > 0 then
+        c.value = Signed(cs.profit)
+        c.sub = string.format(SafeL("HUB_LDG_CRAFTS_SUB_FMT", "%d crafts"), nCrafts)
+        local lines = {
+            TipLine(SafeL("HUB_LEDGER_CRAFT_VALUE", "Output value (net)"), Money(cs.net, nil, true)),
+            TipLine(SafeL("HUB_TT_REAGENT_COST", "Reagent cost"), Cost(cs.cost)),
+            TipLine(SafeL("HUB_LEDGER_RETURNED", "Reagents returned"), Money(cs.returnedValue, nil, true)),
+        }
+        if (cs.predictedCrafts or 0) > 0 then
+            lines[#lines + 1] = TipLine(SafeL("HUB_LEDGER_PREDICTED", "Predicted profit"), Signed(cs.predictedProfit, true))
+        end
+        c.tooltip = table.concat(lines, "\n")
+    else
+        c.value = Dim("-")
+        c.sub = SafeL("HUB_LDG_NO_CRAFTS_SUB", "No crafts yet")
+        c.tooltip = SafeL("HUB_LDG_CRAFTS_HOW", "Crafts are recorded while the profession window is open.")
+    end
     c = list[3]
     c.icon = "Interface\\Icons\\INV_Misc_Coin_02"
-    c.label = SafeL("HUB_LEDGER_CUT", "AH cut")
-    c.value = Cost(sum.cut)
-    local cutRate, cutSrc = CutCardSub(samples)
-    c.tooltip = string.format("%s %s %s", SafeL("HUB_LEDGER_CUT_RATE", "AH cut rate"), cutRate, cutSrc)
-    if rate then
-        c.tooltip = c.tooltip .. "\n" .. string.format("%s ~%.1f%%", SafeL("HUB_LEDGER_CUT_RATE", "AH cut rate"), rate * 100)
+    c.label = SafeL("HUB_LDG_CARD_GOLD", "Gold")
+    if gold then
+        c.value = Money(gold.last, nil, true)
+        local change = gold.last - gold.first
+        c.sub = string.format(SafeL("HUB_LDG_GOLD_CHANGE_FMT", "%s this period"), Signed(change, true))
+        c.tooltip = table.concat({
+            TipLine(SafeL("HUB_LDG_GOLD_LOW", "Lowest"), Money(gold.low, nil, true)),
+            TipLine(SafeL("HUB_LDG_GOLD_HIGH", "Highest"), Money(gold.high, nil, true)),
+            SafeL("HUB_LDG_GOLD_DESC", "Daily total of your characters' gold and the warband bank."),
+        }, "\n")
+    else
+        c.value = Money(GetMoney and GetMoney() or 0, nil, true)
+        c.sub = SafeL("HUB_LDG_GOLD_WAIT", "Change shows from the second day")
+        c.tooltip = SafeL("HUB_LDG_GOLD_DESC", "Daily total of your characters' gold and the warband bank.")
     end
     return list
 end
 
 -- ─────────────────────────────────────────────────────────────────
--- Crafts: predicted vs actual + calibration
+-- Crafts by profession (proc factors in the row tooltip)
 -- ─────────────────────────────────────────────────────────────────
 
---- Crafts header tooltip: what the realized profit is made of, then how often each stat procced.
-local function CraftsTooltip(cs)
-    local n = cs.crafts or 0
-    local lines = {}
-    local function Add(label, value)
-        lines[#lines + 1] = label .. ": " .. value
-    end
-    local hasPred = (cs.predictedCrafts or 0) > 0
-    Add(SafeL("HUB_LEDGER_PREDICTED", "Predicted profit"), hasPred and (Signed(cs.predictedProfit, true) .. " "
-        .. Dim(string.format(SafeL("HUB_LEDGER_PRED_N_FMT", "(%d crafts)"), cs.predictedCrafts))) or Dim("-"))
-    Add(SafeL("HUB_LEDGER_REALIZED", "Realized profit"), Signed(cs.profit, true))
-    if hasPred then
-        Add(SafeL("HUB_LDG_ACTUAL_VS_PRED", "Actual vs predicted"), Signed((cs.profit or 0) - (cs.predictedProfit or 0), true))
-    end
-    Add(SafeL("HUB_LEDGER_CRAFT_VALUE", "Output value (net)"), Money(cs.net, nil, true))
-    Add(SafeL("HUB_TT_REAGENT_COST", "Reagent cost"), Cost(cs.cost))
-    Add(SafeL("HUB_LEDGER_RETURNED", "Reagents returned"), Money(cs.returnedValue, nil, true))
-    if (cs.unpriced or 0) > 0 then
-        lines[#lines + 1] = Dim(string.format(SafeL("HUB_SHOPPING_UNPRICED_FMT", "(%d unpriced)"), cs.unpriced))
-    end
-    local procs = cs.procs or {}
-    local procFmt = SafeL("HUB_LDG_PROCS_FMT", "%d procs")
-    local rateFmt = SafeL("HUB_LDG_RATE_FMT", "%d%% of crafts")
-    local function Proc(label, count)
-        Add(label, string.format(procFmt, count or 0) .. " " .. Dim("(" .. string.format(rateFmt, Pct(count, n)) .. ")"))
-    end
-    lines[#lines + 1] = " "
-    Proc(SafeL("HUB_COL_MULTICRAFT", "Multicraft"), procs.mc)
-    Proc(SafeL("HUB_COL_RESOURCEFULNESS", "Resourcefulness"), procs.res)
-    Proc(SafeL("HUB_COL_INGENUITY", "Ingenuity"), procs.ing)
-    lines[#lines + 1] = " "
-    lines[#lines + 1] = SafeL("HUB_LDG_CALIB_DESC", "Observed from your crafts (green), else settings.")
-    return table.concat(lines, "\n")
-end
-
---- "0.62 (14)" in success ink when observed, else the setting in dim ink.
-local function FactorText(value, observed, samples)
-    local txt = string.format("%.2f", tonumber(value) or 0)
-    if observed then
-        if samples and samples > 0 then
-            txt = txt .. " (" .. samples .. ")"
-        end
-        return Ink(txt, "success")
-    end
-    return Dim(txt)
-end
-
-local function CalibrationRows(cs)
-    local econ = ns.Economy
+local function ProfRows(cs)
     local profs = {}
     for prof in pairs(cs.byProfession or {}) do
         if prof ~= "?" then profs[#profs + 1] = prof end
     end
     table.sort(profs)
-    local craftLedger = ns.CraftLedgerService
-    local b = Buf("calib")
-    local cfg = econ:ProcFactors(nil, nil)
-    local r = BufRow(b)
-    r.prof = Dim(SafeL("HUB_LEDGER_SETTINGS_ROW", "Settings (default)"))
-    r.crafts = Dim("-")
-    r.mc = FactorText(cfg.multicraftExtra, false)
-    r.res = FactorText(cfg.resourcefulnessSave, false)
-    r.ing = FactorText(cfg.ingenuityRefund, false)
-    r.src = Dim(SafeL("HUB_TT_CONFIG", "settings"))
+    local b = Buf("prof")
     for i = 1, #profs do
         local prof = profs[i]
-        local f = econ:ProcFactors(nil, prof)
-        local cal = craftLedger and craftLedger.GetCalibration and craftLedger:GetCalibration(nil, prof)
-        local samples = cal and cal.samples or {}
-        r = BufRow(b)
+        local bp = cs.byProfession[prof]
+        local r = BufRow(b)
+        r.profKey = prof
         r.prof = ns.GetProfessionDisplayName and ns.GetProfessionDisplayName(prof) or prof
-        r.crafts = tostring(cs.byProfession[prof].crafts or 0)
-        r.mc = FactorText(f.multicraftExtra, cal and cal.multicraftExtra ~= nil, samples.mc)
-        r.res = FactorText(f.resourcefulnessSave, cal and cal.resourcefulnessSave ~= nil, samples.res)
-        r.ing = FactorText(f.ingenuityRefund, cal and cal.ingenuityRefund ~= nil, samples.ing)
-        r.src = (f.source == "observed") and Ink(SafeL("HUB_TT_OBSERVED", "observed"), "success")
-            or Dim(SafeL("HUB_TT_CONFIG", "settings"))
+        r.crafts = tostring(bp.crafts or 0)
+        r.profit = Signed((bp.net or 0) - (bp.cost or 0))
     end
     return BufRows(b)
+end
+
+--- Profession row tooltip: the proc factors its profit estimates use and whether they were observed.
+local function ProfRowEnter(row, d)
+    if not d or not d.profKey then return end
+    local econ = ns.Economy
+    if not (econ and econ.ProcFactors) then return end
+    local f = econ:ProcFactors(nil, d.profKey)
+    local observed = f.source == "observed"
+    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(d.prof, 1, 1, 1)
+    local function Pair(label, v)
+        GameTooltip:AddDoubleLine(label, string.format("%.2f", tonumber(v) or 0), 0.75, 0.75, 0.75, 1, 1, 1)
+    end
+    Pair(SafeL("HUB_COL_MULTICRAFT", "Multicraft"), f.multicraftExtra)
+    Pair(SafeL("HUB_COL_RESOURCEFULNESS", "Resourcefulness"), f.resourcefulnessSave)
+    Pair(SafeL("HUB_COL_INGENUITY", "Ingenuity"), f.ingenuityRefund)
+    GameTooltip:AddLine(observed and SafeL("HUB_LDG_FACTORS_OBSERVED", "Learned from your crafts.")
+        or SafeL("HUB_LDG_FACTORS_SETTINGS", "From settings until enough crafts are recorded."), 0.7, 0.7, 0.7, true)
+    GameTooltip:Show()
 end
 
 -- ─────────────────────────────────────────────────────────────────
@@ -318,56 +292,79 @@ local function ChartColor()
     return (c and (c.sparkLine or c.accent)) or { 0.85, 0.65, 1.0, 1 }
 end
 
+--- Day label "10/21" from SalesLedgerService DayIndex (yyyymmdd).
+local function DayLabel(d)
+    d = tonumber(d) or 0
+    return string.format("%d/%d", math.floor(d / 100) % 100, d % 100)
+end
+
 local chartHost = {}
 
-local function DrawGoldChart(parent, width, pts)
+local function BarOnEnter(tex)
+    local pt = tex._anPoint
+    if not pt then return end
+    GameTooltip:SetOwner(tex, "ANCHOR_TOP")
+    GameTooltip:AddDoubleLine(DayLabel(pt.d), Money(pt.m, nil, true), 0.75, 0.75, 0.75, 1, 1, 1)
+    GameTooltip:Show()
+end
+
+local function DrawGoldChart(parent, width, pts, range)
     local chart = chartHost.chart
     if not chart then
         chart = ns.UI_CreateCard(parent, CHART_H)
         if ns.UI_ApplyStandardCardElevatedChrome then
             ns.UI_ApplyStandardCardElevatedChrome(chart)
         end
-        chart._bars = {}
-        chart._title = FontManager:CreateFontString(chart, "small", "OVERLAY")
-        chart._title:SetPoint("TOPLEFT", chart, "TOPLEFT", CHART_PAD, -6)
-        chart._title:SetPoint("TOPRIGHT", chart, "TOPRIGHT", -CHART_PAD, -6)
-        chart._title:SetJustifyH("LEFT")
-        chart._title:SetWordWrap(false)
+        chart._bars, chart._labels = {}, {}
         chartHost.chart = chart
     end
     body:PlaceWide(chart, CHART_H)
-    local mn, mx = pts[1].m, pts[1].m
-    for i = 2, #pts do
-        local m = pts[i].m
-        if m < mn then mn = m end
-        if m > mx then mx = m end
-    end
-    local first, last = pts[1].m, pts[#pts].m
-    chart._title:SetText(string.format(SafeL("HUB_LEDGER_GOLD_FMT", "Now %s - change %s - low %s - high %s"),
-        Money(last, nil, true), Signed(last - first, true), Money(mn, nil, true), Money(mx, nil, true)))
-    ns.UI_SetTextColorRole(chart._title, "Muted")
-    local span = math.max(1, mx - mn)
+    -- Baseline below the period low so the lowest day still shows a bar (scaling from the low made
+    -- it zero-height: two days of data drew one lone bar).
+    local span = math.max(1, range.high - range.low)
+    local base = math.max(0, range.low - span * 0.5)
+    local top = range.high - base
     local n = #pts
     local area = math.max(1, width - CHART_PAD * 2)
     local slot = area / n
-    local barW = math.max(2, math.floor(slot) - 2)
-    local maxH = CHART_H - CHART_TITLE_H - CHART_PAD - 6
+    local barW = math.max(2, math.min(48, math.floor(slot) - 4))
+    local maxH = CHART_H - CHART_TITLE_H - CHART_PAD
+    local labelEvery = (n <= 10) and 1 or math.ceil(n / 8)
     local col = ChartColor()
-    local bars = chart._bars
+    local bars, labels = chart._bars, chart._labels
     for i = 1, n do
-        local tex = bars[i]
-        if not tex then
-            tex = chart:CreateTexture(nil, "ARTWORK")
-            bars[i] = tex
+        local bar = bars[i]
+        if not bar then
+            bar = CreateFrame("Frame", nil, chart)
+            bar._tex = bar:CreateTexture(nil, "ARTWORK")
+            bar._tex:SetAllPoints()
+            bar:EnableMouse(true)
+            bar:SetScript("OnEnter", BarOnEnter)
+            bar:SetScript("OnLeave", RowLeave)
+            bars[i] = bar
         end
-        tex:SetColorTexture(col[1], col[2], col[3], (i == n) and 0.95 or 0.6)
-        tex:SetSize(barW, 2 + math.floor((pts[i].m - mn) / span * maxH))
-        tex:ClearAllPoints()
-        tex:SetPoint("BOTTOMLEFT", chart, "BOTTOMLEFT", CHART_PAD + math.floor((i - 1) * slot), CHART_PAD)
-        tex:Show()
+        bar._anPoint = pts[i]
+        bar._tex:SetColorTexture(col[1], col[2], col[3], (i == n) and 0.95 or 0.6)
+        local x = CHART_PAD + math.floor((i - 1) * slot + (slot - barW) / 2)
+        bar:SetSize(barW, 2 + math.floor((pts[i].m - base) / top * maxH))
+        bar:ClearAllPoints()
+        bar:SetPoint("BOTTOMLEFT", chart, "BOTTOMLEFT", x, CHART_TITLE_H - 4)
+        bar:Show()
+        local fs = labels[i]
+        if not fs then
+            fs = FontManager:CreateFontString(chart, "small", "OVERLAY")
+            fs:SetJustifyH("CENTER")
+            labels[i] = fs
+        end
+        fs:ClearAllPoints()
+        fs:SetPoint("BOTTOM", chart, "BOTTOMLEFT", x + barW / 2, 4)
+        fs:SetText(DayLabel(pts[i].d))
+        ns.UI_SetTextColorRole(fs, "Dim")
+        fs:SetShown((i - 1) % labelEvery == 0 or i == n)
     end
     for i = n + 1, #bars do
         bars[i]:Hide()
+        if labels[i] then labels[i]:Hide() end
     end
     body.y = body.y + CHART_H
 end
@@ -412,6 +409,7 @@ end
 
 local EMPTY_SALES = { byItem = {} }
 local EMPTY_CRAFTS = { crafts = 0, procs = {}, byProfession = {} }
+local EMPTY_KEY = "an_ledger_empty"
 
 local function PeriodText()
     return string.format(SafeL("HUB_LEDGER_PERIOD_FMT", "Period: %d days"), LedgerDays())
@@ -447,47 +445,46 @@ function ArtisanNexus:DrawLedgerTab(parent)
     local sales, crafts = ns.SalesLedgerService, ns.CraftLedgerService
     local sum = sales and sales.GetSummary and sales:GetSummary(days) or EMPTY_SALES
     local cs = crafts and crafts.GetSummary and crafts:GetSummary(days) or EMPTY_CRAFTS
+    local hist = sales and sales.GetGoldHistory and sales:GetGoldHistory(days)
+    local pts = hist and hist.total or {}
+    local gold = GoldRange(pts)
 
-    body:StatCards(StatList(sum))
+    body:StatCards(StatList(sum, cs, gold))
 
-    -- Crafts: realized profit (header) + proc calibration rows
-    local nCrafts = cs.crafts or 0
-    if body:Section("crafts", SafeL("HUB_COL_CRAFTS", "Crafts"), {
-            tooltip = (nCrafts > 0) and CraftsTooltip(cs) or nil,
-            count = (nCrafts > 0) and string.format(SafeL("HUB_LDG_CRAFTS_SUM_FMT", "%d crafts · realized %s"),
-                nCrafts, Signed(cs.profit)) or nil,
-        }) then
-        if nCrafts == 0 then
-            body:Line("noCrafts", SafeL("HUB_LEDGER_NO_CRAFTS", "No crafts recorded in this period."))
-        elseif ns.Economy and ns.Economy.ProcFactors then
-            body:Table("calib", CALIB_COLS, CalibrationRows(cs), CellValue)
-        end
-    end
-
-    -- Gold over time (the chart card is not a body-kit block: hide it unless drawn below)
     if chartHost.chart then
         chartHost.chart:Hide()
     end
-    if body:Section("gold", SafeL("HUB_LEDGER_GOLD", "Gold"),
-            { tooltip = SafeL("HUB_LDG_GOLD_DESC", "Daily total of your characters' gold and the warband bank.") }) then
-        local hist = sales and sales.GetGoldHistory and sales:GetGoldHistory(days)
-        local pts = hist and hist.total or {}
-        if #pts < 2 then
-            body:Line("goldEmpty", SafeL("HUB_LEDGER_GOLD_NONE", "Gold history appears after logging in on two different days."))
-        else
-            DrawGoldChart(parent, body.width, pts)
-        end
+    if ns.UI_HideEmptyStateCard then
+        ns.UI_HideEmptyStateCard(parent, EMPTY_KEY)
+    end
+    local nCrafts = cs.crafts or 0
+    local topRows = TopItemRows(sum)
+    -- Nothing recorded: one explanation instead of three empty sections.
+    if nCrafts == 0 and #topRows == 0 and not gold then
+        body:Empty(EMPTY_KEY, SafeL("HUB_LDG_EMPTY_TITLE", "Nothing recorded yet"),
+            SafeL("HUB_LDG_EMPTY_DESC", "Collect your Auction House mail and craft with the profession window open; earnings show up here."),
+            "Professions-Icon-Accept-Order")
+        return body.y
     end
 
-    -- Top items by net
-    local topRows = TopItemRows(sum)
-    if body:Section("top", SafeL("HUB_LEDGER_TOP_ITEMS", "Top items by net"), {
-            count = (#topRows > 0) and string.format(SafeL("HUB_MKT_ITEMS_FMT", "%d items"), #topRows) or nil,
+    if gold and body:Section("gold", SafeL("HUB_LEDGER_GOLD", "Gold"), {
+            tooltip = SafeL("HUB_LDG_GOLD_DESC", "Daily total of your characters' gold and the warband bank."),
+        }) then
+        DrawGoldChart(parent, body.width, pts, gold)
+    end
+
+    if #topRows > 0 and body:Section("top", SafeL("HUB_LEDGER_TOP_ITEMS", "Top items by net"), {
+            count = string.format(SafeL("HUB_MKT_ITEMS_FMT", "%d items"), #topRows),
         }) then
         body:Table("top", TOP_COLS, topRows, TopValue, {
             onRowEnter = RowEnter, onRowLeave = RowLeave, onRowClick = RowClick, sort = TOP_SORT,
-            emptyText = SafeL("HUB_LEDGER_NO_SALES", "No sales in this period."),
         })
+    end
+
+    if nCrafts > 0 and body:Section("crafts", SafeL("HUB_COL_CRAFTS", "Crafts"), {
+            count = string.format(SafeL("HUB_LDG_CRAFTS_SUM_FMT", "%d crafts · realized %s"), nCrafts, Signed(cs.profit)),
+        }) then
+        body:Table("prof", PROF_COLS, ProfRows(cs), CellValue, { onRowEnter = ProfRowEnter, onRowLeave = RowLeave })
     end
 
     return body.y

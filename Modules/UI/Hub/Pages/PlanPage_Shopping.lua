@@ -211,6 +211,9 @@ local function BuyValue(col, d)
     return ""
 end
 
+--- Alt holders listed in the short shopping-row tooltip.
+local ALT_LINES = 3
+
 local function BuyRowEnter(row, d)
     if not d then return end
     GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
@@ -238,11 +241,20 @@ local function BuyRowEnter(row, d)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(SafeL("HUB_ALTS_INVENTORY_HEADER", "Warband Characters:"), 0.9, 0.8, 0.5)
         local bagsLbl, bankLbl = SafeL("HUB_BAGS", "bags"), SafeL("HUB_BANK", "bank")
-        for i = 1, #d.altDetails do
+        -- Short view: the top ALT_LINES holders with their totals; Shift lists all with bags / bank.
+        local detailed = IsShiftKeyDown()
+        local shown = detailed and #d.altDetails or math.min(#d.altDetails, ALT_LINES)
+        for i = 1, shown do
             local a = d.altDetails[i]
-            GameTooltip:AddDoubleLine(a.name, string.format("x%d (%s: %d, %s: %d)", a.total or 0, bagsLbl, a.bagCount or 0,
-                bankLbl, a.bankCount or 0), 0.8, 0.8, 0.8, 1, 1, 1)
+            local right = detailed and string.format("x%d (%s: %d, %s: %d)", a.total or 0, bagsLbl, a.bagCount or 0,
+                bankLbl, a.bankCount or 0) or ("x" .. tostring(a.total or 0))
+            GameTooltip:AddDoubleLine(a.name, right, 0.8, 0.8, 0.8, 1, 1, 1)
         end
+        if shown < #d.altDetails then
+            GameTooltip:AddLine(string.format(SafeL("HUB_TT_MORE_SHIFT_FMT", "+%d more (Shift)"), #d.altDetails - shown),
+                0.7, 0.7, 0.7)
+        end
+        H.WatchShift(row, function(r) BuyRowEnter(r, d) end)
     end
     GameTooltip:Show()
 end

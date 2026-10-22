@@ -137,7 +137,7 @@ local function BuildReagents(r, base, opts, out)
             end
             local qty = tonumber(slot.qty) or 0
             local total, src = SlotCost(itemID, qty, make[itemID], opts)
-            e.itemID, e.qty, e.have = itemID, qty, tonumber(bags[itemID]) or 0
+            e.itemID, e.qty, e.have, e.slotIndex = itemID, qty, tonumber(bags[itemID]) or 0, i
             e.total, e.src, e.makeSpell = total, src, make[itemID]
             e.unit = (total and qty > 0) and (total / qty) or nil
             e.quality = ReagentQuality(itemID)
@@ -411,6 +411,57 @@ function C.AddBreakdown(tt, r, opts)
         AddConcentration(tt, r, base, ev.bestConc)
     end
     AddFooter(tt, ev)
+end
+
+--- Short tooltip body (the default view): profit first, then cost / sale value, how many crafts the
+--- reagents on hand cover, and one line per required reagent with have / need and its cost.
+--- Everything else (gross, cut, deposit, quality mix, concentration, stock locations, confidence)
+--- is the Shift view (AddBreakdown + AddStock).
+function C.AddSummary(tt, r, opts)
+    local ev = Evaluate(r, opts)
+    local base = ev and ev.bestNoConc
+    if base then
+        Pair(tt, SafeL("HUB_COL_PROFIT", "Profit"), base.profit and H.Signed(base.profit, true)
+            or Hex(SafeL("HUB_NO_PRICE", "no price"), "danger"))
+        Pair(tt, SafeL("HUB_TT_COST_SELLS", "Cost / sells for"), string.format("%s / %s",
+            H.Money(base.reagentCost, nil, true), base.revenueNet and H.Money(base.revenueNet, nil, true) or Dim("-")))
+    end
+    local status, maxCrafts = C.CraftStatus(r)
+    if status and status ~= "unknown" then
+        local canTxt = Hex(tostring(maxCrafts or 0), (maxCrafts or 0) >= 1 and "success" or "danger")
+        local rs = ns.RecipeService
+        if rs and rs.MaxCraftsFromStock and rs.GetCraftStockCounts then
+            local withAlts = rs:MaxCraftsFromStock(r.spellID, rs:GetCraftStockCounts(r.spellID, true)) or 0
+            if withAlts > (maxCrafts or 0) then
+                canTxt = canTxt .. Dim(" (" .. string.format(SafeL("HUB_TT_WITH_ALTS_FMT", "%d with alts"), withAlts) .. ")")
+            end
+        end
+        Pair(tt, SafeL("HUB_TT_CAN_CRAFT", "Can craft"), canTxt)
+    end
+    local rs = ns.RecipeService
+    local slots = rs and rs.GetRequiredBasicSlots and rs:GetRequiredBasicSlots(r.spellID) or {}
+    local n = BuildReagents(r, base, opts, reagents)
+    if n == 0 then return end
+    Head(tt, SafeL("HUB_COL_REAGENTS", "Reagents"))
+    for i = 1, math.min(n, MAX_REAGENT_LINES) do
+        local e = reagents[i]
+        local have = 0
+        local slot = slots[e.slotIndex or i]
+        if slot and rs.GetStockByLocation then
+            for ci = 1, #slot.candidates do
+                local id = slot.candidates[ci]
+                id = type(id) == "table" and id.itemID or id
+                if id then have = have + rs:GetStockByLocation(id).total end
+            end
+        end
+        local name = C.IconMarkup(ItemIcon(e.itemID), 14) .. " " .. ItemName(e.itemID)
+        local count = Hex(string.format("%d/%d", have, e.qty), have >= e.qty and "success" or "danger")
+        local price = e.total and H.Money(e.total, nil, true) or Dim(SafeL("HUB_NO_PRICE", "no price"))
+        Pair(tt, name, count .. "  " .. price)
+    end
+    if n > MAX_REAGENT_LINES then
+        tt:AddLine("...", LBL_R, LBL_G, LBL_B)
+    end
 end
 
 local MAX_ALT_NAMES = 3
