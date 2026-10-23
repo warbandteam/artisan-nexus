@@ -231,16 +231,9 @@ function H.NewTabBody(tabKey, expandKey)
     }, TabBody)
 end
 
---- Start a paint: metrics, cursor at the scroll body top, every pooled row released.
-function TabBody:Begin(parent)
-    local mf = ArtisanNexus.UI and ArtisanNexus.UI.mainFrame
-    local metrics = ns.UI_GetMainTabLayoutMetrics and ns.UI_GetMainTabLayoutMetrics(mf)
+--- Releases last paint's rows, culls, headers and lines (Begin / BeginIn).
+local function ResetPass(self)
     local pageStack = ns.UI_LAYOUT.PAGE_STACK or {}
-    self.parent = parent
-    self.side = metrics and metrics.sideMargin or 12
-    self.width = ((metrics and metrics.contentWidth) or (parent:GetWidth() or 600)) - self.side * 2
-    self.y = (ns.UI_GetTabScrollContentStartY and ns.UI_GetTabScrollContentStartY()) or 8
-    self.top = self.y
     self.sectionGap = math.max(pageStack.SECTION_GAP or 12, HUB_SECTION_GAP)
     for _, pool in pairs(self.pools) do
         TK.ReleaseRowsFrom(pool, 1)
@@ -255,7 +248,29 @@ function TabBody:Begin(parent)
     for _, holder in pairs(self.lines) do
         holder:Hide()
     end
+end
+
+--- Start a paint: metrics, cursor at the scroll body top, every pooled row released.
+function TabBody:Begin(parent)
+    local mf = ArtisanNexus.UI and ArtisanNexus.UI.mainFrame
+    local metrics = ns.UI_GetMainTabLayoutMetrics and ns.UI_GetMainTabLayoutMetrics(mf)
+    self.parent = parent
+    self.side = metrics and metrics.sideMargin or 12
+    self.width = ((metrics and metrics.contentWidth) or (parent:GetWidth() or 600)) - self.side * 2
+    self.y = (ns.UI_GetTabScrollContentStartY and ns.UI_GetTabScrollContentStartY()) or 8
+    self.top = self.y
+    ResetPass(self)
     return mf
+end
+
+--- Start a paint inside a results container that is already inset (WN CurrencyUI results-only
+--- redraw: the search box stays, only the container repaints). Cursor at its top, no side inset.
+function TabBody:BeginIn(host, width)
+    self.parent = host
+    self.side = 0
+    self.width = width
+    self.y, self.top = 0, 0
+    ResetPass(self)
 end
 
 function TabBody:PlaceWide(frame, height)
@@ -332,8 +347,8 @@ function TabBody:Section(key, title, opts)
     return expanded
 end
 
---- One dim line (hint / empty text) at the cursor.
-function TabBody:Line(key, text)
+--- One dim line (hint / empty text) at the cursor; `role` = text role (default "Dim").
+function TabBody:Line(key, text, role)
     local holder = self.lines[key]
     if not holder then
         holder = Factory:CreateContainer(self.parent, 1, 20, false)
@@ -345,7 +360,7 @@ function TabBody:Line(key, text)
         self.lines[key] = holder
     end
     holder._fs:SetText(text or "")
-    ns.UI_SetTextColorRole(holder._fs, "Dim")
+    ns.UI_SetTextColorRole(holder._fs, role or "Dim")
     local h = math.max(28, (holder._fs:GetStringHeight() or 14) + 12)
     self:PlaceWide(holder, h)
     self.y = self.y + h
@@ -419,7 +434,8 @@ end
 
 --- WN TableKit rows at the cursor; returns the painted row list (sorted copy when opts.sort is set).
 --- opts: onRowEnter(row, data) (default: full text of truncated cells), onRowLeave,
---- onRowClick(row, data, button), emptyText, sort (TabBody:SortedRows).
+--- onRowClick(row, data, button), emptyText, sort (TabBody:SortedRows), paintRow(row, data, right)
+--- after the cells (right = x of the last column's right edge; e.g. row action buttons).
 function TabBody:Table(key, cols, rows, valueFn, opts)
     local strip = self:EnsureStrip(key)
     local def = self.defs[key] or {}
@@ -451,6 +467,9 @@ function TabBody:Table(key, cols, rows, valueFn, opts)
             row:SetScript("OnLeave", RowOnLeave)
         end
         TK.PaintRowCells(row, cols, strip._widths, strip._offsets, n, rows[i], valueFn)
+        if opts and opts.paintRow then
+            opts.paintRow(row, rows[i], strip._offsets[n] + strip._widths[n])
+        end
         self.y = self.y + rh
     end
     TK.ReleaseRowsFrom(pool, #rows + 1)

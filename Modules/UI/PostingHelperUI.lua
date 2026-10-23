@@ -60,21 +60,8 @@ end
 
 -- ── Inline semantic colors (RecipeCompanionWindow.lua TextRoleHex / Semantic*Hex pattern) ──
 
-local function RoleHex(role)
-    return "|cff" .. ((ns.UI_GetTextRoleHexRaw and ns.UI_GetTextRoleHexRaw(role)) or "ffffff")
-end
-
-local function GreenHex()
-    return (ns.UI_GetSemanticGreenHex and ns.UI_GetSemanticGreenHex()) or "|cff44ff44"
-end
-
-local function RedHex()
-    if ns.UI_GetSemanticRedColor then
-        local r, g, b = ns.UI_GetSemanticRedColor()
-        return string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
-    end
-    return "|cffff6666"
-end
+local IC = ns.UI_InlineHex
+local RoleHex, GreenHex, RedHex = IC.Role, IC.Green, IC.Red
 
 local function Ink(text, hex)
     return hex .. text .. "|r"

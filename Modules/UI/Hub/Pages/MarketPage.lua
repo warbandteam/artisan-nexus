@@ -191,7 +191,8 @@ local function Sort()
 end
 
 --- Item tooltip, then the row's extra lines (d.tip = { { label, value }, ... }) under a blank line.
-local function RowEnter(row, d)
+local RowEnter
+function RowEnter(row, d)
     if not d or not d.itemID then
         return
     end
@@ -207,6 +208,20 @@ local function RowEnter(row, d)
         for i = 1, #tip do
             GameTooltip:AddDoubleLine(tip[i][1], tip[i][2], 0.75, 0.75, 0.75, 1, 1, 1)
         end
+    end
+    -- Shift view: the 7-day price range behind the average / trend columns.
+    local hist = ns.PriceHistoryService
+    local stats = hist and hist.GetStats and hist:GetStats(d.itemID, WEEK)
+    if stats and (stats.count or 0) > 0 then
+        GameTooltip:AddLine(" ")
+        if IsShiftKeyDown() then
+            GameTooltip:AddDoubleLine(SafeL("HUB_MKT_7D_LOW", "7-day low"), Money(stats.min), 0.75, 0.75, 0.75, 1, 1, 1)
+            GameTooltip:AddDoubleLine(SafeL("HUB_MKT_7D_HIGH", "7-day high"), Money(stats.max), 0.75, 0.75, 0.75, 1, 1, 1)
+            GameTooltip:AddDoubleLine(SafeL("HUB_MKT_SAMPLES", "Price samples"), tostring(stats.count), 0.75, 0.75, 0.75, 1, 1, 1)
+        else
+            GameTooltip:AddLine(SafeL("HUB_TT_SHIFT_DETAILS", "Shift: full breakdown"), 0.7, 0.7, 0.7)
+        end
+        H.WatchShift(row, function(o) RowEnter(o, d) end)
     end
     GameTooltip:Show()
 end

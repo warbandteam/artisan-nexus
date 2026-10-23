@@ -52,22 +52,8 @@ local function COLORS()
 end
 
 --- WN text-role / semantic inline colors (RecipeCompanionWindow.lua TextRoleHex pattern).
-local function RoleHex(role)
-    local raw = (ns.UI_GetTextRoleHexRaw and ns.UI_GetTextRoleHexRaw(role)) or "ffffff"
-    return "|cff" .. raw
-end
-
-local function GreenHex()
-    return (ns.UI_GetSemanticGreenHex and ns.UI_GetSemanticGreenHex()) or "|cff44ff44"
-end
-
-local function RedHex()
-    if ns.UI_GetSemanticRedColor then
-        local r, g, b = ns.UI_GetSemanticRedColor()
-        return string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
-    end
-    return "|cffff6666"
-end
+local IC = ns.UI_InlineHex
+local RoleHex, GreenHex, RedHex = IC.Role, IC.Green, IC.Red
 
 --- Shared money formatter (Modules/Utilities.lua); "-" for missing values.
 local function FormatCopper(c)

@@ -220,7 +220,8 @@ local function RowValue(col, d)
     return d[col.key]
 end
 
-local function RowEnter(row, d)
+local RowEnter
+function RowEnter(row, d)
     local e = d and d.entry
     if not e then return end
     GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
@@ -247,9 +248,16 @@ local function RowEnter(row, d)
             GameTooltip:AddLine(SafeL("HUB_LDG_ESTIMATED", "Estimated until the AH invoice arrives."), 0.7, 0.7, 0.7, true)
         end
     elseif e.kind == "craft" then
-        -- Same breakdown as Session Loot (LootHistoryUI_Draw.lua AddCraftBreakdown).
+        -- Short view: value + note; the Session Loot breakdown (LootHistoryUI_Draw.lua
+        -- AddCraftBreakdown, reagents / procs / outputs) is the Shift view.
         if x.row and ns.UI_AddCraftBreakdown then
-            ns.UI_AddCraftBreakdown(GameTooltip, x.row)
+            if IsShiftKeyDown() then
+                ns.UI_AddCraftBreakdown(GameTooltip, x.row)
+            else
+                Pair(SafeL("HUB_LDG_VALUE", "Market value"), Money(e.amount, nil, true))
+                GameTooltip:AddLine(SafeL("HUB_TT_SHIFT_DETAILS", "Shift: full breakdown"), 0.7, 0.7, 0.7)
+            end
+            H.WatchShift(row, function(o) RowEnter(o, d) end)
         end
         GameTooltip:AddLine(SafeL("HUB_LDG_CRAFT_NOTE", "Valued at market prices; not counted in In / Out."), 0.7, 0.7, 0.7, true)
     elseif e.kind == "tip" and x.customer then
@@ -400,6 +408,15 @@ function ArtisanNexus:DrawLedgerTab(parent)
 
     if ns.UI_HideEmptyStateCard then
         ns.UI_HideEmptyStateCard(parent, EMPTY_KEY)
+    end
+    -- Day groups older than the longest period (30 days) never show again: drop their collapse state.
+    local oldestDay = DayIndex(time() - 31 * 86400)
+    local expandedState = body:ExpandedState()
+    for k in pairs(expandedState) do
+        local day = type(k) == "string" and tonumber(k:match("^d(%d+)$"))
+        if day and day < oldestDay then
+            expandedState[k] = nil
+        end
     end
     local groups = GroupByDay(CollectEntries(days, filter))
     if #groups == 0 then

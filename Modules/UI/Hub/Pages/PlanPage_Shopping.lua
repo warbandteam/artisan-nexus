@@ -16,7 +16,7 @@
           RecipeService:GetStockByLocation), refreshed by BAG_STOCK_UPDATED (purchases, mail, crafts,
           posted auctions, bank moves).
       P.ClearShoppingList()   title-toolbar "Clear list" (StaticPopup confirm)
-    Uses P.SectionHeader / P.DrawTable / P.DimLine / P.ReleaseTable / P.Confirm / P.ModifiedLink /
+    Uses P.SectionHeader / P.DrawTable / P.DimLine / P.Confirm / P.ModifiedLink /
     P.Profile / P.Chat from PlanPage.lua.
 ]]
 

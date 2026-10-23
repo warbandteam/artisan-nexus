@@ -73,21 +73,8 @@ end
 
 -- ── Inline colors (ProfessionInfoWindow.lua:166-189) ──
 
-local function RoleHex(role)
-    return "|cff" .. ((ns.UI_GetTextRoleHexRaw and ns.UI_GetTextRoleHexRaw(role)) or "ffffff")
-end
-
-local function AccentHex()
-    return (ns.UI_GetAccentHexColor and ns.UI_GetAccentHexColor()) or "9966cc"
-end
-
-local function GoldHex()
-    return (ns.UI_GetSemanticGoldHex and ns.UI_GetSemanticGoldHex()) or "|cffffcc00"
-end
-
-local function GreenHex()
-    return (ns.UI_GetSemanticGreenHex and ns.UI_GetSemanticGreenHex()) or "|cff44ff44"
-end
+local IC = ns.UI_InlineHex
+local RoleHex, AccentHex, GoldHex, GreenHex, RedHex = IC.Role, IC.Accent, IC.Gold, IC.Green, IC.Red
 
 --- ProfessionInfoWindow ValueMax + ProgressColor: green when full, gold when partial.
 local function ValueMax(current, maximum)
@@ -100,11 +87,6 @@ end
 
 local function Money(copper)
     return (ns.FormatCopper and ns.FormatCopper(math.floor((copper or 0) + 0.5))) or "0"
-end
-
-local function RedHex()
-    local H = ns.HubUI_Internal
-    return "|cff" .. ((H and H.InkHex and H.InkHex("danger")) or "ff5555")
 end
 
 --- Signed copper: green gain, red loss.
@@ -161,7 +143,7 @@ local function AddSectionHeader(body, y, text, first)
     header:SetPoint("TOPLEFT", body, "TOPLEFT", 0, -y)
     header:SetWidth(ContentWidth(body))
     header:SetWordWrap(false)
-    header:SetText("|cff" .. AccentHex() .. text .. "|r")
+    header:SetText(AccentHex() .. text .. "|r")
     y = y + LINE_HEIGHT + 2
     local line = Acquire(body, "rule")
     line:SetPoint("TOPLEFT", body, "TOPLEFT", 0, -y)
@@ -349,7 +331,7 @@ local function AddRecipeSection(body, y, first)
     local knowers = cd and cd.GetRecipeKnowers and cd:GetRecipeKnowers(spellID) or {}
     if #knowers > 0 then
         y = CL.Header(pool, body, 0, y, 0, collapse.crafters,
-            "|cff" .. AccentHex() .. SafeL("SIDECAR_LINE_CRAFTERS", "Crafters") .. "|r |cff"
+            AccentHex() .. SafeL("SIDECAR_LINE_CRAFTERS", "Crafters") .. "|r |cff"
                 .. TextRoleHex("Bright") .. "(" .. #knowers .. ")|r",
             nil, function()
                 collapse.crafters = not collapse.crafters

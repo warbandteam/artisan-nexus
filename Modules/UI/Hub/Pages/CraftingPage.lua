@@ -706,7 +706,7 @@ end
 -- Body (results container; frames cached here and re-parented every paint)
 -- ─────────────────────────────────────────────────────────────────
 
-local cache = { lines = {} }
+local cache = {}
 C.cache = cache
 
 local function Results(parent)
@@ -721,39 +721,9 @@ local function Results(parent)
     return rc
 end
 
-local function PlaceWide(frame, host, y, height)
-    frame:SetParent(host)
-    frame:ClearAllPoints()
-    frame:SetPoint("TOPLEFT", host, "TOPLEFT", 0, -y)
-    frame:SetPoint("TOPRIGHT", host, "TOPRIGHT", 0, -y)
-    if height then frame:SetHeight(height) end
-    frame:Show()
-end
-
---- One body line (LedgerPage.lua DimLine) at y; returns new y.
-local function NoticeLine(host, y, key, text, role)
-    local holder = cache.lines[key]
-    if not holder then
-        holder = Factory:CreateContainer(host, 1, 20, false)
-        holder._fs = FontManager:CreateFontString(holder, "body", "OVERLAY")
-        holder._fs:SetPoint("TOPLEFT", holder, "TOPLEFT", 12, -6)
-        holder._fs:SetPoint("TOPRIGHT", holder, "TOPRIGHT", -12, -6)
-        holder._fs:SetJustifyH("LEFT")
-        holder._fs:SetWordWrap(true)
-        cache.lines[key] = holder
-    end
-    holder._fs:SetText(text or "")
-    ns.UI_SetTextColorRole(holder._fs, role or "Dim")
-    local h = math.max(28, (holder._fs:GetStringHeight() or 14) + 12)
-    PlaceWide(holder, host, y, h)
-    return y + h
-end
-
-local function HideNotices()
-    for _, holder in pairs(cache.lines) do
-        holder:Hide()
-    end
-end
+--- Shared Hub body kit (HubTabKit TabBody) inside the results container: lines, pooled headers and
+--- the collapse state; the grouped rows below keep their own pool (one sort order across groups).
+local body = H.NewTabBody(TAB, "hubCraftingExpanded")
 
 local EMPTY_KEYS = { "crafting_recipes", "crafting_filter" }
 
@@ -778,11 +748,7 @@ end
 -- ─────────────────────────────────────────────────────────────────
 
 local function ExpandedState()
-    local p = Profile()
-    if p and type(p.hubCraftingExpanded) ~= "table" then
-        p.hubCraftingExpanded = {}
-    end
-    return p and p.hubCraftingExpanded or {}
+    return body:ExpandedState()
 end
 
 local function GroupOnToggle(isExpanded, header)
@@ -807,7 +773,7 @@ local function GroupHeader(rc, y, width, g)
         ExpandedState()[g.key] = true
     end
     local expanded = ExpandedState()[g.key] ~= false
-    local header, isNew, hdrIcon = H.PooledHeader(cache, g.key, rc, g.label, TAB .. ":" .. g.key, expanded,
+    local header, isNew, hdrIcon = H.PooledHeader(body, g.key, rc, g.label, TAB .. ":" .. g.key, expanded,
         GroupOnToggle, ProfessionIcon(g.prof), false)
     if isNew then
         if hdrIcon then
@@ -822,7 +788,8 @@ local function GroupHeader(rc, y, width, g)
     local n = CountProfitable(g.rows)
     header._anCount:SetText(string.format(SafeL("HUB_CRAFT_GROUP_COUNT_FMT", "%d profitable"), n))
     ns.UI_SetTextColorRole(header._anCount, n > 0 and "Muted" or "Dim")
-    PlaceWide(header, rc, y, GROUP_H)
+    body.y = y
+    body:PlaceWide(header, GROUP_H)
     return expanded
 end
 
@@ -877,9 +844,8 @@ end
 
 --- Paints the results container; returns its content height.
 local function DrawResults(rc, width, rows)
-    HideNotices()
     HideEmptyCards(rc)
-    H.HeaderPassBegin(cache)
+    body:BeginIn(rc, width)
     cache.strip:Hide()
     TK.ReleaseRowsFrom(cache.pool, 1)
     if cache.cull then
@@ -892,7 +858,9 @@ local function DrawResults(rc, width, rows)
             SafeL("HUB_CRAFT_EMPTY_RECIPES_DESC", "Open your profession window once."))
     end
     if NoPrices() then
-        y = NoticeLine(rc, y, "prices", SafeL("HUB_OV_NEED_PRICES", "Open the Auction House and press Sync AH Prices."), "Muted")
+        body.y = y
+        body:Line("prices", SafeL("HUB_OV_NEED_PRICES", "Open the Auction House and press Sync AH Prices."), "Muted")
+        y = body.y
     end
     if #rows == 0 then
         local q = Query()

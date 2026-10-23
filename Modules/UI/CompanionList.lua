@@ -111,8 +111,8 @@ local function Place(frame, parent, x, y, rightInset, height)
 end
 
 --- Factory:CreateSectionHeader (SharedWidgets_RowPool.lua, WN verbatim). The factory keeps no handles:
---- its title and right label are the header's font strings in creation order, the chevron is its
---- only child; they are picked up once and rebound on reuse.
+--- the title and right label are found by the text they were created with (not by region order), the
+--- chevron is the header's only child; they are picked up once and rebound on reuse.
 function CL.Header(pool, parent, x, y, rightInset, collapsed, titleStr, rightStr, onToggle, height)
     height = height or CL.HEADER_HEIGHT
     local i = pool.usedHdr + 1
@@ -123,17 +123,28 @@ function CL.Header(pool, parent, x, y, rightInset, collapsed, titleStr, rightStr
         if not (F and F.CreateSectionHeader) then
             return y
         end
-        local _, h = F:CreateSectionHeader(parent, y, collapsed, titleStr, " ", onToggle, height)
-        -- Classic skin: the header is a UIPanelButtonTemplate whose own label comes first; skip it.
+        -- Unique creation texts mark the two labels (the classic skin's own template label is skipped).
+        local titleMark, rightMark = "\001anTitle", "\001anRight"
+        local _, h = F:CreateSectionHeader(parent, y, collapsed, titleMark, rightMark, onToggle, height)
         local templateText = h.GetFontString and h:GetFontString()
-        local fontStrings = {}
         local regions = { h:GetRegions() }
+        local ordered = {}
         for r = 1, #regions do
-            if regions[r] ~= templateText and regions[r].GetObjectType and regions[r]:GetObjectType() == "FontString" then
-                fontStrings[#fontStrings + 1] = regions[r]
+            local fs = regions[r]
+            if fs ~= templateText and fs.GetObjectType and fs:GetObjectType() == "FontString" then
+                ordered[#ordered + 1] = fs
+                local text = fs:GetText()
+                if text == titleMark then
+                    h._anTitle = fs
+                elseif text == rightMark then
+                    h._anRight = fs
+                end
             end
         end
-        h._anTitle, h._anRight = fontStrings[1], fontStrings[2]
+        -- Fallback (text decorated by a font hook): the factory's creation order, title then right label.
+        if not (h._anTitle and h._anRight) then
+            h._anTitle, h._anRight = ordered[1], ordered[2]
+        end
         h._anChevron = (h:GetChildren())
         pool.hdr[i] = h
         header = h

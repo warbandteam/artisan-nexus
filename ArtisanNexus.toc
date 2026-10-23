@@ -77,6 +77,7 @@ Modules\UI\SearchBoxComponent.lua
 Modules\UI\VirtualListModule.lua
 Modules\UI\TooltipFactory.lua
 Modules\UI\ProfessionQualityAtlas.lua
+Modules\UI\InlineColors.lua
 Modules\UI\CompanionList.lua
 Modules\Data\GatheringCatalog.lua
 Modules\Data\GatheringNodeOverloadRegistry.lua

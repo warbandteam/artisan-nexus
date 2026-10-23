@@ -22,7 +22,7 @@
     price messages -> "plan"). Clear actions confirm through a StaticPopup (WN PlansUI Reset pattern).
 
     Shared helpers live on ns.HubPlan (P): Profile, Chat, SectionHeader, DrawTable, DimLine,
-    PaintRowButtons, Confirm, ModifiedLink, ReleaseTable, CollectBadgeCounts. PlanPage_Shopping.lua
+    PaintRowButtons, Confirm, ModifiedLink, CollectBadgeCounts (body helpers ride on P.body, a HubTabKit TabBody). PlanPage_Shopping.lua
     (loads next) adds P.DrawShopping / P.ClearShoppingList, which DrawPlanTab calls at draw time.
 ]]
 
@@ -39,8 +39,6 @@ ns.HubPlan = P
 
 local Factory = ns.UI.Factory
 local FontManager = ns.FontManager
-local TK = ns.UI_TableKit
-local TABLE = ns.UI_LAYOUT.TABLE
 local SafeL = H.SafeL
 local RecipeIconTexture = H.RecipeIconTexture
 local ItemLink = H.ItemLink
@@ -77,28 +75,15 @@ local function TipOnLeave()
 end
 
 -- ─────────────────────────────────────────────────────────────────
--- WN body helpers (frames cached here, re-parented into the scrollChild on every paint)
+-- WN body helpers: the shared Hub body kit (HubTabKit TabBody) driven at an explicit y, so the
+-- queue and shopping drawers keep their (parent, side, y, width) signatures.
 -- ─────────────────────────────────────────────────────────────────
 
-local cache = { strips = {}, pools = {}, lines = {} }
-P.cache = cache
-
---- right (optional): right inset when the left edge is indented (nested groups).
-local function PlaceWide(frame, parent, side, y, height, right)
-    frame:SetParent(parent)
-    frame:ClearAllPoints()
-    frame:SetPoint("TOPLEFT", parent, "TOPLEFT", side, -y)
-    frame:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -(right or side), -y)
-    if height then frame:SetHeight(height) end
-    frame:Show()
-end
+local body = H.NewTabBody(TAB, "hubPlanExpanded")
+P.body = body
 
 local function ExpandedState()
-    local p = Profile()
-    if p and type(p.hubPlanExpanded) ~= "table" then
-        p.hubPlanExpanded = {}
-    end
-    return p and p.hubPlanExpanded or {}
+    return body:ExpandedState()
 end
 
 --- Collapse state of a Companion-list block (reagent headers, ns.UI_CompanionList) in the same
@@ -152,7 +137,7 @@ function P.SectionHeader(parent, side, y, key, title, right, tooltip, opts)
     local st = ExpandedState()
     local expanded = st[key] ~= false
     local h = opts and opts.height or COLLAPSE_H
-    local header, isNew = H.PooledHeader(cache, key, parent, title, "plan:" .. key, expanded, OnSectionToggle,
+    local header, isNew = H.PooledHeader(body, key, parent, title, "plan:" .. key, expanded, OnSectionToggle,
         opts and opts.icon, opts and opts.isAtlas, h ~= COLLAPSE_H and { sectionHeaderHeight = h } or nil)
     if isNew then
         header._anRight = FontManager:CreateFontString(header, FontManager:GetFontRole("mainNavTabCount"), "OVERLAY")
@@ -163,7 +148,8 @@ function P.SectionHeader(parent, side, y, key, title, right, tooltip, opts)
     end
     header._anPlanKey = key
     header._anTitle, header._anTooltip = title, tooltip
-    PlaceWide(header, parent, side, y, h, side)
+    body.y = y
+    body:PlaceWide(header, h)
     local rt = header._anRight
     local buttons = opts and opts.buttons
     header._anData = opts and opts.data
@@ -181,92 +167,24 @@ function P.SectionHeader(parent, side, y, key, title, right, tooltip, opts)
     return y + h, expanded
 end
 
---- One dim line (empty state / footer) at y (LedgerPage.lua DimLine); returns new y.
+--- One dim line (empty state / footer) at y (TabBody:Line); returns new y.
 function P.DimLine(parent, side, y, key, text)
-    local holder = cache.lines[key]
-    if not holder then
-        holder = Factory:CreateContainer(parent, 1, 20, false)
-        holder._fs = FontManager:CreateFontString(holder, "body", "OVERLAY")
-        holder._fs:SetPoint("TOPLEFT", holder, "TOPLEFT", 12, -6)
-        holder._fs:SetPoint("TOPRIGHT", holder, "TOPRIGHT", -12, -6)
-        holder._fs:SetJustifyH("LEFT")
-        holder._fs:SetWordWrap(true)
-        cache.lines[key] = holder
-    end
-    holder._fs:SetText(text or "")
-    ns.UI_SetTextColorRole(holder._fs, "Dim")
-    local h = math.max(28, (holder._fs:GetStringHeight() or 14) + 12)
-    PlaceWide(holder, parent, side, y, h)
-    return y + h
+    body.y = y
+    body:Line(key, text)
+    return body.y
 end
 
-local function RowOnMouseUp(row, button)
-    local t = row._anPlanTbl
-    if t and t.onRowClick then t.onRowClick(row, row._anData, button) end
-end
-
-local function RowOnEnter(row)
-    local t = row._anPlanTbl
-    if t and t.onRowEnter then
-        t.onRowEnter(row, row._anData)
-    elseif t then
-        H.ShowTruncatedCells(row, t.n)
-    end
-end
-
---- WN TableKit rows at y (no column strip: the header card is followed directly by the groups);
---- returns new y and the row count. opts: onRowClick, onRowEnter, rowButtons (defs for P.PaintRowButtons),
---- rowHeight (pool row height on first use).
+--- WN TableKit rows at y (TabBody:Table: no column strip, culled, pooled per key); returns new y.
+--- opts: valueFn, onRowClick, onRowEnter, rowButtons (defs for P.PaintRowButtons).
 function P.DrawTable(parent, side, y, width, key, cols, rows, opts)
     opts = opts or {}
-    local strip = cache.strips[key]
-    if not strip then
-        strip = TK.CreateHeaderStrip(parent, { mode = "text", bottomRule = true })
-        strip._widths, strip._offsets = {}, {}
-        cache.strips[key] = strip
-        cache.pools[key] = TK.CreateRowPool(opts.rowHeight or TABLE.ROW_H.standard)
-    end
-    local pool = cache.pools[key]
-    local n = #cols
-    opts.n = n
-    TK.ResolveWidths(cols, width, strip._widths, strip._offsets)
-    strip:Hide()
-    local rh = pool.height
-    local last = strip._offsets[n] + strip._widths[n]
-    cache.culls = cache.culls or {}
-    cache.culls[key] = cache.culls[key] or {}
-    local cull = H.CullBegin(cache.culls[key], parent)
-    for i = 1, #rows do
-        local row = TK.AcquireRow(pool, parent, i, width, rh)
-        row:SetPoint("TOPLEFT", parent, "TOPLEFT", side, -y)
-        H.CullAdd(cull, row, y, rh)
-        row._anData, row._anPlanTbl = rows[i], opts
-        if not row._anPlanWired then
-            row._anPlanWired = true
-            row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-            row:SetScript("OnMouseUp", RowOnMouseUp)
-            row:SetScript("OnEnter", RowOnEnter)
-            row:SetScript("OnLeave", TipOnLeave)
-        end
-        TK.PaintRowCells(row, cols, strip._widths, strip._offsets, n, rows[i], opts.valueFn)
-        P.PaintRowButtons(row, opts.rowButtons, last - 4)
-        y = y + rh
-    end
-    TK.ReleaseRowsFrom(pool, #rows + 1)
-    H.CullCommit(cull)
-    return y
-end
-
-function P.ReleaseTable(key)
-    local strip = cache.strips[key]
-    if strip then
-        strip:Hide()
-        TK.ReleaseRowsFrom(cache.pools[key], 1)
-    end
-    local cull = cache.culls and cache.culls[key]
-    if cull then
-        cull.n = 0
-    end
+    body.y = y
+    local buttons = opts.rowButtons
+    body:Table(key, cols, rows, opts.valueFn, {
+        onRowClick = opts.onRowClick, onRowEnter = opts.onRowEnter,
+        paintRow = function(row, _, right) P.PaintRowButtons(row, buttons, right - 4) end,
+    })
+    return body.y
 end
 
 -- ─────────────────────────────────────────────────────────────────
@@ -588,11 +506,9 @@ local function DrawQueue(parent, side, y, width, queue, sum)
     local expanded
     y, expanded = P.SectionHeader(parent, side, y, "queue", SafeL("HUB_PLAN_QUEUE_TITLE", "Crafting queue"), right, tip)
     if not expanded then
-        P.ReleaseTable("queue")
         return y
     end
     if #queue == 0 then
-        P.ReleaseTable("queue")
         return P.DimLine(parent, side, y, "queueEmpty", SafeL("HUB_QUEUE_EMPTY", "Nothing queued."))
     end
     return P.DrawTable(parent, side, y, width, "queue", QueueColumns(), queueRows, {
@@ -614,11 +530,9 @@ end
 -- Tab
 -- ─────────────────────────────────────────────────────────────────
 
-local function HideBody()
+local function HideBody(parent)
     if P.companion then ns.UI_CompanionList.Begin(P.companion) end
-    H.HeaderPassBegin(cache)
-    for key in pairs(cache.strips) do P.ReleaseTable(key) end
-    for _, line in pairs(cache.lines) do line:Hide() end
+    body:Begin(parent)
 end
 
 --- Profile boolean toggle; Aggregate output depends on both flags, so the shopping list
@@ -663,6 +577,20 @@ function ArtisanNexus:DrawPlanTab(parent)
     end
     local sum = QueueSummary(qs)
     local allEntries = shop and shop.GetEntries and shop:GetEntries() or {}
+    -- Collapse state of recipes that left the shopping list ("sr:<spellID>", "sg:<spellID>:<slot>").
+    if shop then
+        local listed = {}
+        for i = 1, #allEntries do
+            listed[tostring(allEntries[i].spellID)] = true
+        end
+        local st = ExpandedState()
+        for k in pairs(st) do
+            local sid = type(k) == "string" and k:match("^s[rg]:(%d+)")
+            if sid and not listed[sid] then
+                st[k] = nil
+            end
+        end
+    end
 
     -- Fixed header: WN title card + toolbar (profession filter, finishing, alts, list actions).
     local chrome = ns.UI_BeginTabChromeLayout and ns.UI_BeginTabChromeLayout(mf)
@@ -699,7 +627,7 @@ function ArtisanNexus:DrawPlanTab(parent)
     end
 
     local y = (ns.UI_GetTabScrollContentStartY and ns.UI_GetTabScrollContentStartY()) or 8
-    HideBody()
+    HideBody(parent)
     ns.UI_HideEmptyStateCard(parent, "plan_empty")
     if not (qs and shop) then
         local _, h = ns.UI_CreateEmptyStateCard(parent, "plan_empty", y, { sideInset = side, cacheKey = "plan_empty",

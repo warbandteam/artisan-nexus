@@ -85,24 +85,9 @@ local function FooterHeight()
     return MainShell().FOOTER_HEIGHT or 26
 end
 
---- `|cffrrggbb` prefixes (RecipeCompanionWindow.lua TextRoleHex / SemanticGreenHex pattern).
-local function RoleHex(role)
-    return (ns.UI_GetTextRoleHex and ns.UI_GetTextRoleHex(role)) or "|cffcccccc"
-end
-local function GreenHex()
-    return (ns.UI_GetSemanticGreenHex and ns.UI_GetSemanticGreenHex()) or "|cff44ff44"
-end
-local function GoldHex()
-    return (ns.UI_GetSemanticGoldHex and ns.UI_GetSemanticGoldHex()) or "|cffffd100"
-end
-local function RedHex()
-    local r, g, b = 0.9, 0.3, 0.3
-    if ns.UI_GetSemanticRedColor then r, g, b = ns.UI_GetSemanticRedColor() end
-    return string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
-end
-local function AccentHex()
-    return "|cff" .. ((ns.UI_GetAccentHexColor and ns.UI_GetAccentHexColor()) or "9966cc")
-end
+--- `|cffrrggbb` prefixes (Modules/UI/InlineColors.lua).
+local IC = ns.UI_InlineHex
+local RoleHex, GreenHex, GoldHex, RedHex, AccentHex = IC.Role, IC.Green, IC.Gold, IC.Red, IC.Accent
 local function Wrap(hex, text)
     return hex .. tostring(text) .. "|r"
 end
