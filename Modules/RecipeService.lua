@@ -29,7 +29,6 @@ local ADDON_NAME, ns = ...
 local RecipeService = {
     _bagCounts = nil,
     _bagCacheGen = 0,
-    _listHarvestPending = false,
 }
 ns.RecipeService = RecipeService
 
@@ -667,6 +666,15 @@ ApplyRecipeFlags = function(row, info, schematic)
     end
 end
 
+--- Client build number, read once (constant for the session; HarvestOne compares it per recipe).
+local clientBuildCache
+local function ClientBuild()
+    if clientBuildCache == nil then
+        clientBuildCache = (GetBuildInfo and select(2, GetBuildInfo())) or false
+    end
+    return clientBuildCache or nil
+end
+
 --- Pull reagent schematic for `spellID` and persist it. Returns true if stored.
 ---@param spellID number
 ---@param force boolean|nil When true, re-fetch even if reagents are already cached.
@@ -681,7 +689,7 @@ function RecipeService:HarvestOne(spellID, force)
         local sEarly = Store()
         local prev = sEarly and sEarly[spellID]
         -- Rows harvested on an older client build are re-read once (patches change reagents/outputs).
-        local build = GetBuildInfo and select(2, GetBuildInfo())
+        local build = ClientBuild()
         if prev and type(prev.reagents) == "table" and #prev.reagents > 0
             and (not build or prev.clientBuild == build) and prev.harvestRev == HARVEST_REV then
             if C_TradeSkillUI.GetRecipeInfo then
@@ -772,7 +780,7 @@ function RecipeService:HarvestOne(spellID, force)
         -- player's own (non-linked, non-guild) window.
         learned = prevLearned,
         learnedBy = prev and prev.learnedBy or nil,
-        clientBuild = GetBuildInfo and select(2, GetBuildInfo()) or nil,
+        clientBuild = ClientBuild(),
         harvestRev = HARVEST_REV,
         hasCraftingOperationInfo = schematic.hasCraftingOperationInfo == true,
     }
@@ -1320,22 +1328,27 @@ function RecipeService:Enable()
     local AN = ns.ArtisanNexus
     if AN and AN.RegisterBucketEvent and not self._bagBucket then
         --- Keep the handle so Disable can drop the bucket (AceBucket-3.0 returns one).
-        self._bagBucket = AN:RegisterBucketEvent("BAG_UPDATE", 0.35, function()
+        -- Bank slots have their own event (WN ItemsCacheService.lua:3252 buckets the same pair).
+        self._bagBucket = AN:RegisterBucketEvent({ "BAG_UPDATE", "PLAYERBANKSLOTS_CHANGED" }, 0.35, function()
             RecipeService:InvalidateBagCache()
             AN:SendMessage(E.BAG_STOCK_UPDATED)
         end)
     end
+    -- Trailing debounce: search typing / filter clicks / each craft fire LIST_UPDATE in bursts; one
+    -- full pass runs after the list settles instead of one per 0.2s window during the burst.
     owner:RegisterEvent("TRADE_SKILL_LIST_UPDATE", function()
-        if not TradeSkillReady() or RecipeService._listHarvestPending then
+        if not TradeSkillReady() then
             return
         end
-        RecipeService._listHarvestPending = true
-        AN:ScheduleTimer(function()
-            RecipeService._listHarvestPending = false
+        if RecipeService._listHarvestTimer then
+            AN:CancelTimer(RecipeService._listHarvestTimer)
+        end
+        RecipeService._listHarvestTimer = AN:ScheduleTimer(function()
+            RecipeService._listHarvestTimer = nil
             if TradeSkillReady() then
                 RecipeService:HarvestOpenProfession()
             end
-        end, 0.2)
+        end, 0.6)
     end)
     owner:RegisterEvent("TRADE_SKILL_SHOW", function()
         --- List data is not always ready on SHOW; wait until TradeSkillUI is ready.
@@ -1360,6 +1373,10 @@ function RecipeService:Disable()
         self._eventOwner:UnregisterEvent("TRADE_SKILL_SHOW")
     end
     local AN = ns.ArtisanNexus
+    if self._listHarvestTimer and AN and AN.CancelTimer then
+        AN:CancelTimer(self._listHarvestTimer)
+    end
+    self._listHarvestTimer = nil
     if self._bagBucket and AN and AN.UnregisterBucket then
         AN:UnregisterBucket(self._bagBucket)
     end

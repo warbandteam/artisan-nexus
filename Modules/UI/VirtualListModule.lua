@@ -18,6 +18,7 @@ local wipe = wipe
 
 local BUFFER_ROWS = 2
 local DEFAULT_ROW_HEIGHT = 26
+local staleSigBuildSeq = 0  -- per-paint stamp for the stale-frame sig chain (UpdateVisible)
 
 --- Visual row height for painting (may be less than `it.height` slot stride for inter-row gaps).
 local function ResolveRowPaintHeight(it)
@@ -300,15 +301,22 @@ end
 
 --- Row frames may be parented under group shells (Bank/Items collapsible groups); walk ancestors.
 --- Incremental reuse: claim a stale frame from the previous paint whose row signature matches.
-local function TakeStaleFrameForSig(oldVis, sig)
-    if not oldVis or not sig then return nil end
-    for j = 1, #oldVis do
-        local f = oldVis[j] and oldVis[j].frame
-        if f and f._vlm_stale and f._vlm_rowSig == sig then
+--- `staleBySig` (built once per paint by UpdateVisible) maps sig -> first stale frame in oldVis order;
+--- frames sharing a sig are chained through `_vlm_sigNext` in the same order, so the claim order is
+--- the old linear scan's (2026-10-22: the scan was O(visible rows) per visible row on every scroll).
+local function TakeStaleFrameForSig(staleBySig, sig)
+    if not staleBySig or not sig then return nil end
+    local f = staleBySig[sig]
+    while f do
+        local nextF = f._vlm_sigNext
+        if f._vlm_stale and f._vlm_rowSig == sig then
             f._vlm_stale = false
+            staleBySig[sig] = nextF
             return f
         end
+        f = nextF
     end
+    staleBySig[sig] = nil
     return nil
 end
 
@@ -406,6 +414,7 @@ local function SetupVirtualList(mainFrame, container, containerTopOffset, flatLi
     if not mainFrame or not mainFrame.scroll or not container or not flatList then return 0 end
     container._vlm_flatList = flatList
     container._vlm_headerSig = FlatListHeaderSignature(flatList)
+    container._vlm_contentGen = (container._vlm_contentGen or 0) + 1
     opts = opts or {}
     local createRowFn = opts.createRowFn
     local populateRowFn = opts.populateRowFn
@@ -625,6 +634,13 @@ local function SetupVirtualList(mainFrame, container, containerTopOffset, flatLi
     end
 
     local function UpdateVisible()
+        -- Content generation (see the row reuse below): bumped by every paint that is not a pure
+        -- scroll, before the hidden-container early return, so a list swapped while hidden can
+        -- never be served from rows populated for the old one.
+        local scrollPaint = mainFrame and mainFrame._vlmScrollPaint == true
+        if not scrollPaint then
+            container._vlm_contentGen = (container._vlm_contentGen or 0) + 1
+        end
         if not container:IsVisible() then return end
         local resizing = mainFrame and ns.UI_IsMainFrameResizeSession and ns.UI_IsMainFrameResizeSession(mainFrame)
         local flEarly = container._vlm_flatList or flatList
@@ -672,13 +688,38 @@ local function SetupVirtualList(mainFrame, container, containerTopOffset, flatLi
 
         local incrementalReuse = container._vlm_incrementalRowReuse == true
         local oldVis = container._virtualVisibleFrames
+        -- Every paint that is not a pure scroll (setup, refresh, in-place refill + repaint, resize)
+        -- started a new content generation above, so rows always repopulate after a data change. On
+        -- a scroll paint a reused row already populated for the same index in this generation shows
+        -- the same data and is only re-anchored (2026-10-22: every wheel step repopulated all rows).
+        local contentGen = container._vlm_contentGen or 0
 
+        local staleBySig = nil
         if incrementalReuse then
+            -- sig -> stale frame lookup for TakeStaleFrameForSig, wiped per paint (no allocation).
+            -- Built back to front so each sig maps to its first frame in oldVis order.
+            staleBySig = container._vlm_staleBySig
+            if not staleBySig then
+                staleBySig = {}
+                container._vlm_staleBySig = staleBySig
+            end
+            wipe(staleBySig)
+            -- Build stamp: a frame listed twice in oldVis is chained once (a repeat would make a cycle).
+            staleSigBuildSeq = staleSigBuildSeq + 1
+            local sigBuild = staleSigBuildSeq
             if oldVis then
-                for j = 1, #oldVis do
+                for j = #oldVis, 1, -1 do
                     local f = oldVis[j] and oldVis[j].frame
                     if f then
                         f._vlm_stale = true
+                        local fSig = f._vlm_rowSig
+                        if fSig and f._vlm_sigBuildStamp ~= sigBuild then
+                            f._vlm_sigBuildStamp = sigBuild
+                            f._vlm_sigNext = staleBySig[fSig]
+                            staleBySig[fSig] = f
+                        elseif not fSig then
+                            f._vlm_sigNext = nil
+                        end
                     end
                 end
             end
@@ -789,7 +830,7 @@ local function SetupVirtualList(mainFrame, container, containerTopOffset, flatLi
                         local frameReused = false
                         local frame = nil
                         if incrementalReuse then
-                            frame = TakeStaleFrameForSig(oldVis, sig)
+                            frame = TakeStaleFrameForSig(staleBySig, sig)
                         end
                         if frame then
                             frameReused = true
@@ -801,16 +842,22 @@ local function SetupVirtualList(mainFrame, container, containerTopOffset, flatLi
                             if not frame then
                                 local ok, result = pcall(createRowFn, container, it, i)
                                 if ok then frame = result end
+                                -- Pool-owned row (rowPool / releaseRowFn): SectionPool never treats it as garbage.
+                                if frame then frame._wnVlmRow = true end
                             end
                         end
 
                         local layoutFn = layoutRowFn or container._vlm_layoutRowFn
                         if frame then
-                            local needsPopulate = populateRowFn
+                            local unchanged = scrollPaint and frameReused and frame._wnVlmPopulated
+                                and frame._vlm_popGen == contentGen and frame._vlm_popIndex == i
+                            local needsPopulate = populateRowFn and not unchanged
                                 and (not resizing or not frameReused or not frame._wnVlmPopulated)
                             if needsPopulate then
                                 pcall(populateRowFn, frame, it, i)
                                 frame._wnVlmPopulated = true
+                                frame._vlm_popGen = contentGen
+                                frame._vlm_popIndex = i
                             elseif resizing and layoutFn then
                                 pcall(layoutFn, frame, it, i)
                             end
@@ -927,6 +974,7 @@ local function RefreshVirtualListFlatList(mainFrame, container, flatList)
         return nil, true
     end
     container._vlm_flatList = flatList
+    container._vlm_contentGen = (container._vlm_contentGen or 0) + 1
     local totalHeight = 1
     if #flatList > 0 then
         local last = flatList[#flatList]

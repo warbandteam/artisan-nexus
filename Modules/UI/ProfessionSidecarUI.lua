@@ -13,6 +13,14 @@
       section header + label/value rows              -> ProfessionInfoWindow.lua:226-284
                                                         (AddSectionHeader / AddLine / AddFullWidthLine /
                                                         AddEmptyMessage)
+      selected recipe body                           -> RecipeCompanionWindow.lua:438 RenderContent:
+                                                        Crafters header + rows, per reagent a
+                                                        Factory:CreateSectionHeader (check, xN) with
+                                                        storage rows (Banker / VignetteLoot /
+                                                        warbands-icon), quality columns and the total;
+                                                        Factory headers / rows are pooled here
+      Shopping List header button                    -> RecipeCompanionWindow.lua:954 (adds to the AN
+                                                        shopping list instead of copying text)
     Docked beside ProfessionsFrame until the player drags it; a dragged position is kept in
     profile.professionSidecar (posKey) and wins from then on. Height follows the content.
 ]]
@@ -23,8 +31,9 @@ local ProfessionSidecarUI = { frame = nil }
 
 local SafeL = ns.SafeLocaleString
 
--- Window + row metrics (ProfessionInfoWindow.lua:60-64, scaled to the narrow sidecar).
-local WINDOW_W = 264
+-- Window + row metrics (ProfessionInfoWindow.lua:60-64); width = WN Recipe Companion
+-- (RecipeCompanionWindow.lua:97 WINDOW_WIDTH) so its reagent rows and quality columns fit.
+local WINDOW_W = 350
 local SECTION_GAP = 10
 local LINE_HEIGHT = 18
 local LABEL_WIDTH = 108
@@ -91,15 +100,6 @@ end
 
 local function Money(copper)
     return (ns.FormatCopper and ns.FormatCopper(math.floor((copper or 0) + 0.5))) or "0"
-end
-
---- Character name in class colour (RAID_CLASS_COLORS colorStr, "ffRRGGBB").
-local function ClassName(name, classFile)
-    local c = classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile]
-    if c and c.colorStr then
-        return "|c" .. c.colorStr .. name .. "|r"
-    end
-    return name
 end
 
 local function RedHex()
@@ -274,17 +274,39 @@ end
 --- Set from EventRegistry "ProfessionsRecipeListMixin.Event.OnRecipeSelected" (recipeInfo, recipeList)
 --- (Blizzard_ProfessionsRecipeList.lua:137 / Blizzard_ProfessionsCrafting.lua:34, wow-ui-source live
 --- 12.1.5.70448, checked 2026-10-22).
-local MAX_RECIPE_REAGENTS = 6
-local MAX_CRAFTER_NAMES = 3
-local MAX_HOLDER_ALTS = 3
-local HOLDER_INDENT = 14
+--- WN Recipe Companion parts (Modules/UI/CompanionList.lua, shared with the Hub shopping list).
+local CL = ns.UI_CompanionList
 
+--- Collapse state like the companion's collapsedSlots / craftersSectionCollapsed; reset per recipe.
+local collapse = { recipeID = nil, crafters = false, slots = {} }
+
+--- The sidecar grows with its content up to this share of the screen (body clips the rest).
+local MAX_SCREEN_SHARE = 0.8
+
+local function TextRoleHex(role)
+    return (ns.UI_GetTextRoleHexRaw and ns.UI_GetTextRoleHexRaw(role)) or "ffffff"
+end
+
+local function Repaint()
+    ProfessionSidecarUI:Refresh()
+end
+
+--- The recipe selected in the profession window: is it worth crafting and can I craft it now, then
+--- the WN Recipe Companion body (RecipeCompanionWindow.lua:438 RenderContent): Crafters, and per
+--- reagent a collapsible header (check when covered, xN) with storage rows and the total.
+--- Set from EventRegistry "ProfessionsRecipeListMixin.Event.OnRecipeSelected" (recipeInfo, recipeList)
+--- (Blizzard_ProfessionsRecipeList.lua:137 / Blizzard_ProfessionsCrafting.lua:34, wow-ui-source live
+--- 12.1.5.70448, checked 2026-10-22).
 local function AddRecipeSection(body, y, first)
     local sel = ProfessionSidecarUI._recipe
     local spellID = sel and sel.recipeID
     local rs = ns.RecipeService
     if not spellID or not rs then
         return y, false
+    end
+    if collapse.recipeID ~= spellID then
+        collapse.recipeID, collapse.crafters = spellID, false
+        wipe(collapse.slots)
     end
     local name = SafeUiLine(sel.name, "")
     if name == "" then
@@ -317,70 +339,46 @@ local function AddRecipeSection(body, y, first)
             y = AddLine(body, y, SafeL("HUB_TT_CAN_CRAFT", "Can craft"), txt)
         end
     end
-    -- Who can craft it (Warband Nexus crafters or AN's learnedBy), like WN's Recipe Companion.
+    y = y + CL.SECTION_SPACING
+    local pool = body._anCompanion
+    local rowIdx = 0
+
+    -- Crafters (RecipeCompanionWindow.lua:468-553): header "Crafters (n)", class-coloured rows, the
+    -- first one starred.
     local cd = ns.CharacterData
     local knowers = cd and cd.GetRecipeKnowers and cd:GetRecipeKnowers(spellID) or {}
     if #knowers > 0 then
-        local names = {}
-        for i = 1, math.min(#knowers, MAX_CRAFTER_NAMES) do
-            local k = knowers[i]
-            names[#names + 1] = ClassName(SafeUiLine(k.charName, "?"), k.classFile)
+        y = CL.Header(pool, body, 0, y, 0, collapse.crafters,
+            "|cff" .. AccentHex() .. SafeL("SIDECAR_LINE_CRAFTERS", "Crafters") .. "|r |cff"
+                .. TextRoleHex("Bright") .. "(" .. #knowers .. ")|r",
+            nil, function()
+                collapse.crafters = not collapse.crafters
+                Repaint()
+            end)
+        if not collapse.crafters then
+            for ci = 1, #knowers do
+                local k = knowers[ci]
+                rowIdx = rowIdx + 1
+                local row
+                row, y = CL.Row(pool, body, 0, y, 0, rowIdx)
+                if row then
+                    CL.SetRowName(row, CL.ClassName(SafeUiLine(k.charName, "?"), k.classFile), nil, nil, nil, ci == 1)
+                end
+            end
         end
-        if #knowers > MAX_CRAFTER_NAMES then
-            names[#names + 1] = RoleHex("Muted") .. "+" .. (#knowers - MAX_CRAFTER_NAMES) .. "|r"
-        end
-        y = AddLine(body, y, SafeL("SIDECAR_LINE_CRAFTERS", "Crafters"), table.concat(names, ", "))
+        y = y + CL.SECTION_SPACING
     end
-    -- Reagents (WN Recipe Companion): check / cross, have / need, then who holds it: this character
-    -- (bags + bank), the warband bank, each alt (CharacterData: Warband Nexus or AN's snapshot).
+
+    -- Reagents (RecipeCompanionWindow.lua:555-700).
     local slots = rs.GetRequiredBasicSlots and rs:GetRequiredBasicSlots(spellID) or {}
-    local myName = UnitName and UnitName("player") or "?"
-    local myClass = UnitClass and select(2, UnitClass("player")) or nil
-    for i = 1, math.min(#slots, MAX_RECIPE_REAGENTS) do
-        local slot = slots[i]
-        local need = tonumber(slot.qty) or 0
-        local mine, warband, firstID = 0, 0, nil
-        local alts, altOrder = {}, {}
-        for ci = 1, #slot.candidates do
-            local id = slot.candidates[ci]
-            id = type(id) == "table" and id.itemID or id
-            if id then
-                firstID = firstID or id
-                local s = rs:GetStockByLocation(id)
-                mine = mine + s.bags + s.bank
-                warband = warband + s.warband
-                local other = cd and cd.GetItemCountsAcrossCharacters and cd:GetItemCountsAcrossCharacters(id)
-                for _, c in ipairs(other and other.chars or {}) do
-                    local key = c.name or "?"
-                    if not alts[key] then
-                        alts[key] = { name = key, classFile = c.classFile, n = 0 }
-                        altOrder[#altOrder + 1] = alts[key]
-                    end
-                    alts[key].n = alts[key].n + (tonumber(c.total) or 0)
-                end
-            end
-        end
-        if firstID and need > 0 then
-            local have = mine + warband
-            local ok = have >= need
-            local mark = ok and "|A:common-icon-checkmark:12:12|a " or "|A:common-icon-redx:12:12|a "
-            local itemName = SafeUiLine(ns.GetItemDisplayName and ns.GetItemDisplayName(firstID), "?")
-            y = AddLine(body, y, mark .. itemName,
-                (ok and GreenHex() or RedHex()) .. have .. "|r" .. RoleHex("Muted") .. " / " .. need .. "|r")
-            if mine > 0 then
-                y = AddLine(body, y, ClassName(myName, myClass), RoleHex("Bright") .. mine .. "|r", HOLDER_INDENT)
-            end
-            if warband > 0 then
-                y = AddLine(body, y, SafeL("SIDECAR_WARBAND_BANK", "Warband bank"), RoleHex("Bright") .. warband .. "|r",
-                    HOLDER_INDENT)
-            end
-            table.sort(altOrder, function(a, b) return a.n > b.n end)
-            for ai = 1, math.min(#altOrder, MAX_HOLDER_ALTS) do
-                local a = altOrder[ai]
-                if a.n > 0 then
-                    y = AddLine(body, y, ClassName(a.name, a.classFile), RoleHex("Muted") .. a.n .. "|r", HOLDER_INDENT)
-                end
-            end
+    for si = 1, #slots do
+        local slot = slots[si]
+        local needed = tonumber(slot.qty) or 0
+        if needed > 0 then
+            y, rowIdx = CL.Reagent(pool, body, 0, y, 0, rowIdx, slot, needed, collapse.slots[si] == true, function()
+                collapse.slots[si] = not collapse.slots[si]
+                Repaint()
+            end)
         end
     end
     return y, true
@@ -393,6 +391,7 @@ local function Paint()
     end
     local body = f._anBody
     ResetRows(body)
+    CL.Begin(body._anCompanion)
     local y = 0
     local any = false
 
@@ -458,7 +457,8 @@ local function Paint()
     -- Window height follows the content (title band + body + bottom inset).
     local W = ns.ArtisanWindow
     local chrome = (f._anHeaderH or 40) + ((W and W.ROW_BELOW_CHROME) or 10) + ((W and W.PADDING) or 10)
-    f:SetHeight(math.ceil(chrome + y))
+    local maxH = (UIParent:GetHeight() or 1080) * MAX_SCREEN_SHARE
+    f:SetHeight(math.min(maxH, math.ceil(chrome + y)))
 end
 
 --- Dock beside ProfessionsFrame (absolute UIParent anchor) unless the player placed it.
@@ -484,17 +484,100 @@ local function Anchor()
         f:Hide()
         return
     end
-    -- Part of the profession window: a child of it (its strata, raised with it when clicked, hidden
-    -- with it), just above its own content. Other Artisan Nexus windows (HIGH) then cover it cleanly
-    -- instead of interleaving with it. The position stays an absolute UIParent anchor (Place).
-    if f:GetParent() ~= host then
-        f:SetParent(host)
-    end
-    f:SetFrameLevel((host:GetFrameLevel() or 0) + 20)
+    -- A UIParent window at FLOATING strata (ArtisanWindow.Create), above the whole profession window
+    -- like WN's Recipe Companion; hidden with the host by HookHost.
     if not f:IsShown() then
         Place(f, host)
         f:Show()
     end
+end
+
+-- ── Shopping List header button (RecipeCompanionWindow.lua:954 shopBtn: 92 x 20 text button at the
+-- header's right). In Artisan Nexus it adds the selected recipe to the Hub shopping list and shows
+-- how many crafts are on it. ──
+
+local SHOP_BTN_W, SHOP_BTN_H = 92, 20
+
+local function ShopCount(spellID)
+    local shop = ns.ShoppingListService
+    local entries = spellID and shop and shop.GetEntries and shop:GetEntries() or {}
+    for i = 1, #entries do
+        if entries[i].spellID == spellID then
+            return entries[i].count or 1
+        end
+    end
+    return 0
+end
+
+local function UpdateShopButton(f)
+    local btn = f and f._anShopBtn
+    if not btn then return end
+    local spellID = ProfessionSidecarUI._recipe and ProfessionSidecarUI._recipe.recipeID
+    local n = ShopCount(spellID)
+    btn._anLabel:SetText(n > 0 and string.format(SafeL("SIDECAR_SHOP_ON_LIST_FMT", "List x%d"), n)
+        or SafeL("SIDECAR_SHOP_BTN", "Shopping List"))
+    ns.UI_SetTextColorRole(btn._anLabel, n > 0 and "Bright" or "Normal")
+    local show = spellID ~= nil
+    if btn:IsShown() ~= show then
+        btn:SetShown(show)
+        if ns.ArtisanWindow and ns.ArtisanWindow.LayoutHeaderButtons then
+            ns.ArtisanWindow.LayoutHeaderButtons(f)
+        end
+    end
+end
+
+local function ShopButtonOnClick(_, button)
+    local shop = ns.ShoppingListService
+    local sel = ProfessionSidecarUI._recipe
+    local spellID = sel and sel.recipeID
+    if not (shop and spellID) then return end
+    local n = ShopCount(spellID)
+    if button == "RightButton" then
+        if n > 0 then shop:SetCount(spellID, n - 1) end
+        return
+    end
+    shop:Add(spellID, 1)
+    local addon = ns.ArtisanNexus
+    if addon and addon.Print then
+        local name = SafeUiLine(sel.name, "")
+        if name == "" and ns.RecipeService then
+            name = SafeUiLine(ns.RecipeService:GetRecipeName(spellID), "?")
+        end
+        addon:Print(string.format(SafeL("SIDECAR_SHOP_ADDED_FMT", "Shopping list: %s x%d"), name, n + 1))
+    end
+end
+
+local function ShopButtonOnEnter(btn)
+    GameTooltip:SetOwner(btn, "ANCHOR_BOTTOM")
+    GameTooltip:SetText(SafeL("SIDECAR_SHOP_BTN", "Shopping List"), 1, 1, 1)
+    GameTooltip:AddLine(SafeL("SIDECAR_SHOP_BTN_TT", "Left-click: one more craft on the shopping list. Right-click: one less."),
+        0.85, 0.85, 0.85, true)
+    GameTooltip:AddLine(SafeL("SIDECAR_SHOP_BTN_TT2", "The list and what to buy are on the Hub's Queue & Shopping page."),
+        0.7, 0.7, 0.7, true)
+    GameTooltip:Show()
+end
+
+local function CreateShopButton(f)
+    local F = ns.UI and ns.UI.Factory
+    local header = f._anHeader
+    if not (F and F.CreateButton and header) then return end
+    local btn = F:CreateButton(header, SHOP_BTN_W, SHOP_BTN_H, false)
+    if ns.UI_ApplyVisuals then
+        local bg = COLORS().bgCard or COLORS().bg or { 0.08, 0.08, 0.1 }
+        local a = COLORS().accent or { 0.5, 0.4, 0.7 }
+        ns.UI_ApplyVisuals(btn, { bg[1], bg[2], bg[3], 1 }, { a[1], a[2], a[3], 0.6 })
+    end
+    btn:SetFrameLevel(header:GetFrameLevel() + 5)
+    btn._anLabel = ns.FontManager:CreateFontString(btn, "small", "OVERLAY")
+    btn._anLabel:SetPoint("CENTER", 0, 0)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", ShopButtonOnClick)
+    btn:SetScript("OnEnter", ShopButtonOnEnter)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    -- Chained by ArtisanWindow.LayoutHeaderButtons like the header utility buttons.
+    f._anHeaderButtons[#f._anHeaderButtons + 1] = btn
+    f._anShopBtn = btn
+    btn:Hide()
 end
 
 local function OpenHub()
@@ -516,7 +599,6 @@ function ProfessionSidecarUI:Ensure()
         name = "ArtisanNexusProfessionSidecar",
         title = SafeL("SIDECAR_TITLE", "Artisan Nexus"),
         posKey = POS_KEY,
-        companionOf = true,
         width = WINDOW_W,
         height = 160,
         resizable = false,
@@ -532,8 +614,12 @@ function ProfessionSidecarUI:Ensure()
     if not f then
         return
     end
+    CreateShopButton(f)
     local body = f.contentArea
     body._anPool = { body = {}, small = {}, rule = {} }
+    body._anCompanion = CL.NewPool()
+    -- Height is capped (Paint): content past the cap is clipped, not drawn over the game world.
+    if body.SetClipsChildren then body:SetClipsChildren(true) end
     body._anUsed = {}
     f._anBody = body
     --- Click: the Hub's queue page (the window stays where it is; nothing closes).
@@ -572,7 +658,13 @@ end
 function ProfessionSidecarUI:Refresh()
     self:Ensure()
     HookHost()
-    Paint()
+    -- Data messages (bags, prices, queue) arrive all session long: paint only while it can be seen.
+    local host = _G.ProfessionsFrame
+    local f = self.frame
+    if f and host and host:IsShown() and not Hidden() and not f._anDismissed then
+        Paint()
+        UpdateShopButton(f)
+    end
     Anchor()
 end
 
@@ -627,7 +719,7 @@ function ProfessionSidecarUI:Enable()
         ProfessionSidecarUI:ScheduleRefresh()
     end
     for _, msg in ipairs({
-        E.CRAFT_QUEUE_UPDATED, E.PROFESSION_SNAPSHOT_UPDATED, E.PROFESSION_EQUIPMENT_UPDATED,
+        E.CRAFT_QUEUE_UPDATED, E.SHOPPING_LIST_UPDATED, E.PROFESSION_SNAPSHOT_UPDATED, E.PROFESSION_EQUIPMENT_UPDATED,
         E.CONCENTRATION_PLAN_UPDATED, E.CRAFT_BRIEFING_UPDATED, E.BAG_STOCK_UPDATED, E.AH_PRICES_UPDATED,
     }) do
         owner:RegisterMessage(msg, refresh)
@@ -647,6 +739,10 @@ function ProfessionSidecarUI:Enable()
         local f = ProfessionSidecarUI.frame
         if f and ns.ArtisanWindow and ns.ArtisanWindow.RefreshChrome then
             ns.ArtisanWindow.RefreshChrome(f)
+        end
+        -- Factory headers / rows bake the theme colours in at creation: rebuild them.
+        if f and f._anBody and f._anBody._anCompanion then
+            CL.Discard(f._anBody._anCompanion)
         end
         if f and f:IsShown() then
             Paint()

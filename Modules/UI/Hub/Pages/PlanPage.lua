@@ -49,7 +49,7 @@ local Hex, Dim = H.Ink, H.Dim
 local Money = H.Money
 
 local TAB = "plan"
-local COLLAPSE_H = 36
+local COLLAPSE_H = H.COLLAPSE_H
 --- Column widths (px) shared with PlanPage_Shopping.lua (the Hub table widths, Hub/HubTabKit.lua).
 P.COL = H.COL
 --- WN icon-only row buttons (CharactersUI_Row tracking / delete buttons).
@@ -80,14 +80,15 @@ end
 -- WN body helpers (frames cached here, re-parented into the scrollChild on every paint)
 -- ─────────────────────────────────────────────────────────────────
 
-local cache = { headers = {}, strips = {}, pools = {}, lines = {} }
+local cache = { strips = {}, pools = {}, lines = {} }
 P.cache = cache
 
-local function PlaceWide(frame, parent, side, y, height)
+--- right (optional): right inset when the left edge is indented (nested groups).
+local function PlaceWide(frame, parent, side, y, height, right)
     frame:SetParent(parent)
     frame:ClearAllPoints()
     frame:SetPoint("TOPLEFT", parent, "TOPLEFT", side, -y)
-    frame:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -side, -y)
+    frame:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -(right or side), -y)
     if height then frame:SetHeight(height) end
     frame:Show()
 end
@@ -98,6 +99,30 @@ local function ExpandedState()
         p.hubPlanExpanded = {}
     end
     return p and p.hubPlanExpanded or {}
+end
+
+--- Collapse state of a Companion-list block (reagent headers, ns.UI_CompanionList) in the same
+--- profile table as the section headers.
+function P.IsCollapsed(key)
+    return ExpandedState()[key] == false
+end
+
+function P.ToggleCollapsed(key)
+    local st = ExpandedState()
+    st[key] = (st[key] == false)
+    H.Refresh(TAB)
+end
+
+--- Companion-list frames (reagent headers / storage rows) of this tab, released by HideBody.
+P.companion = ns.UI_CompanionList and ns.UI_CompanionList.NewPool()
+--- Factory chrome is baked in at creation: a theme change rebuilds them on the next paint.
+do
+    local E = ns.Constants and ns.Constants.EVENTS
+    if P.companion and E and E.THEME_CHANGED and ns.NewEventOwner then
+        ns.NewEventOwner("HubPlanCompanion"):RegisterMessage(E.THEME_CHANGED, function()
+            ns.UI_CompanionList.Discard(P.companion)
+        end)
+    end
 end
 
 local function OnSectionToggle(isExpanded, header)
@@ -118,30 +143,42 @@ end
 
 --- WN collapsible section header at y; `right` = summary text (WN Professions section count font,
 --- RIGHT -14), `tooltip` = header hover lines. Returns new y and expanded.
-function P.SectionHeader(parent, side, y, key, title, right, tooltip)
+--- opts (one header per top item; nested data goes through ns.UI_CompanionList, never indented headers):
+---   icon    category icon (file ID / path, or atlas with isAtlas); fixed per key (set on creation)
+---   height  header height (WN companion reagent headers are shorter)
+---   buttons, data   WN icon-only buttons on the header's right (P.PaintRowButtons defs; fn(data)),
+---           the summary text moves left of them
+function P.SectionHeader(parent, side, y, key, title, right, tooltip, opts)
     local st = ExpandedState()
     local expanded = st[key] ~= false
-    local header = cache.headers[key]
-    if not header then
-        header = ns.UI_CreateCollapsibleHeader(parent, title, "plan:" .. key, expanded, OnSectionToggle, nil, nil, nil, true)
-        header._anPlanKey = key
+    local h = opts and opts.height or COLLAPSE_H
+    local header, isNew = H.PooledHeader(cache, key, parent, title, "plan:" .. key, expanded, OnSectionToggle,
+        opts and opts.icon, opts and opts.isAtlas, h ~= COLLAPSE_H and { sectionHeaderHeight = h } or nil)
+    if isNew then
         header._anRight = FontManager:CreateFontString(header, FontManager:GetFontRole("mainNavTabCount"), "OVERLAY")
         header._anRight:SetJustifyH("RIGHT")
         header._anRight:SetPoint("RIGHT", header, "RIGHT", -14, 0)
         header:HookScript("OnEnter", HeaderOnEnter)
         header:HookScript("OnLeave", TipOnLeave)
-        cache.headers[key] = header
-    else
-        header:SetParent(parent)
-        ns.UI_RebindCollapsibleHeader(header, title, expanded, OnSectionToggle)
     end
+    header._anPlanKey = key
     header._anTitle, header._anTooltip = title, tooltip
-    PlaceWide(header, parent, side, y, COLLAPSE_H)
+    PlaceWide(header, parent, side, y, h, side)
     local rt = header._anRight
+    local buttons = opts and opts.buttons
+    header._anData = opts and opts.data
+    local width = opts and opts.width
+    if buttons and width then
+        P.PaintRowButtons(header, buttons, width - 10)
+    elseif header._anBtns then
+        for i = 1, #header._anBtns do header._anBtns[i]:Hide() end
+    end
+    rt:ClearAllPoints()
+    rt:SetPoint("RIGHT", header, "RIGHT", -14 - ((buttons and width) and (P.ButtonsWidth(#buttons) + 4) or 0), 0)
     rt:SetText(right or "")
     ns.UI_SetTextColorRole(rt, "Muted")
     rt:Show()
-    return y + COLLAPSE_H, expanded
+    return y + h, expanded
 end
 
 --- One dim line (empty state / footer) at y (LedgerPage.lua DimLine); returns new y.
@@ -177,8 +214,9 @@ local function RowOnEnter(row)
     end
 end
 
---- WN TableKit table (header strip + pooled rows) at y; returns new y and the row count.
---- opts: header (default true), onRowClick, onRowEnter, rowButtons (defs for P.PaintRowButtons).
+--- WN TableKit rows at y (no column strip: the header card is followed directly by the groups);
+--- returns new y and the row count. opts: onRowClick, onRowEnter, rowButtons (defs for P.PaintRowButtons),
+--- rowHeight (pool row height on first use).
 function P.DrawTable(parent, side, y, width, key, cols, rows, opts)
     opts = opts or {}
     local strip = cache.strips[key]
@@ -186,20 +224,13 @@ function P.DrawTable(parent, side, y, width, key, cols, rows, opts)
         strip = TK.CreateHeaderStrip(parent, { mode = "text", bottomRule = true })
         strip._widths, strip._offsets = {}, {}
         cache.strips[key] = strip
-        cache.pools[key] = TK.CreateRowPool(TABLE.ROW_H.standard)
+        cache.pools[key] = TK.CreateRowPool(opts.rowHeight or TABLE.ROW_H.standard)
     end
     local pool = cache.pools[key]
     local n = #cols
     opts.n = n
     TK.ResolveWidths(cols, width, strip._widths, strip._offsets)
-    if opts.header ~= false then
-        PlaceWide(strip, parent, side, y)
-        strip:SetWidth(width)
-        strip:SetColumns(cols, strip._widths, strip._offsets, n)
-        y = y + strip:GetStripHeight()
-    else
-        strip:Hide()
-    end
+    strip:Hide()
     local rh = pool.height
     local last = strip._offsets[n] + strip._widths[n]
     cache.culls = cache.culls or {}
@@ -584,7 +615,8 @@ end
 -- ─────────────────────────────────────────────────────────────────
 
 local function HideBody()
-    for _, header in pairs(cache.headers) do header:Hide() end
+    if P.companion then ns.UI_CompanionList.Begin(P.companion) end
+    H.HeaderPassBegin(cache)
     for key in pairs(cache.strips) do P.ReleaseTable(key) end
     for _, line in pairs(cache.lines) do line:Hide() end
 end

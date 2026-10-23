@@ -135,14 +135,14 @@ local function CollectEntries(days, filter)
             local o = r.outputs and r.outputs[1]
             local qty = 0
             for _, out1 in ipairs(r.outputs or {}) do qty = qty + (tonumber(out1.qty) or 0) end
-            local profit = (r.net and r.cost) and (r.net - r.cost + (r.returnedValue or 0)) or nil
+            local profit = crafts.RowProfit and crafts:RowProfit(r)
             local name = (o and o.itemID) and ItemOf(o.itemID)
                 or (ns.RecipeService and r.spellID and ns.RecipeService:GetRecipeName(r.spellID)) or "?"
             out[#out + 1] = {
                 t = r.t, kind = "craft", itemID = o and o.itemID, item = name,
                 what = string.format(SafeL("HUB_LDG_CRAFTED_FMT", "Crafted %d"), qty),
                 amount = profit, cash = false,
-                detail = { value = r.net, cost = r.cost, multicraft = r.multicraft, returned = r.returnedValue },
+                detail = { row = r },
             }
         end
     end
@@ -247,9 +247,10 @@ local function RowEnter(row, d)
             GameTooltip:AddLine(SafeL("HUB_LDG_ESTIMATED", "Estimated until the AH invoice arrives."), 0.7, 0.7, 0.7, true)
         end
     elseif e.kind == "craft" then
-        if x.value then Pair(SafeL("HUB_LEDGER_CRAFT_VALUE", "Output value (net)"), Money(x.value, nil, true)) end
-        if x.cost then Pair(SafeL("HUB_TT_REAGENT_COST", "Reagent cost"), Cost(x.cost)) end
-        if (x.returned or 0) > 0 then Pair(SafeL("HUB_LEDGER_RETURNED", "Reagents returned"), Money(x.returned, nil, true)) end
+        -- Same breakdown as Session Loot (LootHistoryUI_Draw.lua AddCraftBreakdown).
+        if x.row and ns.UI_AddCraftBreakdown then
+            ns.UI_AddCraftBreakdown(GameTooltip, x.row)
+        end
         GameTooltip:AddLine(SafeL("HUB_LDG_CRAFT_NOTE", "Valued at market prices; not counted in In / Out."), 0.7, 0.7, 0.7, true)
     elseif e.kind == "tip" and x.customer then
         Pair(SafeL("HUB_LDG_CUSTOMER", "Customer"), tostring(x.customer))
@@ -310,6 +311,19 @@ local function StatList(sum, cs, gold)
     if (cs.crafts or 0) > 0 then
         lines[#lines + 1] = TipLine(string.format(SafeL("HUB_LDG_CRAFT_PROFIT_FMT", "Crafting profit (%d crafts)"), cs.crafts),
             Signed(cs.profit, true))
+        -- Where it came from: multicraft extras and Resourcefulness are inside the profit.
+        if (cs.mcValue or 0) > 0 then
+            lines[#lines + 1] = TipLine(string.format(SafeL("HUB_LDG_MC_FMT", "  Multicraft (%d procs)"), cs.procs.mc),
+                Signed(cs.mcValue, true))
+        end
+        if (cs.returnedValue or 0) > 0 then
+            lines[#lines + 1] = TipLine(string.format(SafeL("HUB_LDG_RES_FMT", "  Resourcefulness (%d procs)"), cs.procs.res),
+                Signed(cs.returnedValue, true))
+        end
+        if (cs.ingValue or 0) > 0 then
+            lines[#lines + 1] = TipLine(string.format(SafeL("HUB_LDG_ING_FMT", "  Ingenuity (%d procs, concentration)"), cs.procs.ing),
+                Signed(cs.ingValue, true))
+        end
     end
     if gold then
         lines[#lines + 1] = TipLine(SafeL("HUB_LDG_GOLD_CHANGE", "Gold total change"), Signed(gold.last - gold.first, true))
@@ -405,7 +419,7 @@ function ArtisanNexus:DrawLedgerTab(parent)
         if body:Section(key, g.title, { count = summary, gap = (gi > 1) and 8 or nil }) then
             local rows = RowsFor(key, g.rows)
             body:Table(key, COLS, rows, RowValue, {
-                header = false, onRowEnter = RowEnter, onRowLeave = RowLeave, onRowClick = RowClick,
+                onRowEnter = RowEnter, onRowLeave = RowLeave, onRowClick = RowClick,
             })
             if #g.rows > MAX_DAY_ROWS then
                 body:Line(key .. ":more", Dim(string.format(SafeL("HUB_LDG_MORE_FMT", "+%d more entries"),

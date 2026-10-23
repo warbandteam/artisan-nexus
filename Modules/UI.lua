@@ -1611,8 +1611,12 @@ local function ApplyMainWindowShowChrome(f, targetTab)
     if targetTab then
         ScrollMainNavEnsureTabVisible(f, targetTab)
     end
+    -- Metrics commit (shell chrome + one tab repaint) only when size or scale changed since the last
+    -- show: reopening an unchanged window repainted the tab a second time right after its own paint.
     local LC = ns.UI_LayoutCoordinator
-    if LC and LC.ForceMainFrameMetrics then
+    local metricsKey = string.format("%.1fx%.1f@%.4f", f:GetWidth() or 0, f:GetHeight() or 0, f:GetEffectiveScale() or 1)
+    if LC and LC.ForceMainFrameMetrics and f._anShowMetricsKey ~= metricsKey then
+        f._anShowMetricsKey = metricsKey
         C_Timer.After(0, function()
             if f and f:IsShown() then
                 LC:ForceMainFrameMetrics(f, "display_changed")
@@ -1699,6 +1703,12 @@ function WarbandNexus:ShowMainWindow(requestedTabKey)
 
     local resolvedTab = ResolveMainWindowOpenTab(requestedTabKey)
     local prevTab = mainFrame.currentTab
+    -- Already open on the requested tab (sidecar / minimap / rail shortcut clicked again): bring it to
+    -- the front only. Its content is kept current by the refresh router; a repaint here only flickers.
+    if mainFrame:IsShown() and requestedTabKey ~= nil and requestedTabKey ~= "storage" and prevTab == resolvedTab then
+        mainFrame:Raise()
+        return
+    end
     ApplyMainFrameOpenTab(mainFrame, requestedTabKey, resolvedTab)
     local targetTab = mainFrame.currentTab
     RememberSessionMainTab(targetTab)
@@ -2375,8 +2385,8 @@ function WarbandNexus:UpdateStatus()
     local trackingDialogKey = charKey
 
     local function BadgeOneLine(s)
-        if not s or s == "" then return s end
         if issecretvalue and issecretvalue(s) then return "" end
+        if not s or s == "" then return s end
         return (s:gsub("\n+", " "))
     end
 

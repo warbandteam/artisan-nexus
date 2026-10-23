@@ -203,20 +203,6 @@ function LootWindowBridge:ConsumeToken(kind, itemID, qty)
     return false
 end
 
----@param kind "gathering"|"fishing"
----@param itemID number
----@return boolean
-function LootWindowBridge:HasToken(kind, itemID)
-    PruneTokens(GetTime())
-    for i = 1, #tokens do
-        local t = tokens[i]
-        if t.kind == kind and t.itemID == itemID then
-            return true
-        end
-    end
-    return false
-end
-
 local bridge = CreateFrame("Frame")
 bridge:RegisterEvent("LOOT_OPENED")
 bridge:RegisterEvent("LOOT_CLOSED")

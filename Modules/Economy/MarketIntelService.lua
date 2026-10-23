@@ -310,11 +310,6 @@ function MarketIntelService:GetStateLabel(state)
     return def[2]
 end
 
----@return number|nil unix time of the last finished recompute
-function MarketIntelService:GetComputedAt()
-    return self._computedAt
-end
-
 function MarketIntelService:Enable()
     if self._enabled then
         return

@@ -7,9 +7,20 @@
                    baseQty, multicraft?, qtyMin?, qtyMax?, resourcesReturned? = { {itemID?, currencyID?, qty} },
                    concentrationSpent?, hasIngenuityProc?, ingenuityRefund?, firstCraftReward?,
                    rewards? = { {itemID?|currencyID?, qty} }, isEnchant?,
-                   cost?, costMissing?, returnedValue?, value?, net?,
+                   cost?, costMissing?, costBasis? ("actual" | "partial" | "estimate"),
+                   reagents? = { {itemID, qty, price?} } (what the cost is made of),
+                   returnedValue?, value?, net?, profit?, isCrit?,
+                   mcValue? (net value of the multicraft extra items), shadow? (copper per concentration
+                   point, ConcentrationPlannerService:GetShadowPrice at craft time), concCost?, ingValue?,
                    evCost?, evRevenue?, evProfit?, order? (crafting-order craft: not valued) }, ... } -- oldest first, capped
-        cost = gross reagent cost (RecipeService:EstimateReagentCost); ev* = CraftEVService:Evaluate
+        profit = net + returnedValue - cost: the realized result at market prices (multicraft extras are
+        inside net, Resourcefulness inside returnedValue). Concentration is not money: concCost / ingValue
+        value it at the planner's shadow price and are shown next to the profit, not inside it.
+        cost = gross reagent cost of one craft at craft-time prices: the reagents the craft was
+        started with (C_TradeSkillUI.CraftRecipe / CraftEnchant craftingReagents, captured by a secure
+        post-hook: quality tiers, optional and finishing reagents) plus the fixed reagent slots from
+        the schematic. Without a captured allocation it falls back to RecipeService:EstimateReagentCost
+        (cheapest tier per slot, costBasis "estimate"). ev* = CraftEVService:Evaluate
         expectations at craft time (proc-adjusted), kept for predicted-vs-realized.
         cal  = { spell = { [spellID] = Stats }, prof = { [profession] = Stats } }
       }
@@ -213,6 +224,139 @@ local outputDeduper = nil
 
 --- Gross reagent cost of one craft at current prices (the realized side; returned reagents are
 --- booked separately as returnedValue).
+---------------------------------------------------------------------------
+-- Reagents the craft was started with
+---------------------------------------------------------------------------
+
+--- C_TradeSkillUI.CraftRecipe(recipeSpellID, numCasts, craftingReagents, ...) and
+--- CraftEnchant(recipeSpellID, numCasts, craftingReagents, itemTarget, applyConcentration):
+--- craftingReagents = CraftingReagentInfo[] { reagent = { itemID?, currencyID? }, dataSlotIndex,
+--- quantity } (verified 2026-10-22, warcraft.wiki.gg API_C_TradeSkillUI.CraftEnchant,
+--- Struct_CraftingReagentInfo, 12.0.0 shape). Blizzard's transaction hands over the ModifiedReagent
+--- data slots (quality tiers, optional, finishing reagents) with per-craft quantities
+--- (Blizzard_ProfessionsTransaction.lua CreateCraftingReagentInfoTbl, see RecipeService.lua:317);
+--- fixed Reagent slots are not in it and come from the schematic.
+--- RecraftRecipe(itemGUID, ...) has no spell ID and is not captured (falls back to the estimate).
+local allocBySpell = {}
+--- A "Create all" run keeps one allocation for many casts; older allocations are not trusted.
+local ALLOC_MAX_AGE = 900
+
+local function CaptureAllocation(spellID, craftingReagents)
+    spellID = tonumber(spellID)
+    if not spellID then return end
+    local entries = {}
+    if type(craftingReagents) == "table" then
+        for i = 1, #craftingReagents do
+            local c = craftingReagents[i]
+            local reagent = type(c) == "table" and c.reagent
+            if type(reagent) == "table" then
+                entries[#entries + 1] = {
+                    itemID = tonumber(reagent.itemID),
+                    currencyID = tonumber(reagent.currencyID),
+                    dataSlotIndex = tonumber(c.dataSlotIndex),
+                    qty = tonumber(c.quantity) or 0,
+                }
+            end
+        end
+    end
+    allocBySpell[spellID] = { at = time(), entries = entries }
+end
+
+local function HookCraftCalls()
+    if CraftLedgerService._hooked or not (C_TradeSkillUI and hooksecurefunc) then return end
+    CraftLedgerService._hooked = true
+    -- Secure post-hooks: they only read the arguments after Blizzard's call (no taint).
+    if C_TradeSkillUI.CraftRecipe then
+        hooksecurefunc(C_TradeSkillUI, "CraftRecipe", function(spellID, _, craftingReagents)
+            if CraftLedgerService._enabled then pcall(CaptureAllocation, spellID, craftingReagents) end
+        end)
+    end
+    if C_TradeSkillUI.CraftEnchant then
+        hooksecurefunc(C_TradeSkillUI, "CraftEnchant", function(spellID, _, craftingReagents)
+            if CraftLedgerService._enabled then pcall(CaptureAllocation, spellID, craftingReagents) end
+        end)
+    end
+end
+
+--- Cost of one craft from its captured allocation. Schematic slots are keyed like
+--- RecipeService:GetMandatorySlots (slotIndex, else dataSlotType:dataSlotIndex: a Reagent slot and a
+--- ModifiedReagent slot can share a dataSlotIndex). Allocation entries belong to ModifiedReagent
+--- (dataSlotType 2) slots; a required one missing from the allocation is estimated at its cheapest tier.
+---@return number|nil cost, number missing, table used, string basis
+local function ActualCost(spellID, alloc)
+    local rs = ns.RecipeService
+    local rows = rs and rs.GetReagents and rs:GetReagents(spellID)
+    if type(rows) ~= "table" or #rows == 0 then return nil end
+    -- Schematics harvested before slotIndex was stored cannot group a slot's tiers reliably: estimate
+    -- them (they are read again the next time the profession is opened). dataSlotType itself may be
+    -- nil on current rows: it is optional with Reagent as its default (warcraft.wiki.gg
+    -- API_C_TradeSkillUI.GetRecipeSchematic, checked 2026-10-22), so nil counts as a fixed slot.
+    for i = 1, #rows do
+        if rows[i].slotIndex == nil then return nil end
+    end
+    local allocated = {}
+    for i = 1, #alloc.entries do
+        local e = alloc.entries[i]
+        if e.dataSlotIndex and (e.qty or 0) > 0 then allocated[e.dataSlotIndex] = true end
+    end
+    local slots, order = {}, {}
+    for i = 1, #rows do
+        local r = rows[i]
+        local key = (r.slotIndex and ("s" .. r.slotIndex))
+            or (r.dataSlotIndex ~= nil and ((r.dataSlotType or 0) .. ":" .. r.dataSlotIndex)) or ("r" .. i)
+        local slot = slots[key]
+        if not slot then
+            slot = { rows = {}, qty = 0 }
+            slots[key] = slot
+            order[#order + 1] = slot
+        end
+        slot.rows[#slot.rows + 1] = r
+        slot.qty = math.max(slot.qty, tonumber(r.qty) or 0)
+    end
+    local cost, missing, estimated, used = 0, 0, 0, {}
+    local function Add(itemID, qty)
+        if not itemID or qty <= 0 then return end
+        local p = Price(itemID)
+        used[#used + 1] = { itemID = itemID, qty = qty, price = p }
+        if p then cost = cost + p * qty else missing = missing + 1 end
+    end
+    -- Fixed slots from the schematic; required ModifiedReagent slots the allocation left out.
+    for i = 1, #order do
+        local slot = order[i]
+        local first = slot.rows[1]
+        local isModified = first.dataSlotType == 2
+        local st = first.slotType
+        local required = st == nil or st == 1 or first.required
+        if required and not (isModified and first.dataSlotIndex and allocated[first.dataSlotIndex]) then
+            if #slot.rows == 1 then
+                if first.itemID then
+                    Add(first.itemID, slot.qty)
+                elseif first.currencyID then
+                    missing = missing + 1 -- currency reagent: no price (as in EstimateReagentCost)
+                end
+            else
+                -- Tiered slot the allocation does not cover: cheapest priced tier, like the estimate.
+                local pick, pickPrice
+                for j = 1, #slot.rows do
+                    local id = slot.rows[j].itemID
+                    local p = id and Price(id)
+                    if id and (not pick or (p and (not pickPrice or p < pickPrice))) then
+                        pick, pickPrice = id, p or pickPrice
+                    end
+                end
+                if pick then Add(pick, slot.qty) else missing = missing + 1 end
+                estimated = estimated + 1
+            end
+        end
+    end
+    -- What the craft was started with (quality tiers, optional and finishing reagents).
+    for i = 1, #alloc.entries do
+        local e = alloc.entries[i]
+        if e.itemID then Add(e.itemID, e.qty) end
+    end
+    return cost, missing, used, (estimated > 0) and "partial" or "actual"
+end
+
 local function EstimateCost(spellID)
     if not spellID then return nil, nil end
     local rs = ns.RecipeService
@@ -323,6 +467,7 @@ local function BuildRow(op)
         spent = math.max(spent, tonumber(d.concentrationSpent) or 0)
         refund = math.max(refund, tonumber(d.ingenuityRefund) or 0)
         if d.hasIngenuityProc then row.hasIngenuityProc = true end
+        if d.isCrit then row.isCrit = true end
     end
     for i = 1, #op.currencies do
         local c = op.currencies[i]
@@ -343,9 +488,20 @@ local function BuildRow(op)
     end
 
     -- Valuation at craft time.
-    local cost, missing = EstimateCost(spellID)
+    local cost, missing, used, basis
+    local alloc = spellID and allocBySpell[spellID]
+    if alloc and (row.t or 0) - alloc.at <= ALLOC_MAX_AGE and (row.t or 0) >= alloc.at - 5 then
+        local ok, c, m, u, b = pcall(ActualCost, spellID, alloc)
+        if ok and c then cost, missing, used, basis = c, m, u, b end
+    end
+    if not cost then
+        cost, missing = EstimateCost(spellID)
+        basis = cost and "estimate" or nil
+    end
     if cost then
         row.cost = cost
+        row.costBasis = basis
+        if used and #used > 0 then row.reagents = used end
         if missing and missing > 0 then row.costMissing = missing end
     end
     local rv = 0
@@ -376,6 +532,23 @@ local function BuildRow(op)
     if priced then
         row.value = value
         row.net = math.floor(net + 0.5)
+        -- Multicraft extras at the operation's average net per item.
+        local qty = row.baseQty + mcTotal
+        if mcTotal > 0 and qty > 0 then
+            row.mcValue = math.floor(net * mcTotal / qty + 0.5)
+        end
+        if cost then
+            row.profit = row.net + rv - cost
+        end
+    end
+    local planner = ns.ConcentrationPlannerService
+    -- Only with a known profession: GetShadowPrice(nil) is the best price of any profession.
+    local shadow = (spent > 0 or refund > 0) and row.profession and planner and planner.GetShadowPrice
+        and planner:GetShadowPrice(row.profession)
+    if shadow and shadow > 0 then
+        row.shadow = shadow
+        if spent > 0 then row.concCost = math.floor(spent * shadow + 0.5) end
+        if refund > 0 then row.ingValue = math.floor(refund * shadow + 0.5) end
     end
     return row
 end
@@ -544,13 +717,79 @@ function CraftLedgerService:GetCrafts(days)
     return out
 end
 
+--- Crafts since `since` (time()), newest first; guid limits them to one character. Orders included
+--- (row.order: not valued).
+---@return table[] rows
+function CraftLedgerService:GetCraftsSince(since, guid, limit)
+    since = tonumber(since) or 0
+    local out = {}
+    local store = Store()
+    if not store then return out end
+    local rows = store.rows
+    for i = #rows, 1, -1 do
+        local r = rows[i]
+        if (tonumber(r.t) or 0) < since or (limit and #out >= limit) then break end
+        if not guid or r.guid == guid then out[#out + 1] = r end
+    end
+    return out
+end
+
+--- Realized profit of a row (net + returned - cost); nil when unpriced. Rows recorded before
+--- row.profit existed are computed the same way.
+function CraftLedgerService:RowProfit(r)
+    if not r or r.order then return nil end
+    if r.profit then return r.profit end
+    if r.net and r.cost then
+        return r.net + (r.returnedValue or 0) - r.cost
+    end
+    return nil
+end
+
+--- Ordered breakdown of one craft for tooltips (Ledger, Session Loot). Each line:
+---   { key, qty?, copper?, sign? (1 gain / -1 cost), items? = { {itemID?, currencyID?, qty} } }
+--- keys: "crafted", "multicraft", "value", "returned", "cost", "profit", "conc", "ingenuity", "crit",
+--- "predicted", "order", "costMissing". The UI owns labels and money formatting.
+function CraftLedgerService:Breakdown(r)
+    local out = {}
+    if not r then return out end
+    local qty = 0
+    for _, o in ipairs(r.outputs or {}) do qty = qty + (tonumber(o.qty) or 0) end
+    out[#out + 1] = { key = "crafted", qty = qty, base = r.baseQty }
+    if r.multicraft then
+        out[#out + 1] = { key = "multicraft", qty = r.multicraft, copper = r.mcValue, sign = 1 }
+    end
+    if r.isCrit then out[#out + 1] = { key = "crit" } end
+    if r.order then
+        out[#out + 1] = { key = "order" }
+        return out
+    end
+    if r.net then out[#out + 1] = { key = "value", copper = r.net, sign = 1 } end
+    if r.resourcesReturned then
+        out[#out + 1] = { key = "returned", copper = r.returnedValue, sign = 1, items = r.resourcesReturned }
+    end
+    if r.cost then
+        out[#out + 1] = { key = "cost", copper = r.cost, sign = -1, items = r.reagents, basis = r.costBasis or "estimate" }
+    end
+    if (r.costMissing or 0) > 0 then out[#out + 1] = { key = "costMissing", qty = r.costMissing } end
+    local profit = self:RowProfit(r)
+    if profit then out[#out + 1] = { key = "profit", copper = profit } end
+    if r.concentrationSpent then
+        out[#out + 1] = { key = "conc", qty = r.concentrationSpent, copper = r.concCost, sign = -1 }
+    end
+    if r.hasIngenuityProc or r.ingenuityRefund then
+        out[#out + 1] = { key = "ingenuity", qty = r.ingenuityRefund, copper = r.ingValue, sign = 1 }
+    end
+    if r.evProfit then out[#out + 1] = { key = "predicted", copper = r.evProfit } end
+    return out
+end
+
 function CraftLedgerService:GetSummary(days)
     days = tonumber(days) or 7
     local since = time() - days * 86400
     local sum = {
         crafts = 0, orderCrafts = 0, value = 0, net = 0, cost = 0, returnedValue = 0, profit = 0, unpriced = 0,
         predictedRevenue = 0, predictedProfit = 0, predictedCrafts = 0,
-        concentrationSpent = 0, ingenuityRefund = 0,
+        concentrationSpent = 0, ingenuityRefund = 0, mcValue = 0, concCost = 0, ingValue = 0,
         procs = { mc = 0, res = 0, ing = 0 },
         byProfession = {},
     }
@@ -568,7 +807,13 @@ function CraftLedgerService:GetSummary(days)
             sum.net = sum.net + (r.net or 0)
             sum.cost = sum.cost + (r.cost or 0)
             sum.returnedValue = sum.returnedValue + (r.returnedValue or 0)
+            sum.mcValue = sum.mcValue + (r.mcValue or 0)
+            sum.concCost = sum.concCost + (r.concCost or 0)
+            sum.ingValue = sum.ingValue + (r.ingValue or 0)
             if not r.value or not r.cost then sum.unpriced = sum.unpriced + 1 end
+            -- Same rule as the rows (RowProfit): only fully priced crafts count toward the profit.
+            local p = self:RowProfit(r)
+            if p then sum.profit = sum.profit + p end
             if r.evProfit then
                 sum.predictedCrafts = sum.predictedCrafts + 1
                 sum.predictedRevenue = sum.predictedRevenue + (r.evRevenue or 0)
@@ -591,8 +836,6 @@ function CraftLedgerService:GetSummary(days)
             bp.cost = bp.cost + (r.cost or 0)
         end
     end
-    -- Realized-at-market profit: net sale value - reagent cost + value of returned reagents.
-    sum.profit = sum.net - sum.cost + sum.returnedValue
     return sum
 end
 
@@ -601,6 +844,7 @@ function CraftLedgerService:Enable()
     local ces = ns.CraftEventService
     if not ces then return end
     self._enabled = true
+    HookCraftCalls()
     -- CraftEventService has no unregister; register once and gate on _enabled.
     if not self._registered then
         self._registered = true

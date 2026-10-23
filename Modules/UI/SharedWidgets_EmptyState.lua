@@ -467,6 +467,7 @@ local function CreateEmptyStateCard(parent, tabName, yOffset, opts)
     card:SetPoint("TOPLEFT", sideInset, -yOffset)
     card:SetPoint("TOPRIGHT", -sideInset, -yOffset)
     card:SetHeight(cardHeight)
+    card._wnReadoptable = true   -- cached + re-adopted: never registry garbage (SectionPool)
     parent[cacheKey] = card
     if fillParent then
         card._wnExcludedFromStorageExtent = true
@@ -562,7 +563,7 @@ end
 function ns.UI_TryShowSearchEmptyInContainer(parent, searchText, yOffset)
     if not parent then return false end
     local q = searchText or ""
-    if q == "" or (issecretvalue and issecretvalue(q)) then
+    if (issecretvalue and issecretvalue(q)) or q == "" then
         return false
     end
     if ns.UI_ShowSearchEmptyStateCard then

@@ -42,10 +42,9 @@ local function FontManager()
 end
 
 -- Window-specific metrics (Session Loot grid / list).
-local ROW_H = 28                 -- pickup row (WN STORAGE_ROW_HEIGHT band: icon + coin icons)
+local ROW_H = 28                 -- pickup row (compact window: 2px under WN STORAGE_ROW_HEIGHT 30)
 local ROW_ICON = 22
 local RANK_ATLAS_SZ = 20
-local ROW_GAP = 2
 local ROW_PAD = 6
 local COIN_ICON_H = 12
 local CAT_SZ = 40                -- catalog icon well
@@ -706,8 +705,14 @@ local function ApplyPickupHighlight(row, evRt)
 end
 
 local function CreateSessionRow(content)
-    local row = CreateFrame("Frame", nil, content)
+    -- Button so the WN row hover wash applies (Factory:ApplyHighlight needs SetHighlightTexture);
+    -- striped rows sit edge to edge like WN storage rows (no inter-row gap).
+    local row = CreateFrame("Button", nil, content)
     row:SetHeight(ROW_H)
+    local F = ns.UI and ns.UI.Factory
+    if F and F.ApplyHighlight then
+        F:ApplyHighlight(row)
+    end
     local ic = ns.UI_CreateIcon(row, nil, ROW_ICON)
     ic:SetPoint("LEFT", row, "LEFT", ROW_PAD, 0)
     row._icon = ic
@@ -731,10 +736,156 @@ local function CreateSessionRow(content)
     return row
 end
 
+-- ── Crafted rows: realized profit of one craft (CraftLedgerService row) ──
+
+local function SignedCopper(copper)
+    copper = math.floor((copper or 0) + 0.5)
+    local r, g, b
+    if copper < 0 then
+        r, g, b = 0.95, 0.35, 0.35
+        if ns.UI_GetSemanticRedColor then r, g, b = ns.UI_GetSemanticRedColor() end
+    else
+        r, g, b = 0.35, 0.85, 0.35
+        if ns.UI_GetSemanticGreenColor then r, g, b = ns.UI_GetSemanticGreenColor() end
+    end
+    local hex = string.format("|cff%02x%02x%02x", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+    return hex .. (copper < 0 and "-" or "+") .. "|r" .. (FormatCopper(math.abs(copper), COIN_ICON_H) or "0")
+end
+
+local BREAKDOWN_LABEL = {
+    crafted = { "LOOT_CRAFT_TT_CRAFTED", "Crafted" },
+    multicraft = { "LOOT_CRAFT_TT_MULTICRAFT", "Multicraft extra" },
+    crit = { "LOOT_CRAFT_TT_CRIT", "Critical craft" },
+    order = { "LOOT_CRAFT_TT_ORDER", "Crafting order: the customer's reagents and item, not valued" },
+    value = { "LOOT_CRAFT_TT_VALUE", "Output value (after AH cut)" },
+    returned = { "LOOT_CRAFT_TT_RETURNED", "Resourcefulness returned" },
+    cost = { "LOOT_CRAFT_TT_COST", "Reagent cost" },
+    costMissing = { "LOOT_CRAFT_TT_COST_MISSING_FMT", "%d reagents without a price" },
+    profit = { "LOOT_CRAFT_TT_PROFIT", "Profit" },
+    conc = { "LOOT_CRAFT_TT_CONC", "Concentration spent" },
+    ingenuity = { "LOOT_CRAFT_TT_INGENUITY", "Ingenuity refund" },
+    predicted = { "LOOT_CRAFT_TT_PREDICTED", "Expected profit" },
+}
+
+--- Item name with its reagent quality rank (Midnight R1 / R2 atlas) for the reagent lines.
+local function ReagentLabel(itemID)
+    local nm = itemID and GetItemInfo(itemID) or nil
+    if type(nm) ~= "string" or (issecretvalue and issecretvalue(nm)) then nm = "#" .. tostring(itemID) end
+    -- Rank only for quality reagents: C_TradeSkillUI.GetItemReagentQualityByItemInfo is nil for the
+    -- rest (same call as RecipeService:GetRequiredBasicSlots).
+    local tier
+    local qualityOf = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
+    if qualityOf and itemID then
+        local ok, q = pcall(qualityOf, itemID)
+        tier = ok and tonumber(q) or nil
+    end
+    local atlas = tier and ns.UI_GetProfessionCraftingQualityAtlasNameForTier and ns.UI_GetProfessionCraftingQualityAtlasNameForTier(tier)
+    if atlas then
+        nm = nm .. " |A:" .. atlas .. ":14:14|a"
+    end
+    return nm
+end
+
+local COST_BASIS_NOTE = {
+    actual = { "LOOT_CRAFT_TT_COST_ACTUAL", "Reagent cost: the reagents the craft was started with, at craft-time prices." },
+    partial = { "LOOT_CRAFT_TT_COST_PARTIAL", "Reagent cost: the reagents the craft was started with; some slots estimated at their cheapest quality." },
+    estimate = { "LOOT_CRAFT_TT_COST_NOTE", "Reagent cost: cheapest quality at the prices of the craft time." },
+}
+
+local function BreakdownLabel(key)
+    local l = BREAKDOWN_LABEL[key]
+    return l and LT(l[1], l[2]) or key
+end
+
+--- Tooltip lines of one craft: yield and procs, money lines, then concentration valued at the
+--- planner's gold per point (shown beside the profit, not inside it).
+local function AddCraftBreakdown(tt, r)
+    local ledger = ns.CraftLedgerService
+    local lines = ledger and ledger.Breakdown and ledger:Breakdown(r) or {}
+    local W, D = { 1, 1, 1 }, { 0.75, 0.75, 0.75 }
+    for i = 1, #lines do
+        local l = lines[i]
+        local label = BreakdownLabel(l.key)
+        if l.key == "crafted" then
+            local right = tostring(l.qty or 0)
+            if l.base and l.base ~= l.qty then
+                right = right .. " (" .. tostring(l.base) .. " + " .. tostring((l.qty or 0) - l.base) .. ")"
+            end
+            tt:AddDoubleLine(label, right, D[1], D[2], D[3], W[1], W[2], W[3])
+        elseif l.key == "multicraft" then
+            tt:AddDoubleLine(label .. " +" .. tostring(l.qty or 0), l.copper and SignedCopper(l.copper) or "-",
+                D[1], D[2], D[3], W[1], W[2], W[3])
+        elseif l.key == "crit" or l.key == "order" then
+            tt:AddLine(label, 0.6, 0.8, 1, true)
+        elseif l.key == "costMissing" then
+            tt:AddLine(string.format(label, l.qty or 0), 1, 0.6, 0.2)
+        elseif l.key == "returned" then
+            tt:AddDoubleLine(label, l.copper and SignedCopper(l.copper) or "-", D[1], D[2], D[3], W[1], W[2], W[3])
+            for _, it in ipairs(l.items or {}) do
+                local nm = it.itemID and (GetItemInfo(it.itemID)) or (it.currencyID and ("#" .. it.currencyID)) or "?"
+                tt:AddDoubleLine("   " .. tostring(nm), "x" .. tostring(it.qty or 0), 0.65, 0.65, 0.65, 0.85, 0.85, 0.85)
+            end
+        elseif l.key == "cost" then
+            tt:AddDoubleLine(label, SignedCopper(-(l.copper or 0)), D[1], D[2], D[3], W[1], W[2], W[3])
+            for _, it in ipairs(l.items or {}) do
+                local right = "x" .. tostring(it.qty or 0)
+                if it.price then
+                    right = right .. "  " .. (FormatCopper(math.floor(it.price * (it.qty or 0) + 0.5), COIN_ICON_H) or "")
+                end
+                tt:AddDoubleLine("   " .. ReagentLabel(it.itemID), right, 0.65, 0.65, 0.65, 0.85, 0.85, 0.85)
+            end
+        elseif l.key == "profit" then
+            tt:AddLine(" ")
+            tt:AddDoubleLine(label, SignedCopper(l.copper), 1, 1, 1, W[1], W[2], W[3])
+        elseif l.key == "conc" or l.key == "ingenuity" then
+            local right = tostring(math.floor((l.qty or 0) + 0.5))
+            if l.copper then
+                right = right .. "  (" .. SignedCopper((l.sign or 1) * l.copper) .. ")"
+            end
+            tt:AddDoubleLine(label, right, D[1], D[2], D[3], W[1], W[2], W[3])
+        elseif l.key == "predicted" then
+            tt:AddDoubleLine(label, SignedCopper(l.copper), D[1], D[2], D[3], W[1], W[2], W[3])
+        elseif l.copper then
+            tt:AddDoubleLine(label, SignedCopper((l.sign or 1) * l.copper), D[1], D[2], D[3], W[1], W[2], W[3])
+        end
+    end
+    if r.shadow then
+        tt:AddLine(string.format(LT("LOOT_CRAFT_TT_CONC_NOTE_FMT", "Concentration at %s per point (not in the profit)."),
+            FormatCopper(r.shadow, COIN_ICON_H) or "?"), 0.6, 0.6, 0.6, true)
+    end
+    if r.cost then
+        local note = COST_BASIS_NOTE[r.costBasis or "estimate"] or COST_BASIS_NOTE.estimate
+        tt:AddLine(LT(note[1], note[2]), 0.6, 0.6, 0.6, true)
+    end
+end
+
+--- Shared with the Hub Ledger (one craft breakdown everywhere).
+ns.UI_AddCraftBreakdown = AddCraftBreakdown
+
+local function CraftRowOnEnter(row)
+    local r = row._anLedger
+    if not r then return end
+    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+    local first = r.outputs and r.outputs[1]
+    local rs = ns.RecipeService
+    local title = (r.spellID and rs and rs.GetRecipeName and rs:GetRecipeName(r.spellID))
+        or (first and first.itemID and GetItemInfo(first.itemID)) or "?"
+    if type(title) ~= "string" or (issecretvalue and issecretvalue(title)) then title = "?" end
+    GameTooltip:SetText(title, 1, 1, 1)
+    GameTooltip:AddDoubleLine(date("%H:%M", r.t or time()), r.profession or "", 0.6, 0.6, 0.6, 0.6, 0.6, 0.6)
+    AddCraftBreakdown(GameTooltip, r)
+    GameTooltip:Show()
+end
+
+local function CraftRowOnLeave()
+    GameTooltip:Hide()
+end
+
 local function ResetSessionRow(row)
     ClearPickupHighlight(row)
     row._anItemGen = (row._anItemGen or 0) + 1
     DetachItemTooltip(row._icon)
+    row._anLedger = nil
 end
 
 local function ResolveCatalogEntriesForTab(tabKey)
@@ -825,12 +976,44 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
         local count = row._count
         count:ClearAllPoints()
         count:SetPoint("LEFT", rankOk and rankTex or ic, "RIGHT", 4, 0)
-        count:SetText(tostring(qty) .. "×")
+        local ledgerRow = e.ledger
+        row._anLedger = ledgerRow
+        if ledgerRow then
+            -- One craft: its yield with the multicraft extra, hover for the breakdown.
+            local txt = tostring(qty) .. "×"
+            if ledgerRow.multicraft then
+                txt = txt .. " |cff" .. ((ns.UI_GetAccentHexColor and ns.UI_GetAccentHexColor()) or "9966cc")
+                    .. "(+" .. ledgerRow.multicraft .. ")|r"
+            end
+            count:SetText(txt)
+            row:EnableMouse(true)
+            row:SetScript("OnEnter", CraftRowOnEnter)
+            row:SetScript("OnLeave", CraftRowOnLeave)
+        else
+            count:SetText(tostring(qty) .. "×")
+            row:SetScript("OnEnter", nil)
+            row:SetScript("OnLeave", nil)
+        end
 
         local unit = LootUnitCopper(itemID)
         local price = row._price
         local priceShown = false
-        if qty > 0 and unit and unit > 0 then
+        local ledger = ns.CraftLedgerService
+        local profit = ledgerRow and ledger and ledger.RowProfit and ledger:RowProfit(ledgerRow)
+        if ledgerRow then
+            -- Realized profit of the craft (net output + returned reagents - reagent cost).
+            if ledgerRow.order then
+                price:SetText(LT("LOOT_CRAFT_ORDER_SHORT", "order"))
+                ns.UI_SetTextColorRole(price, "Dim")
+            elseif profit then
+                price:SetText(SignedCopper(profit))
+                ns.UI_SetTextColorRole(price, "Normal")
+            else
+                price:SetText(noPrice)
+                ns.UI_SetTextColorRole(price, "Dim")
+            end
+            priceShown = true
+        elseif qty > 0 and unit and unit > 0 then
             price:SetText(FormatCopper(qty * unit, COIN_ICON_H) or "")
             ns.UI_SetTextColorRole(price, "Normal")
             priceShown = true
@@ -886,7 +1069,7 @@ local function PopulateSessionList(content, events, catalogEntries, listCap, emp
         if i <= fresh and evRt then
             ApplyPickupHighlight(row, evRt)
         end
-        y = y + ROW_H + ROW_GAP
+        y = y + ROW_H
     end
 
     if maxN == 0 and emptyMsg ~= false then

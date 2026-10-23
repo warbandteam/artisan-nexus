@@ -161,9 +161,12 @@ local function FilterEntriesByProfession(entries, opts)
 end
 
 --- Aggregate reagent demand across all queued recipes.
---- opts.subtractBags: when true, reduce "needed" by the bag count and report "short".
+--- opts.subtractBags: when true, reduce "needed" by what is in stock and report "short". Stock is
+--- the crafting count (RecipeService:GetStockByLocation: bags + bank + warband bank) summed over the
+--- slot's quality tiers, the same have the Crafting tab and the sidecar use.
 --- opts.profession: when set and not "All", only recipes for that craft profession.
----@return table itemID -> { itemID, needed, have, short, unitPrice, cost }
+---@return table itemID -> { itemID, needed, have, short, unitPrice, cost, cands = {itemID...},
+---   bySpell = { [spellID] = qty }, bags, bank, warband }
 function ShoppingListService:Aggregate(opts)
     opts = opts or {}
     local rs = ns.RecipeService
@@ -205,25 +208,50 @@ function ShoppingListService:Aggregate(opts)
             if pickID then
                 local row = agg[pickID]
                 if not row then
-                    row = { itemID = pickID, needed = 0, have = 0, short = 0 }
+                    row = { itemID = pickID, needed = 0, have = 0, short = 0, cands = {}, candSeen = {}, bySpell = {} }
                     agg[pickID] = row
                 end
-                row.needed = row.needed + slot.qty * (entry.count or 1)
+                local qty = slot.qty * (entry.count or 1)
+                row.needed = row.needed + qty
+                row.bySpell[entry.spellID] = (row.bySpell[entry.spellID] or 0) + qty
+                for ci = 1, #slot.candidates do
+                    local id = slot.candidates[ci].itemID
+                    if id and not row.candSeen[id] then
+                        row.candSeen[id] = true
+                        row.cands[#row.cands + 1] = id
+                    end
+                end
             end
         end
     end
 
-    -- Bag counts (RecipeService bucket-invalidated cache over ScanBags); rank-grouped
-    -- so higher-tier mats in bags satisfy the requirement like craftability does.
+    -- Stock (RecipeService:GetStockByLocation, cached per BAG_UPDATE / bank bucket generation): every
+    -- quality tier of the slot counts, like the craft count of the Crafting tab.
     if opts.subtractBags ~= false then
-        local bag = (rs.GetBagCounts and rs:GetBagCounts()) or (rs.ScanBags and rs:ScanBags()) or {}
         local chars = ns.CharacterData
-        for itemID, row in pairs(agg) do
-            if rs.EffectiveReagentCount then
-                row.have = rs:EffectiveReagentCount(itemID, bag)
-            else
-                row.have = bag[itemID] or 0
+        -- A tier counts toward one row only: two recipes can pick different tiers of one reagent
+        -- (different candidate sets), and both rows would otherwise count the same stack.
+        -- Rows go in item ID order so the same row keeps a shared tier on every paint.
+        local claimed = {}
+        local order = {}
+        for itemID in pairs(agg) do
+            order[#order + 1] = itemID
+        end
+        table.sort(order)
+        for oi = 1, #order do
+            local itemID = order[oi]
+            local row = agg[itemID]
+            local bags, bank, warband = 0, 0, 0
+            for ci = 1, #row.cands do
+                local id = row.cands[ci]
+                if not claimed[id] or claimed[id] == itemID then
+                    claimed[id] = itemID
+                    local st = rs:GetStockByLocation(id)
+                    bags, bank, warband = bags + st.bags, bank + st.bank, warband + st.warband
+                end
             end
+            row.bags, row.bank, row.warband = bags, bank, warband
+            row.have = bags + bank + warband
             row.short = math.max(0, row.needed - row.have)
 
             -- Cross-character reagent inventory (Warband Nexus or AN-native snapshot).

@@ -184,6 +184,34 @@ local function GetOwnedTabMap()
     return owned
 end
 
+--- Crafted "last pickups": one row per craft operation from the craft ledger (this character, since
+--- the crafted session started), so each row carries its realized profit and proc breakdown
+--- (CraftLedgerService:Breakdown). nil when the ledger is unavailable (falls back to loot events).
+local function CraftedLedgerEvents(svc)
+    local ledger = ns.CraftLedgerService
+    if not (ledger and ledger.GetCraftsSince) then
+        return nil
+    end
+    local guid = ns.Utilities and ns.Utilities.GetCharacterGUID and ns.Utilities:GetCharacterGUID() or nil
+    local cap = svc.GetMaxRecentLoot and svc:GetMaxRecentLoot() or 15
+    local rows = ledger:GetCraftsSince(svc.craftedSince or 0, guid, cap)
+    local now, nowT = GetTime(), time()
+    local out = {}
+    for i = 1, #rows do
+        local r = rows[i]
+        local first = r.outputs and r.outputs[1]
+        if first and first.itemID then
+            local qty = 0
+            for _, o in ipairs(r.outputs) do qty = qty + (tonumber(o.qty) or 0) end
+            out[#out + 1] = {
+                itemID = first.itemID, qty = qty, spellID = r.spellID, profession = r.profession,
+                t = r.t, rt = now - (nowT - (tonumber(r.t) or nowT)), ledger = r,
+            }
+        end
+    end
+    return out
+end
+
 local function BuildCraftedCatalogEntries(totals)
     local entries = {}
     if type(totals) ~= "table" then
@@ -486,7 +514,7 @@ function LootHistoryUI:Refresh()
             events = svc:GetRecentEvents("fishing", nil, false) or {}
         elseif self.activeTab == "crafted" then
             totals = svc:GetItemTotals("crafted", nil, isOverall) or {}
-            events = svc:GetRecentEvents("crafted", nil, false) or {}
+            events = CraftedLedgerEvents(svc) or svc:GetRecentEvents("crafted", nil, false) or {}
             entries = BuildCraftedCatalogEntries(totals)
         else
             totals = svc:GetItemTotals("gathering", self.activeTab, isOverall) or {}

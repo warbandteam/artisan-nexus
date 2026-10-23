@@ -3,16 +3,18 @@
 
     Split from PlanPage.lua (loads right after it). Adds to ns.HubPlan (P):
       P.DrawShopping(parent, side, y, width, entries, profOpt) -> y
-          WN collapsible header "Shopping" (right = total cost; unpriced count, Acuity and the alt
-          stock note in its tooltip), then
-            reagents  Aggregate() shorts priced through the order book (Item | Have / need | Short |
-                      Avg unit cost | Total | Source); gatherable reagents
-                      (ShoppingListService:GetFarmTargets) name their gathering profession in the
-                      Source column when no price source applies, and a click opens that Session Loot
-                      tab beside the main window (LootHistoryUI:Show(category, { tileAfter }), open
-                      world only)
-            recipes   the shopping-list recipes (Recipe | Crafts + WN icon-only row buttons -, +, remove
-                      via ShoppingListService:SetCount / Add / Remove)
+          one WN section header per recipe on the list (recipe icon, check when the list covers all
+          its reagents, right = N reagents short + xN, WN icon-only buttons -, +, remove on the header:
+          ShoppingListService:SetCount / Add / Remove), under it the WN Recipe Companion body per
+          reagent (Modules/UI/CompanionList.lua CL.Reagent: header with xN for these crafts, storage
+          rows for this character, alts and the Warband bank with quality columns, "Buy N" and its
+          order-book cost when the list is short, Total), then "To buy" (right = N to buy · cost):
+          Item | Buy N | Total | Source for the whole list; tooltip with stock per location, the
+          recipes that need it, unit prices and alt holders; gatherable reagents name their gathering
+          profession and a click opens that Session Loot tab (LootHistoryUI:Show, open world only).
+          Stock = bags + bank + warband bank (ShoppingListService:Aggregate over
+          RecipeService:GetStockByLocation), refreshed by BAG_STOCK_UPDATED (purchases, mail, crafts,
+          posted auctions, bank moves).
       P.ClearShoppingList()   title-toolbar "Clear list" (StaticPopup confirm)
     Uses P.SectionHeader / P.DrawTable / P.DimLine / P.ReleaseTable / P.Confirm / P.ModifiedLink /
     P.Profile / P.Chat from PlanPage.lua.
@@ -38,7 +40,6 @@ local COL = P.COL
 local ModifiedLink, Profile = P.ModifiedLink, P.Profile
 
 local ACUITY_ITEM_ID = (ns.Constants and ns.Constants.ARTISANS_ACUITY_ITEM_ID) or 210814
-local BLOCK_GAP = (ns.UI_LAYOUT.PAGE_STACK and ns.UI_LAYOUT.PAGE_STACK.BLOCK_GAP) or 8
 
 -- ─────────────────────────────────────────────────────────────────
 -- Gatherable reagents (ShoppingListService:GetFarmTargets -> Session Loot tab)
@@ -107,28 +108,25 @@ local SHOP_BTNS = {
       fn = function(d) local s = ShopSvc(); if s then s:SetCount(d.spellID, (d.count or 1) - 1) end end },
 }
 
-local SCOLS, BCOLS
+--- Reagent blocks are the WN Recipe Companion's (Modules/UI/CompanionList.lua); the to-buy list is a
+--- TableKit list without a column strip: icon | item | Buy N | total | source.
+local CL = ns.UI_CompanionList
+local ATLAS_BUY = "Auctioneer"
+local CHECK = ns.UI_GetIconMarkup and ns.UI_GetIconMarkup("status_ok", 14, 14, 0, 0) or ""
 
-local function ShopColumns()
-    if SCOLS then
-        return SCOLS, BCOLS
+local BCOLS
+
+local function BuyColumns()
+    if not BCOLS then
+        BCOLS = {
+            H.IconColumn(),
+            { key = "name", label = "", flex = 1, min = COL.NAME_MIN_NARROW },
+            { key = "buy", label = "", width = 80, align = "RIGHT" },
+            { key = "total", label = "", width = COL.MONEY, align = "RIGHT" },
+            { key = "source", label = "", width = 96, align = "RIGHT" },
+        }
     end
-    SCOLS = {
-        H.IconColumn(),
-        { key = "name", label = SafeL("HUB_COL_RECIPE", "Recipe"), flex = 1, min = COL.NAME_MIN },
-        { key = "count", label = SafeL("HUB_COL_CRAFTS", "Crafts"), width = COL.COUNT, align = "RIGHT" },
-        { key = "actions", label = "", width = P.ButtonsWidth(#SHOP_BTNS) },
-    }
-    BCOLS = {
-        H.IconColumn(),
-        { key = "name", label = SafeL("HUB_COL_ITEM", "Item"), flex = 1, min = COL.NAME_MIN_NARROW },
-        { key = "have", label = SafeL("HUB_COL_HAVE_NEED", "Have / need"), width = 88, align = "RIGHT" },
-        { key = "short", label = SafeL("HUB_COL_SHORT", "Short"), width = COL.COUNT, align = "RIGHT" },
-        { key = "unit", label = SafeL("HUB_COL_AVG_UNIT", "Avg unit cost"), width = COL.MONEY, align = "RIGHT" },
-        { key = "total", label = SafeL("HUB_COL_TOTAL", "Total"), width = COL.MONEY, align = "RIGHT" },
-        { key = "source", label = SafeL("HUB_COL_SOURCE", "Source"), width = 96, align = "RIGHT" },
-    }
-    return SCOLS, BCOLS
+    return BCOLS
 end
 
 local SOURCE_LABELS = {
@@ -151,43 +149,15 @@ local function IsSoulboundRow(r)
     return r.isAcuity or r.itemID == ACUITY_ITEM_ID or r.isSoulbound
 end
 
-local function ShopValue(col, d)
-    local k = col.key
-    if k == "icon" then
-        return d.icon
-    elseif k == "name" then
-        return d.name
-    elseif k == "count" then
-        return string.format(SafeL("HUB_COUNT_FMT", "x%d"), d.count or 1)
-    end
-    return ""
-end
-
+--- To-buy rows (short reagents only).
 local function BuyValue(col, d)
     local k = col.key
     if k == "icon" then
         return ItemIcon(d.itemID)
     elseif k == "name" then
-        return ItemName(d.itemID)
-    elseif k == "have" then
-        -- "have / need"; alt stock (Warband Nexus) as an accent "+n" after what this character holds.
-        local txt = tostring(d.have or 0)
-        if (d.altHave or 0) > 0 then
-            txt = txt .. " " .. Hex("+" .. d.altHave, "accent")
-        end
-        return txt .. Dim(" / " .. tostring(d.needed or 0))
-    elseif k == "short" then
-        return Hex(tostring(d.short or 0), "warning")
-    elseif k == "unit" then
-        if IsSoulboundRow(d) or not d.unitPrice then
-            return Dim("-")
-        end
-        local unit = d.avgUnitCost or d.unitPrice
-        local txt = Money(unit)
-        if d.avgUnitCost and d.avgUnitCost > d.unitPrice * 1.01 then
-            txt = Hex(txt, "warning")
-        end
-        return txt
+        return ItemName(d.itemID), "Bright"
+    elseif k == "buy" then
+        return Hex(string.format(SafeL("HUB_SHOP_BUY_FMT", "Buy %d"), d.short or 0), "warning")
     elseif k == "total" then
         if d.isAcuity or d.itemID == ACUITY_ITEM_ID then
             return Hex(SafeL("HUB_SOULBOUND_ACUITY", "[Acuity]"), "warning")
@@ -214,15 +184,35 @@ end
 --- Alt holders listed in the short shopping-row tooltip.
 local ALT_LINES = 3
 
+local function TipLine(label, value)
+    GameTooltip:AddDoubleLine(label, value, 0.75, 0.75, 0.75, 1, 1, 1)
+end
+
+local function RecipeName(spellID)
+    local rs = ns.RecipeService
+    return (rs and rs:GetRecipeName(spellID)) or H.RecipeFallbackName(spellID)
+end
+
 local function BuyRowEnter(row, d)
     if not d then return end
     GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
     GameTooltip:SetItemByID(d.itemID)
+    GameTooltip:AddLine(" ")
+    -- Where the stock is (the counts the Have cell adds up).
+    TipLine(SafeL("HUB_BAGS", "bags"), tostring(d.bags or 0))
+    TipLine(SafeL("HUB_BANK", "bank"), tostring(d.bank or 0))
+    TipLine(SafeL("SIDECAR_WARBAND_BANK", "Warband bank"), tostring(d.warband or 0))
+    if d.bySpell and next(d.bySpell) then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(SafeL("HUB_SHOP_NEEDED_BY", "Needed by"), 0.9, 0.8, 0.5)
+        for spellID, qty in pairs(d.bySpell) do
+            TipLine(RecipeName(spellID), "x" .. tostring(qty))
+        end
+    end
     if d.unitPrice and d.avgUnitCost and (d.short or 0) > 0 then
         GameTooltip:AddLine(" ")
-        GameTooltip:AddDoubleLine(SafeL("HUB_TT_LOWEST_UNIT", "Cheapest listing"), Money(d.unitPrice, nil, true), 0.75, 0.75, 0.75, 1, 1, 1)
-        GameTooltip:AddDoubleLine(string.format(SafeL("HUB_TT_AVG_UNIT_FMT", "Average buying %d"), d.short),
-            Money(d.avgUnitCost, nil, true), 0.75, 0.75, 0.75, 1, 1, 1)
+        TipLine(SafeL("HUB_TT_LOWEST_UNIT", "Cheapest listing"), Money(d.unitPrice, nil, true))
+        TipLine(string.format(SafeL("HUB_TT_AVG_UNIT_FMT", "Average buying %d"), d.short), Money(d.avgUnitCost, nil, true))
     end
     local src, stale = PriceSource(d.itemID)
     if src == "vendor" then
@@ -232,7 +222,7 @@ local function BuyRowEnter(row, d)
         GameTooltip:AddLine(SafeL("HUB_TT_PRICE_STALE", "* Price data is old - sync the Auction House."), 0.6, 0.6, 0.6)
     end
     local cat = farmCategory[d.itemID]
-    if cat then
+    if cat and (d.short or 0) > 0 then
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(string.format(SafeL("HUB_SHOP_GATHER_FMT", "Gatherable: %s"), FarmLabel(cat)), 0.6, 0.8, 1)
         GameTooltip:AddLine(SafeL("HUB_FARM_GOTO_TT", "Click to open Session loot for this profession."), 0.7, 0.7, 0.7)
@@ -273,17 +263,6 @@ local function ItemRowClick(row, d, button)
     end
 end
 
-local function ShopRowEnter(row, d)
-    if not d then return end
-    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-    if d.outID then
-        GameTooltip:SetItemByID(d.outID)
-    else
-        GameTooltip:AddLine(d.name, 1, 1, 1)
-    end
-    GameTooltip:Show()
-end
-
 local function ClearList()
     local svc = ShopSvc()
     local n = (svc and svc.GetEntries) and #svc:GetEntries() or 0
@@ -300,15 +279,16 @@ P.ClearShoppingList = ClearList
 
 local shopRows, buyRows = {}, {}
 
+--- Still to buy first (biggest spend first).
 local function BuyCompare(a, b)
     local ac, bc = a.cost or -1, b.cost or -1
     if ac ~= bc then return ac > bc end
     return (a.itemID or 0) < (b.itemID or 0)
 end
 
---- Header tooltip: what the header total leaves out.
-local function ShoppingTooltip(missing, acuity)
-    local lines = {}
+--- To-buy header tooltip: what the stock counts and what the total leaves out.
+local function ReagentsTooltip(missing, acuity)
+    local lines = { SafeL("HUB_SHOP_REAGENTS_DESC", "Every reagent the list needs. Stock counts bags, bank and warband bank.") }
     if missing > 0 then
         lines[#lines + 1] = string.format(SafeL("HUB_SHOPPING_UNPRICED_FMT", "(%d unpriced)"), missing)
     end
@@ -319,35 +299,112 @@ local function ShoppingTooltip(missing, acuity)
     if p and p.shoppingSubtractAlts then
         lines[#lines + 1] = SafeL("HUB_ALTS_SUBTRACTED", "(alt stock subtracted)")
     end
-    return #lines > 0 and table.concat(lines, "\n") or nil
+    return table.concat(lines, "\n")
 end
 
+--- The whole list's Aggregate row for a slot (its pick is one of the slot's tiers).
+local function AggRowFor(agg, slot)
+    for i = 1, #slot.candidates do
+        local r = agg[slot.candidates[i]]
+        if r then return r end
+    end
+    return nil
+end
+
+--- One recipe: a WN section header (recipe icon, check when the list covers all its reagents, right =
+--- short count + xN, -, +, remove on the header), then the Recipe Companion block per reagent
+--- (header with xN for these crafts, storage rows, "Buy N" with its cost when the list is short, total).
+local function DrawRecipe(parent, side, y, width, d, agg, sectionGap)
+    local rs = ns.RecipeService
+    local slots = rs and rs.GetRequiredBasicSlots and rs:GetRequiredBasicSlots(d.spellID) or {}
+    local missing = 0
+    for i = 1, #slots do
+        local r = AggRowFor(agg, slots[i])
+        if r and (r.short or 0) > 0 then
+            missing = missing + 1
+        end
+    end
+    local ready = missing == 0 and #slots > 0
+    local title = (ready and (CHECK .. " ") or "") .. Hex(d.name, ready and "success" or "Bright")
+    local right = string.format(SafeL("HUB_COUNT_FMT", "x%d"), d.count or 1)
+    if missing > 0 then
+        right = Hex(string.format(SafeL("HUB_SHOP_SHORT_FMT", "%d reagents short"), missing), "warning") .. "   " .. right
+    end
+    local rkey = "sr:" .. d.spellID
+    local expanded
+    y, expanded = P.SectionHeader(parent, side, y, rkey, title, right,
+        string.format(SafeL("HUB_SHOP_TT_CRAFTS_FMT", "%d crafts on the shopping list"), d.count or 1),
+        { icon = d.icon, buttons = SHOP_BTNS, data = d, width = width })
+    if not expanded or not CL or not P.companion then
+        return y + sectionGap
+    end
+    y = y + CL.SECTION_SPACING
+    local rowIndex = 0
+    for i = 1, #slots do
+        local slot = slots[i]
+        local needed = (tonumber(slot.qty) or 0) * (d.count or 1)
+        if needed > 0 then
+            local r = AggRowFor(agg, slot)
+            local opts
+            if r then
+                opts = { sufficient = (r.short or 0) == 0 }
+                if (r.short or 0) > 0 then
+                    local cost
+                    if IsSoulboundRow(r) then
+                        cost = Dim(SafeL("HUB_SOULBOUND_BADGE", "[Soulbound]"))
+                    else
+                        cost = r.cost and Money(r.cost) or Dim(SafeL("HUB_NO_PRICE", "no price"))
+                    end
+                    opts.extraRow = { atlas = ATLAS_BUY, value = cost,
+                        name = Hex(string.format(SafeL("HUB_SHOP_BUY_FMT", "Buy %d"), r.short), "warning") }
+                end
+            end
+            local gkey = "sg:" .. d.spellID .. ":" .. i
+            y, rowIndex = CL.Reagent(P.companion, parent, side, y, side, rowIndex, slot, needed,
+                P.IsCollapsed(gkey), function() P.ToggleCollapsed(gkey) end, opts)
+        end
+    end
+    return y + sectionGap - CL.SECTION_SPACING
+end
+
+--- One WN section per recipe on the list (Recipe Companion body under it), then "To buy": everything
+--- the whole list is still short of, for the AH run.
 function P.DrawShopping(parent, side, y, width, entries, profOpt)
     local svc = ShopSvc()
+    local sectionGap = math.max((ns.UI_LAYOUT.PAGE_STACK and ns.UI_LAYOUT.PAGE_STACK.SECTION_GAP) or 12, H.SECTION_GAP or 12)
+    if #entries == 0 then
+        local expanded
+        y, expanded = P.SectionHeader(parent, side, y, "shopList", SafeL("HUB_SHOP_LIST_TITLE", "Shopping list"), nil,
+            SafeL("HUB_SHOP_LIST_DESC", "Recipes you added (Crafting: right-click). - / + change the craft count."))
+        if expanded then
+            y = P.DimLine(parent, side, y, "shopEmpty", SafeL("HUB_SHOP_EMPTY_HINT",
+                "The shopping list is empty. Right-click a recipe on the Crafting page to add it."))
+        end
+        return y
+    end
+
+    CollectFarmCategories(profOpt)
+    local agg = svc:Aggregate({ subtractBags = true, profession = profOpt })
     local total, missing, acuity = 0, 0, 0
     if svc.TotalCost then
         total, missing, acuity = svc:TotalCost({ profession = profOpt })
     end
-    local right, tip
-    if #entries > 0 then
-        right = string.format(SafeL("HUB_SHOP_TOTAL_FMT", "Total: %s"), Money(total, "0"))
-        tip = ShoppingTooltip(missing or 0, acuity)
-    end
-    local expanded
-    y, expanded = P.SectionHeader(parent, side, y, "buy", SafeL("HUB_PLAN_SHOP_TITLE", "Shopping"), right, tip)
-    if not expanded or #entries == 0 then
-        P.ReleaseTable("shop")
-        P.ReleaseTable("buy")
-        if expanded then
-            return P.DimLine(parent, side, y, "shopEmpty", SafeL("HUB_SHOP_EMPTY", "The shopping list is empty."))
-        end
-        return y
-    end
-    local scols, bcols = ShopColumns()
 
-    -- Reagents still to get.
-    CollectFarmCategories(profOpt)
-    local agg = svc:Aggregate({ subtractBags = true, profession = profOpt })
+    local rs = ns.RecipeService
+    for i = 1, #entries do
+        local e = entries[i]
+        local d = shopRows[i] or {}
+        shopRows[i] = d
+        local outID = rs and rs:GetOutputItem(e.spellID) or nil
+        d.spellID, d.count, d.outID = e.spellID, e.count or 1, outID
+        d.icon = RecipeIconTexture(e.spellID, outID)
+        d.name = RecipeName(e.spellID)
+        y = DrawRecipe(parent, side, y, width, d, agg, sectionGap)
+    end
+    for i = #entries + 1, #shopRows do
+        shopRows[i] = nil
+    end
+
     local n = 0
     for _, r in pairs(agg) do
         if (r.short or 0) > 0 then
@@ -359,30 +416,19 @@ function P.DrawShopping(parent, side, y, width, entries, profOpt)
         buyRows[i] = nil
     end
     table.sort(buyRows, BuyCompare)
+    local buyRight
     if n == 0 then
-        P.ReleaseTable("buy")
-        y = P.DimLine(parent, side, y, "buyNone", Hex(SafeL("HUB_SHOPPING_ALL_IN_BAGS", "All reagents already in bags."), "success"))
+        buyRight = Hex(SafeL("HUB_SHOP_REAGENTS_DONE", "All in stock"), "success")
     else
-        y = P.DrawTable(parent, side, y, width, "buy", bcols, buyRows, {
-            valueFn = BuyValue, onRowEnter = BuyRowEnter, onRowClick = ItemRowClick,
-        })
+        buyRight = string.format(SafeL("HUB_SHOP_REAGENTS_SUM_FMT", "%d to buy · %s"), n, Money(total, "0"))
     end
-
-    -- Recipes on the list.
-    local rs = ns.RecipeService
-    for i = 1, #entries do
-        local e = entries[i]
-        local d = shopRows[i] or {}
-        shopRows[i] = d
-        local outID = rs and rs:GetOutputItem(e.spellID) or nil
-        d.spellID, d.count, d.outID = e.spellID, e.count or 1, outID
-        d.icon = RecipeIconTexture(e.spellID, outID)
-        d.name = (rs and rs:GetRecipeName(e.spellID)) or H.RecipeFallbackName(e.spellID)
+    local expanded
+    y, expanded = P.SectionHeader(parent, side, y, "buy", SafeL("HUB_SHOP_TO_BUY_TITLE", "To buy"),
+        buyRight, ReagentsTooltip(missing or 0, acuity))
+    if not expanded or n == 0 then
+        return y
     end
-    for i = #entries + 1, #shopRows do
-        shopRows[i] = nil
-    end
-    return P.DrawTable(parent, side, y + BLOCK_GAP, width, "shop", scols, shopRows, {
-        valueFn = ShopValue, onRowEnter = ShopRowEnter, rowButtons = SHOP_BTNS,
+    return P.DrawTable(parent, side, y, width, "buy", BuyColumns(), buyRows, {
+        valueFn = BuyValue, onRowEnter = BuyRowEnter, onRowClick = ItemRowClick,
     })
 end

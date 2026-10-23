@@ -6,13 +6,13 @@
     ArtisanNexus:DrawMarketTab(scrollChild) returns the body height; UI_TabHost.lua dispatches it.
 
       fixedHeader  WN title card; subtitle = AH data freshness (AHPriceService:GetCacheStats, hover for the
-                   cache counts); title toolbar Sync
+                   cache counts); title toolbar: sort dropdown (profile.hubMarketSort, every table) + Sync
                    (AHPriceService:StartScan(false, true); usable only while the AH is open and idle, shows
                    progress while IsScanActive())
       Empty        no cached price at all -> one WN tab empty-state card, nothing else
       Groups       WN collapsible headers with the count on the right (Professions-tab section count font;
-                   what each group shows is its header tooltip); tables: icon | Item | values, sortable
-                   headers (H.NewTabBody Table sort):
+                   what each group shows is its header tooltip); rows: icon | Item | values, no column
+                   strip (what a value is reads from the row tooltip):
         My auctions    OwnedAuctionsService:GetOwned / UnitPrice / GetMarketPrice / GetCancelInfo; right =
                        active / undercut; per-row Cancel button (WN Professions row action button,
                        ProfessionsUI.lua:1697)
@@ -157,8 +157,37 @@ local function SortValue(d, key)
     return d[key .. "N"]
 end
 
-local function Sort(key, asc)
-    return { key = key, asc = asc, value = SortValue }
+--- Sort modes of the title-toolbar sort dropdown (CraftingPage.lua pattern); "default" keeps each
+--- table's own order (undercut first / tracked order / deals then movers).
+local SORT_OPTIONS = {
+    { key = "default", label = SafeL("HUB_SORT_DEFAULT", "Default") },
+    { key = "name", label = SafeL("HUB_SORT_NAME", "Name (A-Z)"), sortKey = "item", asc = true },
+    { key = "price", label = SafeL("HUB_SORT_PRICE", "Price (highest)"), sortKey = "price", asc = false },
+}
+
+--- profile.hubMarketSort = { key = <SORT_OPTIONS key> } (the dropdown writes .key).
+local function SortTable()
+    local p = ns.db and ns.db.profile
+    if not p then return { key = "default" } end
+    if type(p.hubMarketSort) ~= "table" then
+        p.hubMarketSort = { key = "default" }
+    end
+    return p.hubMarketSort
+end
+
+local SORT = { value = SortValue }
+
+--- Shared sort of every Market table, from the dropdown pick.
+local function Sort()
+    local key = SortTable().key
+    SORT.key, SORT.asc = nil, false
+    for i = 1, #SORT_OPTIONS do
+        local o = SORT_OPTIONS[i]
+        if o.key == key then
+            SORT.key, SORT.asc = o.sortKey, o.asc == true
+        end
+    end
+    return SORT
 end
 
 --- Item tooltip, then the row's extra lines (d.tip = { { label, value }, ... }) under a blank line.
@@ -201,12 +230,12 @@ local L_PRICE = SafeL("HUB_COL_PRICE", "Price")
 
 --- Name column (sortable A-Z) after the WN icon column.
 local function ItemCol()
-    return { key = "item", label = L_ITEM, flex = 1, min = NAME_MIN, sortable = true }
+    return { key = "item", label = L_ITEM, flex = 1, min = NAME_MIN }
 end
 
---- Right-aligned, sortable value column; numbers sort high first.
+--- Right-aligned value column.
 local function NumCol(key, label, width)
-    return { key = key, label = label, width = width, align = "RIGHT", sortable = true, defaultAscending = false }
+    return { key = key, label = label, width = width, align = "RIGHT" }
 end
 
 local OWNED_COLS = {
@@ -228,7 +257,7 @@ local WATCH_COLS = {
 
 local OPP_COLS = {
     H.IconColumn(), ItemCol(),
-    { key = "kind", label = SafeL("HUB_COL_TYPE", "Type"), width = 80, sortable = true },
+    { key = "kind", label = SafeL("HUB_COL_TYPE", "Type"), width = 80 },
     NumCol("price", L_PRICE, MONEY_W),
     NumCol("avg", L_AVG7, MONEY_W),
     NumCol("pct", SafeL("HUB_COL_CHANGE_PCT", "Change %"), 76),
@@ -476,9 +505,7 @@ local function PlaceCancelButtons(rows, ahOpen)
     end
 end
 
---- No header sort by default: the list keeps OwnedSort (undercut first, biggest loss first).
-local OWNED_SORT = Sort(nil, false)
-
+--- Default order: undercut first, biggest loss first.
 local function OwnedSort(a, b)
     if a.undercut ~= b.undercut then
         return a.undercut
@@ -501,6 +528,7 @@ local function DrawOwned(ahOpen)
             r.itemID, r.link, r.auctionID = a.itemID, a.itemLink, a.auctionID
             SetItem(r, a.itemID)
             r.mine, r.mineN = Money(mine, nil, true), mine
+            r.priceN = mine
             r.undercut = (mine and lowest and lowest < mine) and true or false
             -- Undercut: the lowest price in red (its distance to yours is in the item tooltip context).
             r.lowest = lowest and (r.undercut and Ink(TK.FormatSignedMoneyPlain(math.floor(lowest + 0.5), 12), "red")
@@ -537,7 +565,7 @@ local function DrawOwned(ahOpen)
         return
     end
     rows = body:Table("owned", OWNED_COLS, rows, CellValue, {
-        onRowEnter = RowEnter, onRowClick = RowClick, sort = OWNED_SORT,
+        onRowEnter = RowEnter, onRowClick = RowClick, sort = Sort(),
         emptyText = snap and SafeL("HUB_MKT_OWNED_NONE", "You have no active auctions.")
             or SafeL("HUB_MARKET_UNDERCUT_NO_SNAPSHOT", "Open the Auction House once to read your auctions."),
     })
@@ -599,9 +627,8 @@ local function BuildWatchIDs(out)
     return out
 end
 
+--- Default order: the tracked order (shopping-list spend, then top crafts).
 local watch = { ids = {}, at = nil }
---- Default: the tracked order (shopping-list spend, then top crafts).
-local WATCH_SORT = Sort(nil, false)
 
 local function WatchIDs()
     if not watch.at or GetTime() - watch.at > WATCH_TTL then
@@ -664,7 +691,7 @@ local function DrawWatch()
         return
     end
     body:Table("watch", WATCH_COLS, rows, CellValue, {
-        onRowEnter = RowEnter, onRowClick = RowClick, sort = WATCH_SORT,
+        onRowEnter = RowEnter, onRowClick = RowClick, sort = Sort(),
         emptyText = SafeL("HUB_MKT_WATCH_NONE", "Add recipes to the shopping list to track prices."),
     })
 end
@@ -701,6 +728,9 @@ local function DrawOpportunities(intel)
         r.avg, r.avgN = Money(m.mean7d), tonumber(m.mean7d)
         local pct = tonumber(m.pct) or 0
         r.pct, r.pctN = Ink(string.format("%+.0f%%", pct), pct >= 0 and "green" or "red"), pct
+        if m.state and intel.GetStateLabel then
+            r.tip = { { SafeL("HUB_COL_TREND", "Trend"), intel:GetStateLabel(m.state) } }
+        end
     end
     local rows = BufRows(b)
     if not body:Section("opps", SafeL("HUB_MKT_OPPS_TITLE", "Opportunities"), {
@@ -711,7 +741,7 @@ local function DrawOpportunities(intel)
         return
     end
     body:Table("opps", OPP_COLS, rows, CellValue, {
-        onRowEnter = RowEnter, onRowClick = RowClick, sort = Sort(nil, false),
+        onRowEnter = RowEnter, onRowClick = RowClick, sort = Sort(),
         emptyText = SafeL("HUB_MARKET_NO_HISTORY", "Not enough price history yet."),
     })
 end
@@ -738,16 +768,15 @@ function ArtisanNexus:DrawMarketTab(parent)
     local ahOpen = AuctionHouseOpen()
     local scanning = ScanActive()
 
-    -- Fixed header: WN title card (freshness subtitle) + Sync on the title toolbar.
+    -- Fixed header: WN title card (freshness subtitle); title toolbar: sort dropdown, Sync to its left.
     local chrome = ns.UI_BeginTabChromeLayout and ns.UI_BeginTabChromeLayout(mf)
     if chrome then
-        local titleCard = select(1, ns.UI_CreateStandardTabTitleCard(chrome.headerParent, {
+        local titleCard, _, textContainer = ns.UI_CreateStandardTabTitleCard(chrome.headerParent, {
             tabKey = "market",
             titleText = H.AccentTitle(SafeL("HUB_PAGE_MARKET", "Auction House")),
             subtitleText = FreshText(),
             showUnderline = false,
-            textRightInset = H.TitleToolbarReserve({ 180 }),
-        }))
+        })
         titleCard:Show()
         titleCard:EnableMouse(true)
         titleCard:SetScript("OnEnter", FreshTooltip)
@@ -769,8 +798,13 @@ function ArtisanNexus:DrawMarketTab(parent)
             end
             SetButtonUsable(syncBtn, syncLabel, ahOpen and not scanning)
             if scanning then syncBtn:SetAlpha(1) end
-            ns.UI_AnchorTitleToolbarControlRight(titleCard, syncBtn)
         end
+        local sortBtn = ns.UI_CreateCharacterSortDropdown and ns.UI_CreateCharacterSortDropdown(titleCard,
+            SORT_OPTIONS, SortTable(), Refresh, nil)
+        if sortBtn then
+            ns.UI_AnchorTitleToolbarControlRight(titleCard, sortBtn)
+        end
+        H.LayoutToolbar(titleCard, textContainer, { syncBtn }, sortBtn)
         ns.UI_CommitTabFixedHeader(mf, ns.UI_PageStack_Place(chrome, titleCard))
     end
     if scanning then

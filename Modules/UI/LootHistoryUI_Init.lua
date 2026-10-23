@@ -194,6 +194,10 @@ function M:Init()
     if E and E.CRAFT_LOOT_RECORDED then
         owner:RegisterMessage(E.CRAFT_LOOT_RECORDED, RefreshIfVisible)
     end
+    -- Crafted rows and their profit come from the craft ledger (settles ~0.35 s after the result).
+    if E and E.CRAFT_LEDGER_UPDATED then
+        owner:RegisterMessage(E.CRAFT_LEDGER_UPDATED, RefreshIfVisible)
+    end
     if E.THEME_CHANGED then
         owner:RegisterMessage(E.THEME_CHANGED, OnThemeChanged)
     end

@@ -312,14 +312,19 @@ local shiftWatch = {}
 local shiftFrame
 function H.WatchShift(owner, redraw)
     shiftWatch.owner, shiftWatch.redraw = owner, redraw
-    if shiftFrame then return end
-    shiftFrame = CreateFrame("Frame")
-    shiftFrame:RegisterEvent("MODIFIER_STATE_CHANGED")
-    shiftFrame:SetScript("OnEvent", function(_, _, key)
-        if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
-        local o, fn = shiftWatch.owner, shiftWatch.redraw
-        if o and fn and GameTooltip:IsShown() and GameTooltip:IsOwned(o) then
+    if not shiftFrame then
+        shiftFrame = CreateFrame("Frame")
+        shiftFrame:SetScript("OnEvent", function(self, _, key)
+            local o, fn = shiftWatch.owner, shiftWatch.redraw
+            -- Registered only while a watched tooltip is up: drop the event once it is gone.
+            if not (o and fn and GameTooltip:IsShown() and GameTooltip:IsOwned(o)) then
+                shiftWatch.owner, shiftWatch.redraw = nil, nil
+                self:UnregisterEvent("MODIFIER_STATE_CHANGED")
+                return
+            end
+            if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
             fn(o)
-        end
-    end)
+        end)
+    end
+    shiftFrame:RegisterEvent("MODIFIER_STATE_CHANGED")
 end

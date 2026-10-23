@@ -7,8 +7,8 @@
       fixedHeader  UI_BeginTabChromeLayout -> UI_CreateStandardTabTitleCard (subtitle = pools full /
                    cooldowns ready; profession filter flyout on the title toolbar) -> UI_PageStack_Place
                    -> UI_CommitTabFixedHeader
-      Body         WN Professions / PvE layout: ONE column strip ([icon] Name | Current / Max | Full /
-                   ready in), then one WN collapsible header per character (name in class color,
+      Body         WN Professions / PvE layout, no column strip ([icon] Name | Current / Max | Full /
+                   ready in rows): one WN collapsible header per character (name in class color,
                    "N full · N ready" on the right; expand state in profile.hubConcentrationExpanded)
                    with that character's rows under it:
                      profession rows  ConcentrationPlannerService:GetPools() (AN snapshots / Warband
@@ -536,7 +536,7 @@ local function DrawGroup(g)
             gap = 8 }) then
         return
     end
-    body:Table(key, COLS, g.rows, RowValue, { header = false, onRowEnter = RowEnter, onRowClick = RowClick })
+    body:Table(key, COLS, g.rows, RowValue, { onRowEnter = RowEnter, onRowClick = RowClick })
     PaintBars(key, #g.rows)
 end
 
@@ -630,7 +630,6 @@ function ArtisanNexus:DrawConcentrationTab(parent)
         return body.y
     end
 
-    body:Strip("cols", COLS)
     local groups = BuildGroups(pools, cdRows)
     for i = 1, #groups do
         DrawGroup(groups[i])

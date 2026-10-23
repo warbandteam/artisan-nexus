@@ -877,8 +877,8 @@ end
 ---@param text string|nil
 ---@return boolean
 function ns.UI_TextHasColoredMarkup(text)
-    if not text or text == "" then return false end
     if issecretvalue and issecretvalue(text) then return false end
+    if not text or text == "" then return false end
     local pos = 1
     while true do
         local s, e, hex6 = text:find("|c[fF][fF](%x%x%x%x%x%x)", pos)
@@ -920,7 +920,7 @@ function ThemeAPI.FontStringRequiresColoredOutline(fs, text)
         local ok, t = pcall(fs.GetText, fs)
         if ok then text = t end
     end
-    if text and text ~= "" and not (issecretvalue and issecretvalue(text)) then
+    if text and not (issecretvalue and issecretvalue(text)) and text ~= "" then
         if ns.UI_TextHasColoredMarkup(text) then
             return true
         end
@@ -969,7 +969,8 @@ end
 function ThemeAPI.RefreshRoleTextColors()
     for i = #TEXT_COLOR_REGISTRY, 1, -1 do
         local fs = TEXT_COLOR_REGISTRY[i]
-        if not fs or not fs.SetTextColor then
+        if not fs or not fs.SetTextColor
+            or (ns.UI_IsDiscardedRegion and ns.UI_IsDiscardedRegion(fs)) then
             table.remove(TEXT_COLOR_REGISTRY, i)
         elseif fs._wnTextRole then
             ns.UI_SetTextColorRole(fs, fs._wnTextRole, fs._wnTextRoleAlpha)

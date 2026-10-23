@@ -534,11 +534,12 @@ local function CollectTargets(force)
             and (not profession or rs:GetProfession(spellID) == profession) then
             local sch = rs:GetSchematic(spellID)
             if sch and sch.hasCraftingOperationInfo == true and type(sch.reagents) == "table" and #sch.reagents > 0 then
-                local okI, info = pcall(C_TradeSkillUI.GetRecipeInfo, spellID)
-                if okI and type(info) == "table" and info.learned and not info.isGatheringRecipe
-                    and not info.isSalvageRecipe and not info.isRecraft and not info.isDummyRecipe then
-                    local prev = guid and CraftOpsService:GetSnapshot(spellID, guid)
-                    if force or not prev or prev.build ~= build or (now - (prev.at or 0)) >= MIN_REFRESH_SEC then
+                -- Freshness first: a recent snapshot skips the GetRecipeInfo call entirely.
+                local prev = guid and CraftOpsService:GetSnapshot(spellID, guid)
+                if force or not prev or prev.build ~= build or (now - (prev.at or 0)) >= MIN_REFRESH_SEC then
+                    local okI, info = pcall(C_TradeSkillUI.GetRecipeInfo, spellID)
+                    if okI and type(info) == "table" and info.learned and not info.isGatheringRecipe
+                        and not info.isSalvageRecipe and not info.isRecraft and not info.isDummyRecipe then
                         out[#out + 1] = spellID
                     end
                 end

@@ -54,6 +54,8 @@ local SessionLootService = {
     gatheringTotals = {},
     ---@type table[] { itemID = number, qty = number, t = number, spellID = number|nil, profession = string|nil }
     craftedEvents = {},
+    --- Start of the crafted session (time()): the crafted tab lists CraftLedgerService rows since then.
+    craftedSince = time(),
     ---@type table<number, number> crafted output itemID -> qty this session
     craftedTotals = {},
     --- Reference grid glows: [tabKey][itemID] = expireAt (GetTime). Multiple reagents can glow at once.
@@ -513,6 +515,7 @@ function SessionLootService:ResetSession()
     wipe(self.gatheringTotals)
     wipe(self.craftedEvents)
     wipe(self.craftedTotals)
+    self.craftedSince = time()
     for i = 1, #GATHER_KEYS do
         self.gatheringTotals[GATHER_KEYS[i]] = {}
     end
@@ -538,6 +541,7 @@ function SessionLootService:ResetSessionForTab(tabKey)
     elseif tabKey == "crafted" then
         wipe(self.craftedEvents)
         wipe(self.craftedTotals)
+        self.craftedSince = time()
         if self.referenceGlow then
             self.referenceGlow["crafted"] = nil
         end

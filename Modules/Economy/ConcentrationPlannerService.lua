@@ -174,7 +174,11 @@ end
 ---@return table|nil { profession, pool, horizonDays, rows = { {spellID, itemID, crafts, concUsed, gpc,
 ---   expectedProfit, demandCapped, demandPerDay, demandConfidence} }, unallocated, shadowPrice, builtAt }
 function ConcentrationPlannerService:GetPlan(profession)
-    if not self._plans[profession] then
+    -- Only the first read builds: a finished build that has no plan for `profession` (no pool, not in
+    -- the catalog) would otherwise rebuild on every read, and every build ends in
+    -- CONCENTRATION_PLAN_UPDATED -> Hub / sidecar repaint -> read (repaint loop). Data messages
+    -- (Enable) rebuild after that.
+    if not self._plans[profession] and not self._builtAt then
         self:ScheduleRebuild()
     end
     return self._plans[profession]
@@ -270,6 +274,7 @@ function ConcentrationPlannerService:Rebuild()
         end
     end
     if #jobs == 0 then
+        self._builtAt = time()
         return
     end
 
@@ -313,6 +318,7 @@ function ConcentrationPlannerService:Rebuild()
             C_Timer.After(0, step)
         else
             ConcentrationPlannerService._building = false
+            ConcentrationPlannerService._builtAt = time()
             local EV = ns.Constants.EVENTS
             if ns.ArtisanNexus and ns.ArtisanNexus.SendMessage and EV and EV.CONCENTRATION_PLAN_UPDATED then
                 ns.ArtisanNexus:SendMessage(EV.CONCENTRATION_PLAN_UPDATED)

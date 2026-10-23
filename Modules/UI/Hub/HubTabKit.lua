@@ -12,7 +12,8 @@
       H.ShowTruncatedCells(row, n)             tooltip with the full text of truncated cells (row hover
                                                fallback when the table has no tooltip of its own)
       H.NewTabBody(tabKey, expandProfileKey)   body kit: WN stat cards, collapsible section headers,
-                                               TableKit tables (sortable headers), dim lines and the WN tab
+                                               TableKit rows (no column strip: sort / filters live on the
+                                               title toolbar), dim lines and the WN tab
                                                empty-state card, cached per tab and re-parented into the
                                                scrollChild on every paint (StatisticsUI / CurrencyUI pattern)
       H.ToolbarButton(titleCard, text, onClick, tooltip, onEnter)
@@ -39,7 +40,9 @@ local TABLE = ns.UI_LAYOUT.TABLE
 local E = ns.Constants.EVENTS
 local SafeL = H.SafeL
 
-local COLLAPSE_H = 36
+--- WN section header height (SharedWidgets_Layout SECTION_COLLAPSE_HEADER_HEIGHT); shared by every Hub page.
+local COLLAPSE_H = ns.UI_LAYOUT.SECTION_COLLAPSE_HEADER_HEIGHT or 36
+H.COLLAPSE_H = COLLAPSE_H
 --- Hub pages breathe more than WN's PAGE_STACK.SECTION_GAP (12); WN's own layout table stays untouched.
 local HUB_SECTION_GAP = 22
 H.SECTION_GAP = HUB_SECTION_GAP
@@ -176,6 +179,31 @@ local function Profile()
 end
 H.Profile = Profile
 
+-- ─────────────────────────────────────────────────────────────────
+-- Pooled section headers (WN SectionPool: HeaderOpts + Remember, as CurrencyUI / ReputationUI do).
+-- A cached header is rebound in place while its chrome signature holds; a classic <-> custom theme
+-- switch gets a fresh header (the stale one is discarded), and a key placed twice in one paint gets
+-- its own frame instead of moving the first one.
+-- ─────────────────────────────────────────────────────────────────
+
+--- Start a paint for `owner` (any table that keeps one set of headers): hides last paint's headers.
+function H.HeaderPassBegin(owner)
+    ns.UI_SectionPool.BeginPass(owner)
+end
+
+--- WN collapsible header for `key` of `owner`. `icon` nil = no category icon. Returns the header,
+--- isNew (true when the frame was just created: add per-frame decorations / hooks) and the category
+--- icon texture.
+function H.PooledHeader(owner, key, parent, title, scope, expanded, onToggle, icon, isAtlas, visualOpts)
+    local SP = ns.UI_SectionPool
+    local header, _, catIcon = ns.UI_CreateCollapsibleHeader(parent, title, scope, expanded, onToggle, icon, isAtlas,
+        nil, icon == nil, SP.HeaderOpts(owner, key, visualOpts))
+    SP.Remember(owner, key, header)
+    local isNew = not header._anPooledHeader
+    header._anPooledHeader = true
+    return header, isNew, catIcon
+end
+
 --- Tab title in the theme accent (WN CurrencyUI / ProfessionsUI_DrawTab title cards).
 function H.AccentTitle(text)
     local c = ns.UI_COLORS and ns.UI_COLORS.accent
@@ -198,7 +226,7 @@ TabBody.__index = TabBody
 function H.NewTabBody(tabKey, expandKey)
     return setmetatable({
         tab = tabKey, expandKey = expandKey,
-        headers = {}, strips = {}, pools = {}, lines = {}, defs = {}, cards = {},
+        strips = {}, pools = {}, lines = {}, defs = {}, cards = {},
         sorts = {}, sorted = {}, sortIndex = {}, culls = {},
     }, TabBody)
 end
@@ -223,12 +251,7 @@ function TabBody:Begin(parent)
     end
     -- Blocks not placed again this paint (a character that left a grouped page, a line whose
     -- condition cleared) stay hidden; Section / Table / Line show what they place.
-    for _, header in pairs(self.headers) do
-        header:Hide()
-    end
-    for _, strip in pairs(self.strips) do
-        strip:Hide()
-    end
+    H.HeaderPassBegin(self)
     for _, holder in pairs(self.lines) do
         holder:Hide()
     end
@@ -284,19 +307,13 @@ function TabBody:Section(key, title, opts)
         self.y = self.y + ((opts and opts.gap) or self.sectionGap)
     end
     local expanded = self:ExpandedState()[key] ~= false
-    local header = self.headers[key]
-    if not header then
-        header = ns.UI_CreateCollapsibleHeader(self.parent, title, self.tab .. ":" .. key, expanded, HeaderOnToggle,
-            nil, nil, nil, true)
-        header._anBody, header._anKey = self, key
-        -- Factory:ApplyHighlight owns OnEnter / OnLeave; the tooltip rides on hooks.
+    local header, isNew = H.PooledHeader(self, key, self.parent, title, self.tab .. ":" .. key, expanded, HeaderOnToggle)
+    if isNew then
+        -- The collapsible header's own OnEnter / OnLeave stay; the tooltip rides on hooks.
         header:HookScript("OnEnter", HeaderOnEnter)
         header:HookScript("OnLeave", HeaderOnLeave)
-        self.headers[key] = header
-    else
-        header:SetParent(self.parent)
-        ns.UI_RebindCollapsibleHeader(header, title, expanded, HeaderOnToggle)
     end
+    header._anBody, header._anKey = self, key
     header._anTitle = title
     header._anTooltip = opts and opts.tooltip or nil
     local count = opts and opts.count
@@ -353,25 +370,14 @@ local function RowOnLeave(row)
     if d and d.onRowLeave then d.onRowLeave(row, row._anData) else GameTooltip:Hide() end
 end
 
---- Header click (WN TableKit onSortClick): remember the column / direction, repaint the tab.
-local function StripOnSortClick(colKey, ascending, strip)
-    local body, key = strip._anBody, strip._anKey
-    local st = body and body.sorts[key]
-    if not st then return end
-    st.key, st.asc = colKey, ascending and true or false
-    H.Refresh(body.tab)
-end
-
---- Rows of table `key` in the remembered header order (copied; the caller's list is not touched).
---- sortOpts: { key = default column key, asc = default direction, value = fn(row, colKey) ->
---- number | string | nil }. nil values sort last; ties keep the caller's order.
-function TabBody:SortedRows(key, rows, sortOpts, stateKey)
-    stateKey = stateKey or key
-    local st = self.sorts[stateKey]
-    if not st then
-        st = { key = sortOpts.key, asc = sortOpts.asc == true }
-        self.sorts[stateKey] = st
-    end
+--- Rows of table `key` in sortOpts order (copied; the caller's list is not touched).
+--- sortOpts: { key = column key (nil = caller's order), asc = direction, value = fn(row, colKey) ->
+--- number | string | nil }; pages set it from their title-toolbar sort dropdown. nil values sort
+--- last; ties keep the caller's order.
+function TabBody:SortedRows(key, rows, sortOpts)
+    local st = self.sorts[key] or {}
+    self.sorts[key] = st
+    st.key, st.asc = sortOpts.key, sortOpts.asc == true
     local out = self.sorted[key] or {}
     self.sorted[key] = out
     local idx = self.sortIndex
@@ -399,42 +405,21 @@ function TabBody:SortedRows(key, rows, sortOpts, stateKey)
     return out, st
 end
 
---- WN TableKit table (header strip + pooled rows) at the cursor; returns the painted row list
---- (sorted copy when opts.sort is set).
---- opts: onRowEnter(row, data) (default: full text of truncated cells), onRowLeave,
---- onRowClick(row, data, button), emptyText, sort (TabBody:SortedRows; columns with
---- sortable = true, defaultAscending = false for "high first"), header = false (rows only, under a
---- shared TabBody:Strip), sortFrom (key of that shared strip: its sort state orders these rows).
+--- Column geometry of table `key` ({ _widths, _offsets }; never shown: Hub pages draw no column
+--- strip, the header card is followed directly by the groups) and its row pool.
 function TabBody:EnsureStrip(key)
     local strip = self.strips[key]
     if not strip then
-        strip = TK.CreateHeaderStrip(self.parent, { mode = "text", bottomRule = true, onSortClick = StripOnSortClick })
-        strip._widths, strip._offsets = {}, {}
-        strip._anBody, strip._anKey = self, key
+        strip = { _widths = {}, _offsets = {} }
         self.strips[key] = strip
         self.pools[key] = TK.CreateRowPool(TABLE.ROW_H.standard)
     end
     return strip
 end
 
---- A column strip alone at the cursor (one strip shared by grouped tables painted with
---- opts.header = false, WN Professions layout). sortOpts (optional, TabBody:SortedRows shape): the
---- strip's sortable headers drive the sort of every table drawn with opts.sortFrom = key.
-function TabBody:Strip(key, cols, sortOpts)
-    local strip = self:EnsureStrip(key)
-    local st = self.sorts[key]
-    if sortOpts and not st then
-        st = { key = sortOpts.key, asc = sortOpts.asc == true }
-        self.sorts[key] = st
-    end
-    TK.ResolveWidths(cols, self.width, strip._widths, strip._offsets)
-    self:PlaceWide(strip)
-    strip:SetWidth(self.width)
-    strip:SetColumns(cols, strip._widths, strip._offsets, #cols)
-    strip:SetSort(st and st.key, st and st.asc)
-    self.y = self.y + strip:GetStripHeight()
-end
-
+--- WN TableKit rows at the cursor; returns the painted row list (sorted copy when opts.sort is set).
+--- opts: onRowEnter(row, data) (default: full text of truncated cells), onRowLeave,
+--- onRowClick(row, data, button), emptyText, sort (TabBody:SortedRows).
 function TabBody:Table(key, cols, rows, valueFn, opts)
     local strip = self:EnsureStrip(key)
     local def = self.defs[key] or {}
@@ -443,21 +428,13 @@ function TabBody:Table(key, cols, rows, valueFn, opts)
     def.onRowLeave = opts and opts.onRowLeave
     def.onRowClick = opts and opts.onRowClick
     def.n = #cols
-    local sortState
     if opts and opts.sort then
-        rows, sortState = self:SortedRows(key, rows, opts.sort, opts.sortFrom)
+        rows = self:SortedRows(key, rows, opts.sort)
     end
     local pool = self.pools[key]
     local n = #cols
     local width = self.width
     TK.ResolveWidths(cols, width, strip._widths, strip._offsets)
-    if not (opts and opts.header == false) then
-        self:PlaceWide(strip)
-        strip:SetWidth(width)
-        strip:SetColumns(cols, strip._widths, strip._offsets, n)
-        strip:SetSort(sortState and sortState.key, sortState and sortState.asc)
-        self.y = self.y + strip:GetStripHeight()
-    end
     local rh = pool.height
     self.culls[key] = self.culls[key] or {}
     local cull = H.CullBegin(self.culls[key], self.parent)

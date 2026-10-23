@@ -134,12 +134,6 @@ local function ProcessChatLoot(msg, lineID)
     end
 end
 
---- True while a fishing catch can still be attributed without a window token.
----@return boolean
-function FishingLootService:IsFishingContextActive()
-    return IsFishingChannelContext()
-end
-
 local eventFrame = CreateFrame("Frame")
 
 function FishingLootService:Enable()

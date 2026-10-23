@@ -72,10 +72,10 @@ local TAB = "crafting"
 local COL_NAME_MIN, COL_MONEY, COL_PCT = H.COL.NAME_MIN, H.COL.MONEY, H.COL.PCT
 --- Profession group header height (WN SECTION_COLLAPSE_HEADER_HEIGHT) and header icon size (WN
 --- Professions section icons: 24).
-local GROUP_H, GROUP_ICON = 36, 24
+local GROUP_H, GROUP_ICON = H.COLLAPSE_H, 24
 
 --- Tab state (session): pinned spellID, header sort override.
-C.state = { pinned = nil, sortKey = nil, sortAsc = nil }
+C.state = { pinned = nil, sortKey = nil, sortAsc = nil, _pinOpened = nil }
 local state = C.state
 
 -- ─────────────────────────────────────────────────────────────────
@@ -367,14 +367,60 @@ function C.CraftStatus(r)
     return rs:GetCraftStatus(r.spellID, r.knownByMe == true)
 end
 
+--- spellID -> craft count on the shopping list / remaining in the queue, rebuilt once per paint
+--- frame (SHOPPING_LIST_UPDATED / CRAFT_QUEUE_UPDATED repaint this tab).
+local marks = { stamp = nil, shop = {}, queue = {} }
+
+local function ListMarks()
+    local now = GetTime()
+    if marks.stamp == now then
+        return marks
+    end
+    marks.stamp = now
+    wipe(marks.shop)
+    wipe(marks.queue)
+    local shop = ns.ShoppingListService
+    local entries = shop and shop.GetEntries and shop:GetEntries() or {}
+    for i = 1, #entries do
+        local e = entries[i]
+        if e.spellID then
+            marks.shop[e.spellID] = (marks.shop[e.spellID] or 0) + (e.count or 1)
+        end
+    end
+    local qs = ns.CraftingQueueService
+    local queue = qs and qs.GetQueue and qs:GetQueue() or {}
+    for i = 1, #queue do
+        local e = queue[i]
+        local left = e.remaining or math.max(0, (e.target or 1) - (e.progress or 0))
+        if e.spellID and left > 0 then
+            marks.queue[e.spellID] = (marks.queue[e.spellID] or 0) + left
+        end
+    end
+    return marks
+end
+
+--- " [List x2] [Queue x1]" after the name, so adding from this page shows on the row itself.
+local function MarkSuffix(spellID)
+    local m = ListMarks()
+    local out = ""
+    if m.shop[spellID] then
+        out = out .. " " .. Hex(string.format(SafeL("HUB_CRAFT_MARK_LIST_FMT", "[List x%d]"), m.shop[spellID]), "accent")
+    end
+    if m.queue[spellID] then
+        out = out .. " " .. Dim(string.format(SafeL("HUB_CRAFT_MARK_QUEUE_FMT", "[Queue x%d]"), m.queue[spellID]))
+    end
+    return out
+end
+
 local function RecipeCell(r)
     local name = RecipeRowName(r)
+    local suffix = MarkSuffix(r.spellID)
     if r._anPinned then
-        return Hex(name, "accent")
+        return Hex(name, "accent") .. suffix
     end
     local status = C.CraftStatus(r)
     local ink = status and STATUS_INK[status]
-    return ink and Hex(name, ink) or name
+    return (ink and Hex(name, ink) or name) .. suffix
 end
 
 local function CellValue(col, r)
@@ -671,7 +717,6 @@ local function Results(parent)
         cache.strip = TK.CreateHeaderStrip(rc, { mode = "text", bottomRule = true, onSortClick = OnSortClick })
         cache.pool = TK.CreateRowPool(TABLE.ROW_H.standard)
         cache.widths, cache.offsets = {}, {}
-        cache.headers = {}
     end
     return rc
 end
@@ -753,33 +798,27 @@ local function ProfessionIcon(prof)
     return (prof and icons and icons[prof]) or "Interface\\Icons\\Trade_Engineering"
 end
 
-local function HideHeaders()
-    for _, header in pairs(cache.headers) do
-        header:Hide()
-    end
-end
-
---- WN collapsible header for group `g` at y (cached per profession); returns expanded.
+--- WN collapsible header for group `g` at y (pooled per profession, H.PooledHeader); returns expanded.
 local function GroupHeader(rc, y, width, g)
-    local expanded = g.pinned or ExpandedState()[g.key] ~= false
-    local header = cache.headers[g.key]
-    if not header then
-        local _, _, hdrIcon
-        header, _, hdrIcon = ns.UI_CreateCollapsibleHeader(rc, g.label, TAB .. ":" .. g.key, expanded, GroupOnToggle,
-            ProfessionIcon(g.prof), false)
+    -- A newly pinned recipe opens its group once; after that the header toggles normally (forcing it
+    -- open on every paint made a click on the pinned group do nothing).
+    if g.pinned and state._pinOpened ~= state.pinned then
+        state._pinOpened = state.pinned
+        ExpandedState()[g.key] = true
+    end
+    local expanded = ExpandedState()[g.key] ~= false
+    local header, isNew, hdrIcon = H.PooledHeader(cache, g.key, rc, g.label, TAB .. ":" .. g.key, expanded,
+        GroupOnToggle, ProfessionIcon(g.prof), false)
+    if isNew then
         if hdrIcon then
             hdrIcon:SetSize(GROUP_ICON, GROUP_ICON)
         end
-        header._anGroupKey = g.key
         -- WN Professions count badge: mainNavTabCount font, right-aligned (ProfessionsUI_DrawTab.lua).
         header._anCount = FontManager:CreateFontString(header, FontManager:GetFontRole("mainNavTabCount"), "OVERLAY")
         header._anCount:SetJustifyH("RIGHT")
         header._anCount:SetPoint("RIGHT", header, "RIGHT", -14, 0)
-        cache.headers[g.key] = header
-    else
-        header:SetParent(rc)
-        ns.UI_RebindCollapsibleHeader(header, g.label, expanded, GroupOnToggle)
     end
+    header._anGroupKey = g.key
     local n = CountProfitable(g.rows)
     header._anCount:SetText(string.format(SafeL("HUB_CRAFT_GROUP_COUNT_FMT", "%d profitable"), n))
     ns.UI_SetTextColorRole(header._anCount, n > 0 and "Muted" or "Dim")
@@ -840,7 +879,7 @@ end
 local function DrawResults(rc, width, rows)
     HideNotices()
     HideEmptyCards(rc)
-    HideHeaders()
+    H.HeaderPassBegin(cache)
     cache.strip:Hide()
     TK.ReleaseRowsFrom(cache.pool, 1)
     if cache.cull then
@@ -899,7 +938,7 @@ end
 -- ─────────────────────────────────────────────────────────────────
 
 local function Unpin()
-    state.pinned = nil
+    state.pinned, state._pinOpened = nil, nil
     if ns.PriceHistoryUI and ns.PriceHistoryUI.HidePopup then
         ns.PriceHistoryUI:HidePopup()
     end

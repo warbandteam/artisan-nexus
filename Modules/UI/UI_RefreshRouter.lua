@@ -63,8 +63,9 @@ function ns.UI_RefreshRouter.RegisterMainShellListeners(ctx)
         { "CRAFT_OPS_UPDATED", ANY },
         { "VENDOR_PRICES_UPDATED", ANY },
         { "ECONOMY_CONFIG_CHANGED", ANY },
-        { "SHOPPING_LIST_UPDATED", { plan = true, settings = true } },
-        { "CRAFT_QUEUE_UPDATED", { plan = true } },
+        -- Crafting marks recipes that are on the list / in the queue.
+        { "SHOPPING_LIST_UPDATED", { plan = true, crafting = true, settings = true } },
+        { "CRAFT_QUEUE_UPDATED", { plan = true, crafting = true } },
         { "CRAFTING_ORDERS_UPDATED", { orders = true, overview = true } },
         { "MARKET_INTEL_UPDATED", { market = true, overview = true } },
         { "OWNED_AUCTIONS_UPDATED", { market = true, overview = true } },
@@ -75,18 +76,20 @@ function ns.UI_RefreshRouter.RegisterMainShellListeners(ctx)
         { "CONCENTRATION_PLAN_UPDATED", { concentration = true, crafting = true, plan = true, overview = true, settings = true } },
         -- Warband Nexus alt inventories / concentration (bridge already coalesces 0.5s).
         { "WN_DATA_UPDATED", { plan = true, concentration = true, overview = true } },
-        -- Crafting row names are inked by craft status (reagents in bags / bank / warband bank).
-        { "BAG_STOCK_UPDATED", { crafting = true } },
+        -- Crafting row names are inked by craft status (reagents in bags / bank / warband bank); the
+        -- shopping list's have / buy counts follow purchases, mail, crafts and auctions posted.
+        { "BAG_STOCK_UPDATED", { crafting = true, plan = true } },
     }
     for i = 1, #AN_TAB_REFRESH do
         local msg = Constants.EVENTS[AN_TAB_REFRESH[i][1]]
         local tabs = AN_TAB_REFRESH[i][2]
         if msg then
             WarbandNexus.RegisterMessage(UIEvents, msg, function()
+                -- Hidden: only mark dirty; the OnShow repaint (PopulateContent) recounts the badges.
+                if HiddenOrMissing() then return end
                 if WarbandNexus.UpdateTabCountBadges then
                     WarbandNexus:UpdateTabCountBadges()
                 end
-                if HiddenOrMissing() then return end
                 if tabs == ANY or tabs[f.currentTab] then
                     SchedulePopulateContent(true)
                 end

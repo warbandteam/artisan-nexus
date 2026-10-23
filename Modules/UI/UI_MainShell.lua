@@ -1549,7 +1549,16 @@ function ns.UIShell.CreateMainWindow(self)
             and ns.UI_IsMainFrameResizeSession
             and ns.UI_IsMainFrameResizeSession(f)
         if f._virtualScrollUpdate and not skipVirtualOnScroll then
-            f._virtualScrollUpdate()
+            -- Scroll-only paint: VirtualListModule may keep reused rows painted in this content
+            -- generation instead of repopulating every visible row per wheel step / drag frame.
+            -- The flag must not survive an error (it would turn later data repaints into scroll paints).
+            f._vlmScrollPaint = true
+            local ok, err = pcall(f._virtualScrollUpdate)
+            f._vlmScrollPaint = nil
+            if not ok then
+                local handler = geterrorhandler and geterrorhandler()
+                if handler then handler(err) end
+            end
         end
     end)
 
@@ -1909,9 +1918,6 @@ function ns.UIShell.CreateMainWindow(self)
         local metaVer = nil
         if C_AddOns and C_AddOns.GetAddOnMetadata then
             metaVer = C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")
-        end
-        if (not metaVer or metaVer == "") and GetAddOnMetadata then
-            metaVer = GetAddOnMetadata(ADDON_NAME, "Version")
         end
         if not metaVer or metaVer == "" then
             metaVer = "?"

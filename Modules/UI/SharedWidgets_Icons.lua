@@ -246,7 +246,7 @@ local function ApplyIconTexture(tex, texture, isAtlas)
         if not success then
             if IsDebugModeEnabled and IsDebugModeEnabled() then
                 local texName = texture
-                if texName ~= nil and not (issecretvalue and issecretvalue(texName)) then
+                if not (issecretvalue and issecretvalue(texName)) and texName ~= nil then
                     DebugPrint("|cffff0000[WN CreateIcon]|r Atlas '" .. tostring(texName) .. "' failed, using fallback")
                 end
             end
@@ -584,8 +584,8 @@ end
 local KEYSTONE_CATEGORY_ICON = "Interface\\Icons\\INV_Misc_Key_03"
 
 local function ItemLinkLooksKeystone(link)
-    if not link or link == "" then return false end
     if issecretvalue and issecretvalue(link) then return false end
+    if not link or link == "" then return false end
     return link:find("|Hkeystone:", 1, true) ~= nil
 end
 

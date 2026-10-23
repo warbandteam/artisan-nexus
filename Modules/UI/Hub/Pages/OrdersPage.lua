@@ -4,15 +4,15 @@
     WN tab pattern (LedgerPage.lua / WN CurrencyUI collapsible sections + TableKit rows):
     ArtisanNexus:DrawOrdersTab(scrollChild) returns the body height; UI_TabHost.lua dispatches it.
 
-      fixedHeader  WN title card (subtitle = time of the last scan) + title toolbar: profession filter
-                   flyout, Refresh
+      fixedHeader  WN title card (subtitle = time of the last scan) + title toolbar: sort dropdown
+                   (profile.hubOrdersSort), profession filter flyout, Refresh
                    (CraftingOrdersService:RequestAll(true); works while the crafter order page is open,
                    the tooltip carries the time of the last scan from CraftingOrdersService:GetSummary().at)
-      Body         WN Professions layout: ONE sortable column strip ([icon] Item | Conc | Net | Expires),
-                   then one WN collapsible header per order type that has orders (Patron / Public /
+      Body         WN Professions layout, no column strip ([icon] Item | Conc | Net | Expires rows):
+                   one WN collapsible header per order type that has orders (Patron / Public /
                    Personal / Guild; right = order count and best net; the type's meaning is the header
                    tooltip) with its rows from CraftingOrdersService:GetEvaluatedOrders(orderType),
-                   sorted by the strip (default net). Tip, rewards, your reagents, concentration cost,
+                   sorted by the sort dropdown (default net). Tip, rewards, your reagents, concentration cost,
                    customer, minimum quality and flag labels (GetFlagLabel) are in the row tooltip; rows
                    with non-informational flags are dimmed and marked (!).
       Empty        no order at all -> one WN tab empty-state card
@@ -116,17 +116,34 @@ local body = H.NewTabBody("orders", "hubOrdersExpanded")
 -- ─────────────────────────────────────────────────────────────────
 
 local function NumCol(key, label, width, tooltip)
-    return { key = key, label = label, width = width, align = "RIGHT", sortable = true, defaultAscending = false,
-        tooltip = tooltip }
+    return { key = key, label = label, width = width, align = "RIGHT", tooltip = tooltip }
 end
 
 local ORDER_COLS = {
     H.IconColumn(),
-    { key = "item", label = SafeL("HUB_COL_ITEM", "Item"), flex = 1, min = 100, sortable = true },
+    { key = "item", label = SafeL("HUB_COL_ITEM", "Item"), flex = 1, min = 100 },
     NumCol("conc", SafeL("HUB_COL_CONC_SHORT", "Conc"), 56),
     NumCol("net", SafeL("HUB_COL_NET", "Net"), H.COL.MONEY_WIDE, SafeL("HUB_PAGE_ORDERS_DESC", "Net value: rewards minus what you supply.")),
-    { key = "expires", label = SafeL("HUB_COL_EXPIRES", "Expires"), width = 72, align = "RIGHT", sortable = true },
+    { key = "expires", label = SafeL("HUB_COL_EXPIRES", "Expires"), width = 72, align = "RIGHT" },
 }
+
+--- Sort modes of the title-toolbar sort dropdown (CraftingPage.lua pattern).
+local SORT_OPTIONS = {
+    { key = "net", label = SafeL("HUB_SORT_NET", "Net (highest)"), asc = false },
+    { key = "item", label = SafeL("HUB_SORT_NAME", "Name (A-Z)"), asc = true },
+    { key = "conc", label = SafeL("HUB_SORT_CONC", "Concentration (lowest)"), asc = true },
+    { key = "expires", label = SafeL("HUB_SORT_EXPIRES", "Expires (soonest)"), asc = true },
+}
+
+--- profile.hubOrdersSort = { key = <SORT_OPTIONS key> } (the dropdown writes .key).
+local function SortTable()
+    local p = ns.db and ns.db.profile
+    if not p then return { key = "net" } end
+    if type(p.hubOrdersSort) ~= "table" then
+        p.hubOrdersSort = { key = "net" }
+    end
+    return p.hubOrdersSort
+end
 
 local ORDER_SORT = {
     key = "net", asc = false,
@@ -290,7 +307,8 @@ end
 function ArtisanNexus:DrawOrdersTab(parent)
     local mf = body:Begin(parent)
 
-    -- Fixed header: WN title card + title toolbar (Refresh right-most, profession filter left of it).
+    -- Fixed header: WN title card + title toolbar (sort dropdown right-most, Refresh and the profession
+    -- filter chained to its left).
     local chrome = ns.UI_BeginTabChromeLayout and ns.UI_BeginTabChromeLayout(mf)
     if chrome then
         local titleCard = select(1, ns.UI_CreateStandardTabTitleCard(chrome.headerParent, {
@@ -298,13 +316,18 @@ function ArtisanNexus:DrawOrdersTab(parent)
             titleText = H.AccentTitle(SafeL("HUB_TAB_ORDERS", "Crafting orders")),
             subtitleText = LastScanText(),
             showUnderline = false,
-            textRightInset = H.TitleToolbarReserve({ 90, 180 }),
+            textRightInset = H.TitleToolbarReserve({ 90, 90, 180 }),
         }))
         titleCard:Show()
+        local sortBtn = ns.UI_CreateCharacterSortDropdown and ns.UI_CreateCharacterSortDropdown(titleCard,
+            SORT_OPTIONS, SortTable(), function() H.Refresh("orders") end, nil)
+        if sortBtn then
+            ns.UI_AnchorTitleToolbarControlRight(titleCard, sortBtn)
+        end
         H.LayoutToolbar(titleCard, nil, {
             H.ToolbarButton(titleCard, SafeL("HUB_ORDERS_REFRESH", "Refresh"), RefreshOnClick, nil, RefreshOnEnter),
             H.ProfessionFilterButton(titleCard, "orders"),
-        })
+        }, sortBtn)
         ns.UI_CommitTabFixedHeader(mf, ns.UI_PageStack_Place(chrome, titleCard))
     end
 
@@ -339,7 +362,13 @@ function ArtisanNexus:DrawOrdersTab(parent)
         return body.y
     end
 
-    body:Strip("cols", ORDER_COLS, ORDER_SORT)
+    local sortKey = SortTable().key
+    ORDER_SORT.key, ORDER_SORT.asc = "net", false
+    for i = 1, #SORT_OPTIONS do
+        if SORT_OPTIONS[i].key == sortKey then
+            ORDER_SORT.key, ORDER_SORT.asc = sortKey, SORT_OPTIONS[i].asc
+        end
+    end
     for i = 1, #defs do
         local def = defs[i]
         local rows = rowsByKey[def.key]
@@ -350,7 +379,7 @@ function ArtisanNexus:DrawOrdersTab(parent)
             local tooltip = def.tooltipKey and SafeL(def.tooltipKey, def.tooltipFb) or nil
             if body:Section(def.key, SafeL(def.titleKey, def.titleFb), { tooltip = tooltip, count = count, gap = 8 }) then
                 body:Table(def.key, ORDER_COLS, rows, OrderValue, {
-                    header = false, sortFrom = "cols", sort = ORDER_SORT,
+                    sort = ORDER_SORT,
                     onRowEnter = OrderRowEnter, onRowClick = OrderRowClick,
                 })
             end

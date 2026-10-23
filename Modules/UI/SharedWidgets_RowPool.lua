@@ -359,6 +359,24 @@ function ns.UI_RegisterTabViewportResize(tabId, profile)
         end,
     })
 end
+--- Classic theme: dimmed copy of a row tier color, one cached table per tier (2026-10-22: was a new
+--- table per row per paint). The cache is re-filled whenever the source tier color changes (theme
+--- refresh swaps or rewrites COLORS), so no separate theme hook is needed.
+local classicDimmedRowColors = {}
+local function GetClassicDimmedRowColor(tier, src)
+    local c = classicDimmedRowColors[tier]
+    if not c then
+        c = {}
+        classicDimmedRowColors[tier] = c
+    end
+    local a = src[4] or 1
+    if c.src ~= src or c.r ~= src[1] or c.g ~= src[2] or c.b ~= src[3] or c.a ~= a then
+        c.src, c.r, c.g, c.b, c.a = src, src[1], src[2], src[3], a
+        c[1], c[2], c[3], c[4] = src[1], src[2], src[3], a * 0.22
+    end
+    return c
+end
+
 --- Apply alternating row background color to any frame.
 --- Central helper that replaces inline ROW_COLOR_EVEN/ODD logic across all tabs.
 --- Works with both newly created rows and pooled/reused rows.
@@ -367,7 +385,7 @@ function ns.UI.Factory:ApplyRowBackground(row, rowIndex)
     local tier = (rowIndex % 2 == 0) and "rowEven" or "rowOdd"
     local bgColor = ResolveSurfaceTierColor(tier)
     if ns.UI_IsClassicMode and ns.UI_IsClassicMode() then
-        bgColor = { bgColor[1], bgColor[2], bgColor[3], (bgColor[4] or 1) * 0.22 }
+        bgColor = GetClassicDimmedRowColor(tier, bgColor)
     end
     if not row.bg then
         row.bg = row:CreateTexture(nil, "BACKGROUND")
@@ -504,7 +522,6 @@ function ns.UI.Factory:CreateSectionHeader(parent, yOffset, isCollapsed, titleSt
         rightLabel:SetJustifyH("RIGHT")
         rightLabel:SetText(rightStr)
         ns.UI_SetTextColorRole(rightLabel, "Bright")
-        rightLabel:SetTextColor(1, 1, 1, 1)
         title:SetPoint("RIGHT", rightLabel, "LEFT", -6, 0)
     end
 
@@ -710,9 +727,10 @@ local COLLECTION_ROW_META_EARNER_W = 116
 local COLLECTION_ROW_META_DATE_W = 92
 local COLLECTION_ROW_META_GAP = 12
 
+-- Role ink, not raw white: a per-populate SetTextColor(1,1,1) re-whitened light rows (2026-10-22).
 local function ApplyCollectionRowMetaLabelChrome(fs)
     if not fs then return end
-    fs:SetTextColor(1, 1, 1, 1)
+    ns.UI_SetTextColorRole(fs, "Bright")
 end
 
 local function LayoutCollectionListRowMetaColumns(row, pad)

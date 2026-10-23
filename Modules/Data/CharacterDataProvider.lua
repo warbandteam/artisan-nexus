@@ -731,8 +731,11 @@ function CharacterData:CaptureItems()
     end
     local set = TrackedItemSet()
     local row = store.chars[guid] or {}
-    local BI = Enum.BagIndex
-    row.bags = ScanContainers({ BI.Backpack, BI.Bag_1, BI.Bag_2, BI.Bag_3, BI.Bag_4, BI.ReagentBag }, set)
+    if not self._carriedBags then
+        local BI = Enum.BagIndex
+        self._carriedBags = { BI.Backpack, BI.Bag_1, BI.Bag_2, BI.Bag_3, BI.Bag_4, BI.ReagentBag }
+    end
+    row.bags = ScanContainers(self._carriedBags, set)
     if self._bankOpen then
         row.bank = ScanContainers(BagList("CharacterBankTab_", 1, 6), set)
         store.warband = { at = time(), counts = ScanContainers(BagList("AccountBankTab_", 1, 5), set) }

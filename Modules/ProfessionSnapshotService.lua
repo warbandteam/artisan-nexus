@@ -235,6 +235,15 @@ function ProfessionSnapshotService:RefreshOwnedPools()
     end
     local rows = self:ReadOwnedPools()
     local now = time()
+    --- Only broadcast when a pool value changed (CURRENCY_DISPLAY_UPDATE fires for every currency).
+    local parts = {}
+    for i = 1, #rows do
+        local r = rows[i]
+        parts[i] = tostring(r.skillLineID) .. ":" .. tostring(r.current) .. "/" .. tostring(r.max)
+    end
+    local sig = table.concat(parts, "|")
+    local changed = sig ~= self._lastPoolSig
+    self._lastPoolSig = sig
     for i = 1, #rows do
         local r = rows[i]
         PersistRow(r.skillLineID, {
@@ -251,7 +260,7 @@ function ProfessionSnapshotService:RefreshOwnedPools()
             at = now,
         })
     end
-    if #rows > 0 and ns.ArtisanNexus and E then
+    if changed and #rows > 0 and ns.ArtisanNexus and E then
         ns.ArtisanNexus:SendMessage(E.PROFESSION_SNAPSHOT_UPDATED, self._last)
     end
 end

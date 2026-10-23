@@ -259,7 +259,16 @@ function ProfessionEquipmentService:BuildHints()
     end
     self._lastHints = hints
 
-    ns.ArtisanNexus:SendMessage(E.PROFESSION_EQUIPMENT_UPDATED, hints)
+    --- Only broadcast when the hint set changed (every Hub tab and the sidecar repaint on it).
+    local parts = {}
+    for i = 1, #hints do
+        parts[i] = tostring(hints[i].kind) .. ":" .. tostring(hints[i].itemID) .. ":" .. tostring(hints[i].message)
+    end
+    local sig = table.concat(parts, "|")
+    if sig ~= self._lastHintSig then
+        self._lastHintSig = sig
+        ns.ArtisanNexus:SendMessage(E.PROFESSION_EQUIPMENT_UPDATED, hints)
+    end
     return hints
 end
 

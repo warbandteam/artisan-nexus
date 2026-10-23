@@ -363,6 +363,9 @@ function CooldownService:ApplySource()
             self._wired = false
             self._scanToken = self._scanToken + 1
             owner:UnregisterAllEvents()
+            if self._castFrame then
+                self._castFrame:UnregisterAllEvents()
+            end
         end
         return
     end
@@ -408,7 +411,11 @@ function CooldownService:ApplySource()
             CooldownService._pendingRecipe = recipeSpellID
         end
     end)
-    owner:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", function(_, unitTarget, _castGUID, spellID)
+    -- Player-only unit event (AceEvent has no RegisterUnitEvent): an unfiltered registration ran the
+    -- handler for every party/raid/nameplate cast.
+    local castFrame = CooldownService._castFrame or CreateFrame("Frame")
+    CooldownService._castFrame = castFrame
+    castFrame:SetScript("OnEvent", function(_, _, unitTarget, _castGUID, spellID)
         if not CooldownService._pendingRecipe then
             return
         end
@@ -420,6 +427,7 @@ function CooldownService:ApplySource()
         end
         RefreshPending()
     end)
+    castFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
     owner:RegisterEvent("TRADE_SKILL_ITEM_CRAFTED_RESULT", RefreshPending)
     --- The scan 1 s after SHOW is skipped while IsTradeSkillReady is still false; retry once the list
     --- arrives (TRADE_SKILL_LIST_UPDATE, verified 2026-10-15, TradeSkillUIDocumentation.lua). Coalesced.
@@ -450,6 +458,9 @@ function CooldownService:Disable()
     if self._eventOwner then
         self._eventOwner:UnregisterAllEvents()
         self._eventOwner:UnregisterAllMessages()
+    end
+    if self._castFrame then
+        self._castFrame:UnregisterAllEvents()
     end
 end
 

@@ -104,6 +104,10 @@ local Constants = {
         --- Payload: `{ [capability] = "wn"|"native" }` for every capability (characters, concentration,
         --- recipes, items, cooldowns).
         CHARACTER_DATA_SOURCE_CHANGED = "AN_CHARACTER_DATA_SOURCE_CHANGED",
+        --- WN framework keys (SharedWidgets.lua registers them for its class-colour cache at load; a nil
+        --- message name errors in AceEvent). AN keeps no db.global.characters roster and never sends them.
+        CHARACTER_UPDATED = "AN_CHARACTER_UPDATED",
+        CHARACTER_TRACKING_CHANGED = "AN_CHARACTER_TRACKING_CHANGED",
 
         --- Economy engine (Modules/Economy/*).
         --- profile.economy changed (cut, durations, proc factors, valuations).
