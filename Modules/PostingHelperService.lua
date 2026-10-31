@@ -157,15 +157,28 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Commodity book from the loaded search results (cheapest first).
----@return table|nil { othersLowest, wallQty, totalQty, ownLowest }
+--- `partial` is set when the book is not fully loaded or a row failed to read: the wall-depth
+--- decision below reads totalQty, and an undercount flips "auto" toward undercutting into a wall
+--- that is really deep, which is the fastest way to be re-undercut and forfeit the deposit.
+--- C_AuctionHouse.HasFullCommoditySearchResults(itemID) -> boolean (verified 2026-11-01,
+--- warcraft.wiki.gg API_C_AuctionHouse.HasFullCommoditySearchResults; added 8.3.0).
+---@return table|nil { othersLowest, wallQty, totalQty, ownLowest, partial? }
 local function ReadCommodityMarket(itemID)
     if not (C_AuctionHouse and C_AuctionHouse.GetNumCommoditySearchResults) then return nil end
     local okN, n = pcall(C_AuctionHouse.GetNumCommoditySearchResults, itemID)
     if not okN or not n or n < 1 then return nil end
     local m = { totalQty = 0, wallQty = 0 }
+    if C_AuctionHouse.HasFullCommoditySearchResults then
+        local okF, full = pcall(C_AuctionHouse.HasFullCommoditySearchResults, itemID)
+        if okF and full == false then m.partial = true end
+    end
     for i = 1, n do
         local ok, r = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, itemID, i)
-        if not ok or type(r) ~= "table" then break end
+        if not ok or type(r) ~= "table" then
+            -- One unreadable row truncated the whole book; skip it and say the book is partial.
+            m.partial = true
+            break
+        end
         local p, q = tonumber(r.unitPrice), tonumber(r.quantity) or 0
         local own = tonumber(r.numOwnerItems) or 0
         if p and p > 0 then
@@ -212,14 +225,18 @@ local function ReadItemMarket(itemKey)
     return m
 end
 
+--- MarketIntelService:GetDemandEstimate returns unitsPerDay AND a confidence tier. The second
+--- return used to be dropped, so a two-sample guess drove the wall decision as hard as a
+--- well-observed one (ConcentrationPlannerService reads the same API with both returns).
+---@return number|nil unitsPerDay, string|nil confidence
 local function DemandPerDay(itemID)
     local mi = ns.MarketIntelService
     if not (mi and mi.GetDemandEstimate) then return nil end
-    local ok, v = pcall(mi.GetDemandEstimate, mi, itemID)
+    local ok, v, conf = pcall(mi.GetDemandEstimate, mi, itemID)
     if not ok then return nil end
-    if type(v) == "table" then v = v.unitsPerDay or v.perDay end
     v = tonumber(v)
-    return (v and v > 0) and v or nil
+    if not (v and v > 0) then return nil end
+    return v, conf
 end
 
 -- ---------------------------------------------------------------------------
@@ -285,33 +302,51 @@ local function MarketTarget(ctx, market, cfg, itemID)
         return own, "own", T("POSTING_REASON_OWN_LOWEST", "you already hold the lowest price")
     end
     local step = Step()
-    if others - step < step then
-        -- Already at the minimum legal price: undercutting would post at zero.
+    -- One undercut, computed the way Economy:SaleUnitPrice computes it for the EV engine: the
+    -- highest legal price strictly BELOW the reference. Subtracting a step from a possibly
+    -- off-grid reference and flooring afterwards gave a different answer, which broke any
+    -- reconciliation between this panel and the profit rows.
+    local econ = Econ()
+    local function Undercut(ref)
+        if econ and econ.SaleUnitPrice then
+            local v = econ:SaleUnitPrice(ref)
+            if v and v > 0 then return v end
+        end
+        return ref - step
+    end
+    if others <= step then
+        -- Already at the minimum legal price: undercutting would post at or below zero.
         return others, "match", T("POSTING_REASON_MATCH_MIN", "lowest is at the minimum price: match")
     end
     if not ctx.isCommodity then
-        return others - step, "undercut", T("POSTING_REASON_UNDERCUT_ITEM", "lowest other listing minus one step")
+        return Undercut(others), "undercut", T("POSTING_REASON_UNDERCUT_ITEM", "lowest other listing minus one step")
     end
     local mode = cfg.commodityMode or "auto"
     if mode == "match" then
         return others, "match", T("POSTING_REASON_MATCH_FORCED", "match lowest (setting)")
     elseif mode == "undercut" then
-        return others - step, "undercut", T("POSTING_REASON_UNDERCUT_FORCED", "undercut by one step (setting)")
+        return Undercut(others), "undercut", T("POSTING_REASON_UNDERCUT_FORCED", "undercut by one step (setting)")
     end
     local deep
-    local demand = DemandPerDay(itemID)
-    if demand then
+    local demand, demandConf = DemandPerDay(itemID)
+    if demand and demandConf ~= "low" then
         local hours = DURATION_HOURS[ctx.duration or 2] or 24
         local sellable = demand * hours / 24 * (tonumber(cfg.wallDurations) or 1)
         deep = (market.wallQty or 0) >= sellable
     else
+        -- No demand data, or too thin to lean on: fall back to the share-of-book rule. A partial
+        -- book understates totalQty, which biases this toward "thin" -- match instead of guessing
+        -- our way into a wall.
+        if market.partial then
+            return others, "match", T("POSTING_REASON_MATCH_WALL", "deep wall at lowest: match")
+        end
         local share = tonumber(cfg.wallShare) or 0.3
         deep = market.totalQty > 0 and (market.wallQty or 0) >= market.totalQty * share
     end
     if deep then
         return others, "match", T("POSTING_REASON_MATCH_WALL", "deep wall at lowest: match")
     end
-    return others - step, "undercut", T("POSTING_REASON_UNDERCUT_THIN", "thin lowest level: undercut one step")
+    return Undercut(others), "undercut", T("POSTING_REASON_UNDERCUT_THIN", "thin lowest level: undercut one step")
 end
 
 local function Deposit(ctx, itemID, qty, duration)
@@ -369,14 +404,22 @@ function PostingHelperService:Analyze(ctx)
     if market then
         res.marketLowest, res.ownLowest = market.othersLowest, market.ownLowest
         res.wallQty, res.totalQty = market.wallQty, market.totalQty
+        -- The book was not fully loaded: wallQty / totalQty are a floor, not the market.
+        res.marketPartial = market.partial
     end
-    res.demandPerDay = DemandPerDay(itemID)
+    res.demandPerDay, res.demandConfidence = DemandPerDay(itemID)
 
     local ph = ns.PriceHistoryService
     local hist = ph and ph:GetStats(itemID, WEEK_SEC)
     local avg = hist and hist.count and hist.count >= 2 and hist.avg or nil
     res.avg = avg
-    res.trend = (avg and ph:GetTrend(itemID, WEEK_SEC)) or 0
+    -- GetTrend returns direction AND percentChange; the and-chain used to drop the magnitude,
+    -- so the panel could only ever show an arrow.
+    local trendDir, trendPct = 0, 0
+    if avg then
+        trendDir, trendPct = ph:GetTrend(itemID, WEEK_SEC)
+    end
+    res.trend, res.trendPct = trendDir or 0, trendPct or 0
     local avgTarget = avg and avg * (tonumber(cfg.averageMul) or 1) or nil
 
     local price, mode, reason
