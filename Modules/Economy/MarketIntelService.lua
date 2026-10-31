@@ -6,9 +6,11 @@
         Saddlebag market states (Spiking > +60%, Increasing +15..60, Stable within 15,
         Decreasing -15..-60, Crashing < -60) — Saddlebag Exchange market-state thresholds (read 2026-10-14).
       - deals: current min <= dealRatio x 7-day mean with listed quantity > 0 (fresh rows only).
-      - demand: ESTIMATE of units/day = listed-quantity decreases between consecutive samples
-        at most 24h apart (pairs where quantity rose are ignored), normalized to a day.
-        Listings can also vanish by cancel/expiry, so this is an upper bound on sales.
+      - demand: ESTIMATE of units/day = listed-quantity decreases between consecutive samples of
+        one source, at most 24h apart and inside the last 7 days, over the observed time of ALL
+        such pairs (a restock interval contributes no units but still counts as time). Sales
+        during a restock interval are unknowable, so this is a LOWER bound on sales; listings can
+        also vanish by cancel/expiry, which pushes the other way.
       - weekday profile: mean price per weekday over all samples.
     Only items with >= 3 samples are considered.
 ]]
@@ -71,30 +73,56 @@ local function Samples(itemID)
 end
 
 --- Demand estimate from one sample array (ascending by t).
+---
+--- Only pairs inside WEEK_SEC count. PriceHistoryService caps its ring buffer by sample COUNT, not
+--- by age, so the array can reach back months; an item that stopped moving a month ago used to
+--- keep reporting its old velocity, and with "high" confidence, since that was awarded for pair
+--- count, which a long stale history has no shortage of.
+---
+--- The denominator is every same-source pair in the window, including the ones where the listed
+--- quantity ROSE. Summing only the falling intervals measured "depletion rate while depleting",
+--- which overstates throughput for anything restocked often. A restock interval contributes 0 to
+--- `drop` while its real sales are unknowable, so the result is now a LOWER bound on units/day
+--- (it was an upper bound before).
+---@param samples table[]
+---@param now number|nil unix time (defaults to time())
 ---@return number|nil unitsPerDay, string|nil confidence, number pairs
-local function EstimateDemand(samples)
+local function EstimateDemand(samples, now)
     if not samples or #samples < MIN_SAMPLES then
         return nil, nil, 0
     end
-    local drop, span, pairsUsed, withQty = 0, 0, 0, 0
+    local cutoff = (now or time()) - WEEK_SEC
+    -- The admission gate counts one source at a time: browse totals (own listings included) and
+    -- commodity book totals (own excluded) are different scales and never pair with each other,
+    -- so a mixed history used to pass the gate and then yield no usable pairs at all.
+    local withQty = {}
     for i = 1, #samples do
-        if tonumber(samples[i].q) then
-            withQty = withQty + 1
+        local s = samples[i]
+        if tonumber(s.q) and (tonumber(s.t) or 0) >= cutoff then
+            local src = s.qs or "?"
+            withQty[src] = (withQty[src] or 0) + 1
         end
     end
-    if withQty < MIN_SAMPLES then
+    local bestSource = 0
+    for _, n in pairs(withQty) do
+        if n > bestSource then bestSource = n end
+    end
+    if bestSource < MIN_SAMPLES then
         return nil, nil, 0
     end
+    local drop, span, pairsUsed = 0, 0, 0
     for i = 2, #samples do
         local a, b = samples[i - 1], samples[i]
         local qa, qb = tonumber(a.q), tonumber(b.q)
-        local dt = (tonumber(b.t) or 0) - (tonumber(a.t) or 0)
-        -- Only diff quantities of one source (browse total vs commodity book are different scales);
-        -- samples of older builds carry no source and pair only with each other.
-        if qa and qb and a.qs == b.qs and dt > 0 and dt <= DAY_SEC and qb <= qa then
-            drop = drop + (qa - qb)
+        local ta, tb = tonumber(a.t) or 0, tonumber(b.t) or 0
+        local dt = tb - ta
+        -- Samples of older builds carry no source and pair only with each other.
+        if qa and qb and a.qs == b.qs and dt > 0 and dt <= DAY_SEC and ta >= cutoff then
             span = span + dt
             pairsUsed = pairsUsed + 1
+            if qb <= qa then
+                drop = drop + (qa - qb)
+            end
         end
     end
     if pairsUsed < 2 or span <= 0 then
@@ -202,7 +230,7 @@ function MarketIntelService:Recompute()
                 if deal then
                     deals[#deals + 1] = deal
                 end
-                local perDay, conf = EstimateDemand(samples)
+                local perDay, conf = EstimateDemand(samples, now)
                 if perDay then
                     demand[itemID] = { unitsPerDay = perDay, confidence = conf }
                 end

@@ -133,9 +133,16 @@ local function RewardValue(reward)
     return 0, false
 end
 
---- Cost of the required Basic slots the customer left to the crafter (stored schematic, cheapest tier).
+--- Cost of the required Basic slots the customer left to the crafter (stored schematic).
+--- `mine` is the allocation the quality simulation will be run with (RecipeService:BuildCraftingReagentInfo,
+--- via OrderReagents): where it covers a slot, that exact reagent is costed, so the price side and
+--- the quality side can never describe different tiers. The two picked independently before, with
+--- different price functions (BuyCost here, GetPrice there), so they could disagree on a slot.
+--- Slots the allocation does not carry (fixed Reagent slots) still take the cheapest candidate.
+---@param order table
+---@param mine table[]|nil CraftingReagentInfo[] { reagent = { itemID }, dataSlotIndex, quantity }
 ---@return number cost, boolean missing, table providedSlots
-local function CrafterReagentCost(order)
+local function CrafterReagentCost(order, mine)
     -- provided: ModifiedReagent dataSlotIndex -> true (OrderReagents dedupe); providedSlot: schematic
     -- slotIndex -> true. CraftingOrderReagentInfo.slotIndex is the schematic slot (CraftingOrderUIShared
     -- 12.1.5.70448, checked 2026-10-17); dataSlotIndex alone collides across data slot types.
@@ -165,6 +172,23 @@ local function CrafterReagentCost(order)
         return 0, true, provided
     end
     local econ = Economy()
+    local allocated = {}
+    if type(mine) == "table" then
+        for i = 1, #mine do
+            local m = mine[i]
+            local itemID = m and m.reagent and m.reagent.itemID
+            if itemID and m.dataSlotIndex then
+                allocated[m.dataSlotIndex] = { itemID = itemID, qty = m.quantity }
+            end
+        end
+    end
+    local function SlotCost(itemID, qty)
+        if econ and econ.BuyCost then
+            return (econ:BuyCost(itemID, qty))
+        end
+        local p = ns.AHPriceService and ns.AHPriceService:GetPrice(itemID)
+        return p and p * qty or nil
+    end
     local total, missing = 0, false
     for si = 1, #slots do
         local slot = slots[si]
@@ -180,18 +204,22 @@ local function CrafterReagentCost(order)
         end
         if not isProvided then
             local best
-            for ci = 1, #slot.candidates do
-                local c = slot.candidates[ci]
-                if c.itemID then
-                    local cost
-                    if econ and econ.BuyCost then
-                        cost = econ:BuyCost(c.itemID, slot.qty)
-                    else
-                        local p = ns.AHPriceService and ns.AHPriceService:GetPrice(c.itemID)
-                        cost = p and p * slot.qty
-                    end
-                    if cost and (not best or cost < best) then
-                        best = cost
+            -- Only ModifiedReagent slots are in the allocation (BuildCraftingReagentInfo's passToOp
+            -- rule: dataSlotType 2, or nil on rows harvested before it was stored). A fixed Reagent
+            -- slot can carry the same dataSlotIndex number, so it must not read the allocation.
+            local passToOp = first ~= nil and (first.dataSlotType == nil or first.dataSlotType == 2)
+            local pick = passToOp and first.dataSlotIndex and allocated[first.dataSlotIndex] or nil
+            if pick then
+                -- The simulation will use this exact reagent: cost that one, not the cheapest.
+                best = SlotCost(pick.itemID, tonumber(pick.qty) or slot.qty)
+            else
+                for ci = 1, #slot.candidates do
+                    local c = slot.candidates[ci]
+                    if c.itemID then
+                        local cost = SlotCost(c.itemID, slot.qty)
+                        if cost and (not best or cost < best) then
+                            best = cost
+                        end
                     end
                 end
             end
@@ -205,8 +233,17 @@ local function CrafterReagentCost(order)
     return total, missing, provided
 end
 
---- Reagent table for GetCraftingOperationInfoForOrder: customer reagents + our cheapest picks elsewhere.
-local function OrderReagents(order, provided)
+--- Our side of the allocation: cheapest priced candidate per ModifiedReagent slot. Built once per
+--- evaluation so CrafterReagentCost prices exactly what the quality simulation runs with.
+local function CrafterAllocation(spellID)
+    local RS = ns.RecipeService
+    if not (RS and RS.BuildCraftingReagentInfo) then return nil end
+    local ok, mine = pcall(RS.BuildCraftingReagentInfo, RS, spellID)
+    return ok and type(mine) == "table" and mine or nil
+end
+
+--- Reagent table for GetCraftingOperationInfoForOrder: customer reagents + our picks elsewhere.
+local function OrderReagents(order, provided, mine)
     local out = {}
     if type(order.reagents) == "table" then
         for i = 1, #order.reagents do
@@ -216,9 +253,8 @@ local function OrderReagents(order, provided)
             end
         end
     end
-    local RS = ns.RecipeService
-    if RS and RS.BuildCraftingReagentInfo then
-        local mine = RS:BuildCraftingReagentInfo(order.spellID)
+    mine = mine or CrafterAllocation(order.spellID)
+    if mine then
         for i = 1, #mine do
             if not provided[mine[i].dataSlotIndex] then
                 out[#out + 1] = mine[i]
@@ -251,7 +287,7 @@ local function OperationForOrder(order, reagents, applyConc)
 end
 
 --- Concentration needed to reach minQuality. Returns concNeeded|nil, flags table additions.
-local function ConcentrationForOrder(order, provided, flags)
+local function ConcentrationForOrder(order, provided, flags, mine)
     local minQ = tonumber(order.minQuality) or 0
     if minQ <= 1 then
         return 0
@@ -261,7 +297,7 @@ local function ConcentrationForOrder(order, provided, flags)
         flags[#flags + 1] = "noQualityData"
         return nil
     end
-    local reagents = OrderReagents(order, provided)
+    local reagents = OrderReagents(order, provided, mine)
     local base = OperationForOrder(order, reagents, false)
     if not base then
         flags[#flags + 1] = "noQualityData"
@@ -320,13 +356,15 @@ function CraftingOrdersService:EvaluateOrder(order)
     if learned == false then
         flags[#flags + 1] = "notLearned"
     end
-    local reagentCost, missing, provided = CrafterReagentCost(order)
+    -- One allocation, costed and simulated: see CrafterReagentCost.
+    local mine = CrafterAllocation(order.spellID)
+    local reagentCost, missing, provided = CrafterReagentCost(order, mine)
     if missing then
         flags[#flags + 1] = "missingPrices"
     end
     local concNeeded
     if learned ~= false then
-        concNeeded = ConcentrationForOrder(order, provided, flags)
+        concNeeded = ConcentrationForOrder(order, provided, flags, mine)
     end
     local profession = ns.RecipeService and ns.RecipeService.GetProfession and ns.RecipeService:GetProfession(order.spellID)
     local econ = Economy()
@@ -377,7 +415,7 @@ end
 --- Bucket rows (public browse without a recipe selected): tip is the bucket max, crafter supplies all basics.
 local function EvaluateBucket(bucket, orderType)
     local fake = { spellID = bucket.spellID, reagents = {}, orderType = orderType }
-    local reagentCost, missing = CrafterReagentCost(fake)
+    local reagentCost, missing = CrafterReagentCost(fake, CrafterAllocation(bucket.spellID))
     local flags = { "bucket" }
     if missing then
         flags[#flags + 1] = "missingPrices"
