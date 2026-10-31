@@ -297,8 +297,25 @@ local function SafeCall(fn, a, b)
     end
 end
 
+--- The craft-begin spell is a hint for the results of THAT cast only. It used to live forever, so
+--- a later cast that fires no TRADE_SKILL_CRAFT_BEGIN of its own — a shaman weapon imbue, a weapon
+--- oil — resolved through the previous profession craft's spell and slipped back past
+--- IsNonRecipeEnchant. Results follow their cast within a few seconds; after that the hint is stale.
+local PENDING_SPELL_TTL = 30
+
+local function PendingSpell()
+    local at = CraftEventService.pendingAt
+    if not at or (GetTime() - at) > PENDING_SPELL_TTL then
+        CraftEventService.pendingSpellID = nil
+        CraftEventService.pendingAt = nil
+        return nil
+    end
+    return CraftEventService.pendingSpellID
+end
+
 local function DispatchCraftBegin(recipeSpellID)
     CraftEventService.pendingSpellID = tonumber(recipeSpellID)
+    CraftEventService.pendingAt = CraftEventService.pendingSpellID and GetTime() or nil
     local listeners = CraftEventService._craftBeginListeners
     for i = 1, #listeners do
         SafeCall(listeners[i], CraftEventService.pendingSpellID)
@@ -323,7 +340,7 @@ local function IsNonRecipeEnchant(data)
     if not (rs and rs.GetProfession) then
         return false
     end
-    local spellID = CraftEventService:ResolveSpellForResult(data, CraftEventService.pendingSpellID)
+    local spellID = CraftEventService:ResolveSpellForResult(data, PendingSpell())
     return spellID == nil or rs:GetProfession(spellID) == nil
 end
 
@@ -333,14 +350,14 @@ local function DispatchCraftResult(data)
     end
     local listeners = CraftEventService._craftResultListeners
     for i = 1, #listeners do
-        SafeCall(listeners[i], data, CraftEventService.pendingSpellID)
+        SafeCall(listeners[i], data, PendingSpell())
     end
 end
 
 local function DispatchCurrencyResult(data)
     local listeners = CraftEventService._currencyResultListeners
     for i = 1, #listeners do
-        SafeCall(listeners[i], data, CraftEventService.pendingSpellID)
+        SafeCall(listeners[i], data, PendingSpell())
     end
 end
 

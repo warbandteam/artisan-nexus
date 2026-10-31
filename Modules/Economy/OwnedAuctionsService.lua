@@ -265,9 +265,10 @@ local function FindInSnapshot(guid, auctionID)
     return nil
 end
 
-local function OutcomeFromRow(row, outcome, svc)
+---@param qty number|nil units this outcome covers (defaults to the row's remaining quantity)
+local function OutcomeFromRow(row, outcome, svc, qty)
     return {
-        auctionID = row.auctionID, itemID = row.itemID, qty = row.quantity,
+        auctionID = row.auctionID, itemID = row.itemID, qty = qty or row.quantity,
         outcome = outcome, src = "ah", unitPrice = svc:UnitPrice(row),
     }
 end
@@ -282,7 +283,15 @@ local function RecordTransitions(svc, prev, new)
         local now = byID[old.auctionID]
         if old.status == STATUS_ACTIVE then
             if now and now.status == STATUS_SOLD then
-                svc:RecordOutcome(OutcomeFromRow(now, "sold", svc))
+                -- `now.quantity` is what is left on the auction, so booking it as the units sold
+                -- lost everything an earlier partial fill already took. Book what was still
+                -- outstanding when we last looked.
+                svc:RecordOutcome(OutcomeFromRow(now, "sold", svc, old.quantity))
+            -- A commodity auction that fills piecewise stays ACTIVE with a smaller quantity, and
+            -- those partial fills are still not recorded: RecordOutcome de-dupes on auctionID, so
+            -- booking one would swallow the auction's later outcomes. Needs a per-fill de-dupe key
+            -- and in-game confirmation of how partial commodity fills are reported (ECONOMY_AUDIT
+            -- B12); until then sell-through still reads low rather than double-counting.
             elseif not now then
                 if pendingCancel[old.auctionID] then
                     svc:RecordOutcome(OutcomeFromRow(old, "cancelled", svc))

@@ -85,6 +85,20 @@ local function Guid()
     return ns.Utilities and ns.Utilities:GetCharacterGUID() or nil
 end
 
+--- Mail text (sender, subject, invoice item / player name) is API-returned text and may be a
+--- secret value; a :match or tostring on one throws, and BookMail runs inside a pcall, so the
+--- whole invoice would be dropped silently and retried on every inbox scan. Same guard the chat
+--- path below already uses, and the shape CraftingOrdersService:SafeString uses.
+local function SafeString(v)
+    if type(v) ~= "string" then
+        return nil
+    end
+    if issecretvalue and issecretvalue(v) then
+        return nil
+    end
+    return v
+end
+
 local cutMemo = nil
 
 local notifyPending = false
@@ -140,6 +154,10 @@ local function Patterns()
     return patterns
 end
 
+--- @return string|nil kind, string|nil itemName, number|nil stackCount
+--- AUCTION_MAIL_ITEM_STACK ("%s (%d)") carries the stack size the mail is for; without it a sold
+--- stack was booked as a single unit, which made avgSell = revenue / sold read the whole stack's
+--- proceeds as one unit's price.
 local function ClassifySubject(subject)
     if type(subject) ~= "string" then return nil end
     local P = Patterns()
@@ -147,11 +165,15 @@ local function ClassifySubject(subject)
         local pat = P[kind]
         local name = pat and subject:match(pat)
         if name then
+            local count
             if P.stack then
-                local base = name:match(P.stack)
-                if base then name = base end
+                local base, n = name:match(P.stack)
+                if base then
+                    name = base
+                    count = tonumber(n)
+                end
             end
-            return kind, name
+            return kind, name, count
         end
     end
     return nil
@@ -330,16 +352,23 @@ local function MatchAHBuy(store, itemID, qty, total)
             local bq, bt = tonumber(b.qty) or 0, tonumber(b.total) or 0
             local mq = tonumber(b.mq) or 0
             if bq == qty and mq == 0 then
+                -- Same quantity: this IS the purchase, whatever the booked total said. The invoice
+                -- is the authoritative figure, so a mismatch beyond tolerance corrects the row
+                -- instead of falling through — falling through found no partner and booked the
+                -- same purchase a second time, double-counting the spend and the cost basis.
                 local tol = math.max(100, bt * 0.01)
-                if math.abs(bt - total) <= tol or b.est then
-                    b.mailed = true
-                    if b.est then
-                        -- Estimated AH buy: the invoice is authoritative.
-                        b.total, b.est = total, nil
-                        AddToBasis(store, itemID, qty, total)
-                    end
-                    return true
+                b.mailed = true
+                if b.est then
+                    -- Estimated AH buy: the invoice is authoritative, and nothing entered the
+                    -- basis yet (RecordBuy skips est rows), so book it now.
+                    b.total, b.est = total, nil
+                    AddToBasis(store, itemID, qty, total)
+                elseif math.abs(bt - total) > tol then
+                    -- The event-booked total already entered the basis and AddToBasis cannot be
+                    -- reversed, so only the row is corrected; the basis keeps the event figure.
+                    b.total, b.totalFromEvent = total, bt
                 end
+                return true
             elseif qty < bq - mq and bq > 0 or qty == bq - mq and mq > 0 then
                 -- Partial fill: unit price must be plausible for this purchase (book walk spread).
                 local unit, avg = total / qty, bt / bq
@@ -405,12 +434,14 @@ end
 local function BookMail(store, i, occurrences)
     local _, _, sender, subject, money, _, daysLeft, hasItem, _, _, _, _, _, firstItemQuantity, firstItemLink =
         GetInboxHeaderInfo(i)
-    local kind, subjName = ClassifySubject(subject)
+    sender, subject = SafeString(sender), SafeString(subject)
+    local kind, subjName, subjCount = ClassifySubject(subject)
     local invoiceType, itemName, playerName, bid, buyout, deposit, consignment, _, _, _, count, commerceAuction
     if GetInboxInvoiceInfo then
         invoiceType, itemName, playerName, bid, buyout, deposit, consignment, _, _, _, count, commerceAuction =
             GetInboxInvoiceInfo(i)
     end
+    invoiceType, itemName, playerName = SafeString(invoiceType), SafeString(itemName), SafeString(playerName)
     if not kind and not invoiceType then return false end
 
     local expiry = time() + (tonumber(daysLeft) or 0) * 86400
@@ -498,15 +529,21 @@ local function BookMail(store, i, occurrences)
     elseif kind == "sold" then
         if not headSeen then
             local net = tonumber(money) or 0
+            -- The subject's "(N)" suffix is the stack size; without it the units sold are unknown,
+            -- and a guessed 1 would understate volume and inflate avgSell, so leave qty nil and
+            -- let GetSummary skip the row rather than count it as one unit.
+            local qty = subjCount and math.max(1, subjCount) or nil
             Append(store.sales, {
                 t = now, guid = Guid(), sig = headKey .. "#" .. headOcc, hk = headBase, kind = "header",
-                name = subjName, itemID = SalesLedgerService:ResolveItemName(subjName, nil), qty = 1, net = net,
+                name = subjName, itemID = SalesLedgerService:ResolveItemName(subjName, nil),
+                qty = qty, qtyUnknown = (qty == nil) or nil, net = net,
             }, CAP_SALES)
             MarkSeen(seen, headKey, headOcc, now)
             ClearPendingSold(store, subjName)
             if ns.OwnedAuctionsService and ns.OwnedAuctionsService.RecordOutcome then
                 ns.OwnedAuctionsService:RecordOutcome({
-                    itemID = store.sales[#store.sales].itemID, name = subjName, qty = 1, qtyUnknown = true,
+                    itemID = store.sales[#store.sales].itemID, name = subjName,
+                    qty = qty or 1, qtyUnknown = (qty == nil) or nil,
                     outcome = "sold", src = "mail",
                 })
             end
@@ -862,7 +899,15 @@ function SalesLedgerService:GetSummary(days)
             b.revenue = b.revenue + (s.net or 0)
             b.net = b.net + (s.net or 0)
         end
-        b.sold = b.sold + (s.qty or 1)
+        -- A sale whose unit count the mail never stated cannot feed avgSell: counting it as one
+        -- unit made a whole stack's proceeds read as a single unit's price. It still counts as a
+        -- sale (sum.sales) and its gold still counts; only the per-unit average skips it.
+        if s.qty then
+            b.sold = b.sold + s.qty
+            b.soldRevenue = (b.soldRevenue or 0) + ((s.kind == "invoice") and (s.bid or 0) or (s.net or 0))
+        else
+            b.soldUnknown = (b.soldUnknown or 0) + 1
+        end
     end
     for _, p in ipairs(Since(store.posts, days)) do
         sum.depositsPaid = sum.depositsPaid + (p.deposit or 0)
@@ -878,7 +923,7 @@ function SalesLedgerService:GetSummary(days)
         sum.orderTips = sum.orderTips + (o.tip or 0)
     end
     for _, b in pairs(sum.byItem) do
-        if b.sold > 0 then b.avgSell = b.revenue / b.sold end
+        if b.sold > 0 then b.avgSell = (b.soldRevenue or b.revenue) / b.sold end
         if b.bought > 0 then b.avgBuy = b.spent / b.bought end
     end
     -- Deposits lost = paid - refunded; untracked posts would make this negative, so clamp.
