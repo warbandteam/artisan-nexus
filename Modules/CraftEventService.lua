@@ -297,15 +297,23 @@ local function SafeCall(fn, a, b)
     end
 end
 
---- The craft-begin spell is a hint for the results of THAT cast only. It used to live forever, so
---- a later cast that fires no TRADE_SKILL_CRAFT_BEGIN of its own — a shaman weapon imbue, a weapon
---- oil — resolved through the previous profession craft's spell and slipped back past
---- IsNonRecipeEnchant. Results follow their cast within a few seconds; after that the hint is stale.
-local PENDING_SPELL_TTL = 30
+--- The craft-begin spell is a hint for the results of that run. It used to live forever, so a
+--- later cast that fires no TRADE_SKILL_CRAFT_BEGIN of its own — a shaman weapon imbue, a weapon
+--- oil — could resolve through the previous craft's spell and slip back past IsNonRecipeEnchant.
+--- That hole is specifically ResultMatchesRecipe's "isEnchant and the recipe has no output item"
+--- branch, which an enchanting recipe satisfies, so an imbue after an enchant craft matched it.
+---
+--- The TTL measures IDLE time, refreshed on every craft result, not time since CRAFT_BEGIN: a
+--- "Create all" run streams results for as long as it lasts and must keep its hint, because a
+--- real enchanting craft reports the ENCHANTED item as its itemID and so cannot be resolved by
+--- ResolveSpellFromOutput at all — dropping the hint mid-run would silently lose real ledger rows.
+--- UNVERIFIED: whether TRADE_SKILL_CRAFT_BEGIN fires per cast or once per multi-cast run. The idle
+--- window is sized so it does not matter; confirm in-game before shortening it.
+local PENDING_SPELL_IDLE_TTL = 60
 
 local function PendingSpell()
     local at = CraftEventService.pendingAt
-    if not at or (GetTime() - at) > PENDING_SPELL_TTL then
+    if not at or (GetTime() - at) > PENDING_SPELL_IDLE_TTL then
         CraftEventService.pendingSpellID = nil
         CraftEventService.pendingAt = nil
         return nil
@@ -348,9 +356,14 @@ local function DispatchCraftResult(data)
     if IsNonRecipeEnchant(data) then
         return
     end
+    local spellID = PendingSpell()
+    -- A result got through: the run is still going, so hold the hint for another idle window.
+    if spellID then
+        CraftEventService.pendingAt = GetTime()
+    end
     local listeners = CraftEventService._craftResultListeners
     for i = 1, #listeners do
-        SafeCall(listeners[i], data, PendingSpell())
+        SafeCall(listeners[i], data, spellID)
     end
 end
 
