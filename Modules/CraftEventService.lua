@@ -305,7 +305,33 @@ local function DispatchCraftBegin(recipeSpellID)
     end
 end
 
+--- Spell-based item enchants that are not professions — shaman weapon imbues
+--- (Flametongue/Windfury Weapon), weapon oils and stones — raise the same
+--- TRADE_SKILL_CRAFT_BEGIN + TRADE_SKILL_ITEM_CRAFTED_RESULT pair as a craft, with
+--- isEnchant set and the enchanted item as itemID. Nothing enters the bags, so they
+--- must not reach the session loot toast, the ledger or the queue. A real enchanting
+--- craft keeps its profession through RecipeService, so only the ownerless casts drop.
+---@param data table|nil CraftingItemResultData
+---@return boolean
+local function IsNonRecipeEnchant(data)
+    if type(data) ~= "table" or not data.isEnchant then
+        return false
+    end
+    local spellID = tonumber(CraftEventService.pendingSpellID)
+    if not spellID then
+        return false
+    end
+    local rs = ns.RecipeService
+    if not (rs and rs.GetProfession) then
+        return false
+    end
+    return rs:GetProfession(spellID) == nil
+end
+
 local function DispatchCraftResult(data)
+    if IsNonRecipeEnchant(data) then
+        return
+    end
     local listeners = CraftEventService._craftResultListeners
     for i = 1, #listeners do
         SafeCall(listeners[i], data, CraftEventService.pendingSpellID)
