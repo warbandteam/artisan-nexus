@@ -49,6 +49,9 @@ end
 
 --- Per-frame Aggregate memo: one Shopping render calls Aggregate via TotalCost,
 --- GetFarmTargets and GetPurchaseShorts as well; GetTime() changes every frame.
+--- Stock buckets of RecipeService:GetStockByLocation, drawn in this order when a row claims stock.
+local STOCK_LOCATIONS = { "bags", "bank", "warband" }
+
 local aggMemo = { stamp = nil, results = {} }
 
 local function InvalidateAggregateMemo()
@@ -229,10 +232,22 @@ function ShoppingListService:Aggregate(opts)
     -- quality tier of the slot counts, like the craft count of the Crafting tab.
     if opts.subtractBags ~= false then
         local chars = ns.CharacterData
-        -- A tier counts toward one row only: two recipes can pick different tiers of one reagent
-        -- (different candidate sets), and both rows would otherwise count the same stack.
-        -- Rows go in item ID order so the same row keeps a shared tier on every paint.
-        local claimed = {}
+        -- A stack counts toward one row only: two recipes can pick different tiers of one reagent
+        -- (different candidate sets), and both rows would otherwise count the same stack. A whole
+        -- tier used to be claimed by whichever row sorted first, so the second row reported its
+        -- full need as short and the surplus on the first row was clamped away -- reagents already
+        -- owned got bought again. Each row now takes only what it needs out of a shared pool.
+        -- Rows go in item ID order so the split is stable across paints.
+        local stockLeft = {}
+        local function StockFor(id)
+            local s = stockLeft[id]
+            if not s then
+                local st = rs:GetStockByLocation(id)
+                s = { bags = st.bags or 0, bank = st.bank or 0, warband = st.warband or 0 }
+                stockLeft[id] = s
+            end
+            return s
+        end
         local order = {}
         for itemID in pairs(agg) do
             order[#order + 1] = itemID
@@ -241,17 +256,26 @@ function ShoppingListService:Aggregate(opts)
         for oi = 1, #order do
             local itemID = order[oi]
             local row = agg[itemID]
-            local bags, bank, warband = 0, 0, 0
+            local taken = { bags = 0, bank = 0, warband = 0 }
+            local remaining, stockTotal = row.needed, 0
             for ci = 1, #row.cands do
-                local id = row.cands[ci]
-                if not claimed[id] or claimed[id] == itemID then
-                    claimed[id] = itemID
-                    local st = rs:GetStockByLocation(id)
-                    bags, bank, warband = bags + st.bags, bank + st.bank, warband + st.warband
+                local s = StockFor(row.cands[ci])
+                for li = 1, #STOCK_LOCATIONS do
+                    local loc = STOCK_LOCATIONS[li]
+                    local avail = s[loc]
+                    stockTotal = stockTotal + avail
+                    if avail > 0 and remaining > 0 then
+                        local take = math.min(avail, remaining)
+                        s[loc] = avail - take
+                        remaining = remaining - take
+                        taken[loc] = taken[loc] + take
+                    end
                 end
             end
-            row.bags, row.bank, row.warband = bags, bank, warband
-            row.have = bags + bank + warband
+            row.bags, row.bank, row.warband = taken.bags, taken.bank, taken.warband
+            row.have = taken.bags + taken.bank + taken.warband
+            -- Stock still unclaimed by this row (tiers it shares with another row are already gone).
+            row.stockTotal = stockTotal
             row.short = math.max(0, row.needed - row.have)
 
             -- Cross-character reagent inventory (Warband Nexus or AN-native snapshot).
@@ -282,18 +306,24 @@ function ShoppingListService:Aggregate(opts)
             end
         end
 
-        if svc and svc.GetPrice then
-            local unit = svc:GetPrice(itemID)
-            if unit then
-                row.unitPrice = unit
-                local quantity = opts.subtractBags ~= false and row.short or row.needed
-                -- Walk the stored commodity book: buying 200 units costs more than 200 x min.
-                local econ = ns.Economy
-                local total = econ and econ.BuyCost and econ:BuyCost(itemID, quantity)
-                row.cost = total or (unit * quantity)
-                if quantity > 0 and total then
-                    row.avgUnitCost = total / quantity
-                end
+        -- Soulbound reagents cannot be bought: a stale AH print for one would have put gold into
+        -- the shopping total for something no amount of money can supply.
+        if svc and svc.GetPrice and not row.isSoulbound then
+            row.unitPrice = svc:GetPrice(itemID)
+            local quantity = opts.subtractBags ~= false and row.short or row.needed
+            -- Walk the stored commodity book: buying 200 units costs more than 200 x min.
+            -- Economy:BuyCost also resolves a vendor price on its own, so this is no longer gated
+            -- on an AH price existing: a vendor-only reagent used to land in `missing` with its
+            -- gold left out of the shopping total entirely.
+            local econ = ns.Economy
+            local total, costSource
+            if econ and econ.BuyCost then
+                total, costSource = econ:BuyCost(itemID, quantity)
+            end
+            row.costSource = costSource
+            row.cost = total or (row.unitPrice and row.unitPrice * quantity) or nil
+            if quantity > 0 and total then
+                row.avgUnitCost = total / quantity
             end
         end
     end

@@ -332,6 +332,17 @@ function CraftingOrdersService:EvaluateOrder(order)
     local econ = Economy()
     local concValue = (econ and econ.ConcentrationValue and econ:ConcentrationValue(profession)) or 0
     local concCost = math.floor((concNeeded or 0) * concValue + 0.5)
+    -- An order this character cannot fulfil has no profit to rank. ConcentrationForOrder returns
+    -- nil on those paths, which made concCost 0 and handed the order the HIGHEST net of the batch,
+    -- so it sorted first and became the recommended order in the per-character summary.
+    local blocked = false
+    for i = 1, #flags do
+        if flags[i] == "cantReachMinQuality" or flags[i] == "notLearned"
+            or flags[i] == "notEnoughConcentration" then
+            blocked = true
+            break
+        end
+    end
     local now = OrderNow()
     local expiresAt
     if now and tonumber(order.expirationTime) then
@@ -355,7 +366,9 @@ function CraftingOrdersService:EvaluateOrder(order)
         reagentCost = math.floor(reagentCost + 0.5),
         concNeeded = concNeeded,
         concCost = concCost,
-        net = math.floor(tipNet + rewardsValue - reagentCost - concCost + 0.5),
+        -- nil net = "not rankable", not "worth nothing": the sort and the summary both skip it.
+        net = (not blocked) and math.floor(tipNet + rewardsValue - reagentCost - concCost + 0.5) or nil,
+        blocked = blocked or nil,
         flags = flags,
         expiresAt = expiresAt,
     }
@@ -408,7 +421,15 @@ function CraftingOrdersService:Reevaluate(orderType)
             rows[#rows + 1] = EvaluateBucket(buckets[i], orderType)
         end
     end
-    table.sort(rows, function(a, b) return (a.net or 0) > (b.net or 0) end)
+    -- Rows with no net (blocked: cannot reach the quality, not learned, not enough concentration)
+    -- sort last instead of ranking as zero-profit among real candidates.
+    table.sort(rows, function(a, b)
+        local an, bn = a.net, b.net
+        if an and not bn then return true end
+        if bn and not an then return false end
+        if an and bn and an ~= bn then return an > bn end
+        return (a.orderID or 0) < (b.orderID or 0)
+    end)
     self._rows[orderType] = rows
     self:PersistSummary()
     Notify(orderType)
@@ -423,11 +444,20 @@ function CraftingOrdersService:PersistSummary()
     local summary = { at = time(), counts = {}, bestNet = nil, bestSpellID = nil }
     for orderType, rows in pairs(self._rows) do
         summary.counts[orderType] = #rows
-        local top = rows[1]
-        if top and top.orderID and (not summary.bestNet or top.net > summary.bestNet) then
-            summary.bestNet = top.net
-            summary.bestSpellID = top.spellID
-            summary.bestOrderType = orderType
+        -- Bucket rows carry no orderID and (since they use the bucket's max tip without the
+        -- consortium cut) tend to sort above real orders, so testing only rows[1] routinely
+        -- skipped a type's best actual order. Take the first rankable real one.
+        for i = 1, #rows do
+            local row = rows[i]
+            if row.net == nil then break end -- blocked rows are sorted last: nothing rankable left
+            if row.orderID then
+                if not summary.bestNet or row.net > summary.bestNet then
+                    summary.bestNet = row.net
+                    summary.bestSpellID = row.spellID
+                    summary.bestOrderType = orderType
+                end
+                break
+            end
         end
     end
     c.craftingOrdersSummary = summary

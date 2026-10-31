@@ -42,6 +42,18 @@ local function IsFresh(itemID, ttl)
     return (time() - row.updatedAt) < ttl
 end
 
+--- Reagent prices age too: a recipe whose mats were last seen weeks ago is not "fresh" just
+--- because its output was scanned today, and the cost side is where a stale price compounds
+--- through make-vs-buy. A price whose age we cannot know (vendor, TSM's multi-day average) is not
+--- held against the row; an unpriced reagent is already reported through `missing`.
+local function ReagentPriceFresh(itemID, ttl)
+    local svc = ns.AHPriceService
+    if not (itemID and svc and svc.GetPriceInfo) then return true end
+    local price, updatedAt = svc:GetPriceInfo(itemID)
+    if not price or not updatedAt then return true end
+    return (time() - updatedAt) < ttl
+end
+
 local function Round(c)
     if not c then return nil end
     return math.floor(c + 0.5)
@@ -153,6 +165,15 @@ function ProfitabilityService:ListRecipes(opts)
                 end
             end
             local fresh = (outputItem and IsFresh(outputItem, ttl)) or false
+            local staleReagents = 0
+            if base and type(base.slotPicks) == "table" then
+                for _, pickID in pairs(base.slotPicks) do
+                    if not ReagentPriceFresh(pickID, ttl) then
+                        staleReagents = staleReagents + 1
+                    end
+                end
+            end
+            if staleReagents > 0 then fresh = false end
             local missingCount = result and #result.missing or 0
             local depositLoss
             if base and base.outputItem and econ then
@@ -180,6 +201,7 @@ function ProfitabilityService:ListRecipes(opts)
                     missing = result and result.missing or {},
                     hasHistory = base and base.fromHistory or false,
                     fresh = fresh,
+                    staleReagents = (staleReagents > 0) and staleReagents or nil,
                     qualityTier = base and base.tier or nil,
                     concentrationCost = concRow and concRow.concCost or nil,
                     effectiveConcentration = concRow and concRow.effConc or nil,

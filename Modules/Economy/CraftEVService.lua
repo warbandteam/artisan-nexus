@@ -83,7 +83,16 @@ end
 local function BuyCostFor(itemID, qty, ctx)
     local econ = ns.Economy
     if ctx.useOwned and econ and econ.ReagentCost then
-        local owned = ctx.bagCounts and ctx.bagCounts[itemID] or 0
+        -- Crafting-usable stock, not just what is carried: RecipeService:ScanBags walks bags plus
+        -- the warband tabs, so reagents kept in the character bank or the reagent bank read as
+        -- zero and "value owned stock" priced them as a purchase. GetStockByLocation goes through
+        -- C_Item.GetItemCount (bags + bank + warband), the same count Blizzard crafts against.
+        local owned = 0
+        if ctx.stockFn then
+            owned = tonumber(ctx.stockFn(itemID)) or 0
+        elseif ctx.bagCounts then
+            owned = tonumber(ctx.bagCounts[itemID]) or 0
+        end
         local c = econ:ReagentCost(itemID, qty, owned)
         if c then return c, owned > 0 and "owned" or "buy" end
     end
@@ -314,7 +323,9 @@ function CraftEVService:Evaluate(spellID, opts)
     local ctx = {
         useAverage = opts.useAverage == true,
         useOwned = opts.useOwned == true,
-        bagCounts = opts.useOwned and rs:GetBagCounts() or nil,
+        bagCounts = (opts.useOwned and not rs.GetStockByLocation) and rs:GetBagCounts() or nil,
+        stockFn = (opts.useOwned and rs.GetStockByLocation)
+            and function(itemID) return rs:GetStockByLocation(itemID).total end or nil,
         knownBy = opts.knownBy,
         makeVsBuy = makeVsBuy,
         noLiveOps = opts.noLiveOps == true,
