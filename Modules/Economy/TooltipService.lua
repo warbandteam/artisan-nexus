@@ -388,8 +388,12 @@ local function BuildDetailed(entry, itemID)
         local net = econ:NetSaleValue(itemID, price, 1)
         net = net and math.floor(net + 0.5)
         if net and net > 0 then
+            -- NetSaleValue subtracts the expected deposit loss as well as the cut, so the label
+            -- says "fees", not just the cut percentage, which it used to misreport as the whole
+            -- deduction. The percentage stays, since it is the part the player can name.
             local cut = econ:CutRate()
-            Push(entry, string.format(T("TOOLTIP_NET_AFTER_CUT_FMT", "Net after %d%% cut"), math.floor(cut * 100 + 0.5)), Money(net))
+            Push(entry, string.format(T("TOOLTIP_NET_AFTER_FEES_FMT", "Net after fees (%d%% cut)"),
+                math.floor(cut * 100 + 0.5)), Money(net))
         end
     end
 

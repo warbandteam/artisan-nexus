@@ -68,7 +68,9 @@ end
 
 local function Samples(itemID)
     local store = HistoryStore()
-    local row = store and store[itemID]
+    if type(store) ~= "table" or not itemID then return nil end
+    -- Tolerate either key shape, as Economy:GetMarketRow does for ahPrices.
+    local row = store[itemID] or store[tonumber(itemID)] or store[tostring(itemID)]
     return (type(row) == "table" and type(row.samples) == "table") and row.samples or nil
 end
 
@@ -204,6 +206,7 @@ function MarketIntelService:Recompute()
     local ids = {}
     for itemID, row in pairs(store) do
         if type(row) == "table" and type(row.samples) == "table" and #row.samples >= MIN_SAMPLES then
+            -- The raw key indexes `store`; it is normalised where it is written to `_demand`.
             ids[#ids + 1] = itemID
         end
     end
@@ -231,8 +234,11 @@ function MarketIntelService:Recompute()
                     deals[#deals + 1] = deal
                 end
                 local perDay, conf = EstimateDemand(samples, now)
-                if perDay then
-                    demand[itemID] = { unitsPerDay = perDay, confidence = conf }
+                -- Key _demand numerically whatever the history key was, so GetDemandEstimate's
+                -- numeric lookup always matches.
+                local key = tonumber(itemID)
+                if perDay and key then
+                    demand[key] = { unitsPerDay = perDay, confidence = conf }
                 end
             end
         end
@@ -308,6 +314,9 @@ end
 ---@param itemID number
 ---@return number|nil unitsPerDay, string|nil confidence "low"|"medium"|"high"
 function MarketIntelService:GetDemandEstimate(itemID)
+    -- Normalise the key: the recompute stores whatever pairs(ahPriceHistory) yields, so a caller
+    -- passing a string used to get nil (Economy:GetMarketRow defends against the same thing).
+    itemID = tonumber(itemID)
     if not itemID then
         return nil, nil
     end
@@ -315,9 +324,9 @@ function MarketIntelService:GetDemandEstimate(itemID)
     if d then
         return d.unitsPerDay, d.confidence
     end
-    if self._computedAt then
-        return nil, nil
-    end
+    -- No row: fall through to a direct read. This used to be refused once any recompute had run,
+    -- which left every item whose history appeared afterwards reporting no demand until the next
+    -- AH scan completed.
     local perDay, conf = EstimateDemand(Samples(itemID))
     return perDay, conf
 end
