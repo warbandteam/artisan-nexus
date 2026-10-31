@@ -412,7 +412,12 @@ function CraftingOrdersService:EvaluateOrder(order)
     }
 end
 
---- Bucket rows (public browse without a recipe selected): tip is the bucket max, crafter supplies all basics.
+--- Bucket rows (public browse without a recipe selected): crafter supplies all basics.
+--- The bucket's AVERAGE tip is what an unseen order in it is worth; the max is one order out of
+--- however many. Ranking on the max put buckets above equivalent real orders, and so did skipping
+--- the consortium cut that every real order pays. Both are applied here, and `tipMax` keeps the
+--- optimistic figure for display. Buckets expose no per-order cut, so the ledger-observed house
+--- rate is used (Economy:CutRate), which is the same rate the rest of the addon nets sales at.
 local function EvaluateBucket(bucket, orderType)
     local fake = { spellID = bucket.spellID, reagents = {}, orderType = orderType }
     local reagentCost, missing = CrafterReagentCost(fake, CrafterAllocation(bucket.spellID))
@@ -423,7 +428,12 @@ local function EvaluateBucket(bucket, orderType)
     if IsLearned(bucket.spellID) == false then
         flags[#flags + 1] = "notLearned"
     end
-    local tip = tonumber(bucket.tipAmountMax) or tonumber(bucket.tipAmountAvg) or 0
+    local tipMax = tonumber(bucket.tipAmountMax)
+    local tipGross = tonumber(bucket.tipAmountAvg) or tipMax or 0
+    local econ = Economy()
+    local cut = (econ and econ.CutRate and econ:CutRate()) or 0
+    local tipNet = tipGross * (1 - math.max(0, math.min(0.5, cut)))
+    local blocked = IsLearned(bucket.spellID) == false
     return {
         orderID = nil,
         orderType = orderType,
@@ -431,13 +441,15 @@ local function EvaluateBucket(bucket, orderType)
         itemID = bucket.itemID,
         profession = ns.RecipeService and ns.RecipeService.GetProfession and ns.RecipeService:GetProfession(bucket.spellID),
         numAvailable = bucket.numAvailable,
-        tipNet = tip,
+        tipNet = math.floor(tipNet + 0.5),
         tipAvg = tonumber(bucket.tipAmountAvg),
+        tipMax = tipMax,
         rewardsValue = 0,
         reagentCost = math.floor(reagentCost + 0.5),
         concNeeded = nil,
         concCost = 0,
-        net = math.floor(tip - reagentCost + 0.5),
+        net = (not blocked) and math.floor(tipNet - reagentCost + 0.5) or nil,
+        blocked = blocked or nil,
         flags = flags,
     }
 end

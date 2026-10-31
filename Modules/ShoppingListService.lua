@@ -188,6 +188,7 @@ function ShoppingListService:Aggregate(opts)
     end
     local entries = FilterEntriesByProfession(self:GetEntries(), opts)
     local ahs = ns.AHPriceService
+    local econ = ns.Economy
     local withFinishing = p and p.shoppingIncludeFinishing == true
     local agg = {}
     for _, entry in ipairs(entries) do
@@ -197,14 +198,26 @@ function ShoppingListService:Aggregate(opts)
         local slots = (rs.GetMandatorySlots and rs:GetMandatorySlots(entry.spellID, withFinishing)) or {}
         for si = 1, #slots do
             local slot = slots[si]
-            local pickID, pickPrice
+            -- Score candidates the same way the row is priced further down (Economy:BuyCost walks
+            -- the order book and takes the vendor price when it is cheaper), so the picker and
+            -- the pricer agree on which tier is cheapest. Picking on a flat GetPrice let a stale
+            -- listing beat a tier the vendor sells outright. GetPrice stays as the fallback.
+            local slotQty = slot.qty * (entry.count or 1)
+            local pickID, pickCost
             for ci = 1, #slot.candidates do
                 local c = slot.candidates[ci]
                 if c.itemID then
-                    local p = ahs and ahs.GetPrice and ahs:GetPrice(c.itemID)
-                    if pickID == nil or (p and (not pickPrice or p < pickPrice)) then
+                    local cost
+                    if econ and econ.BuyCost then
+                        cost = (econ:BuyCost(c.itemID, slotQty))
+                    end
+                    if not cost then
+                        local p = ahs and ahs.GetPrice and ahs:GetPrice(c.itemID)
+                        cost = p and p * slotQty or nil
+                    end
+                    if pickID == nil or (cost and (not pickCost or cost < pickCost)) then
                         pickID = c.itemID
-                        pickPrice = p or pickPrice
+                        pickCost = cost or pickCost
                     end
                 end
             end
@@ -315,7 +328,6 @@ function ShoppingListService:Aggregate(opts)
             -- Economy:BuyCost also resolves a vendor price on its own, so this is no longer gated
             -- on an AH price existing: a vendor-only reagent used to land in `missing` with its
             -- gold left out of the shopping total entirely.
-            local econ = ns.Economy
             local total, costSource
             if econ and econ.BuyCost then
                 total, costSource = econ:BuyCost(itemID, quantity)
