@@ -571,16 +571,19 @@ local function ResolveFontFaceFromDB(db)
         key = PATH_TO_LSM_KEY[value]
         db.fontFace = key
     end
-    -- Primary: resolve via LSM
+    -- Primary for the keys we ship: our own file, not LSM's. LSM keeps the FIRST
+    -- registration of a key and refuses later ones (LibSharedMedia-3.0.lua:264), so a
+    -- sibling addon that registers "Expressway" before us owns the key and Fetch hands
+    -- back its copy of the file — which disappears the moment that addon is disabled.
+    if LSM_KEY_TO_PATH[key] then
+        return LSM_KEY_TO_PATH[key]
+    end
+    -- Anything else is a font another addon shared; LSM is the only source for it.
     if LSM and LSM.Fetch and LSM.MediaType then
         local path = LSM:Fetch(LSM.MediaType.FONT, key)
         if path and path ~= "" then
             return path
         end
-    end
-    -- Fallback: resolve key via built-in lookup (LSM not loaded)
-    if LSM_KEY_TO_PATH[key] then
-        return LSM_KEY_TO_PATH[key]
     end
     -- Last resort: if value looks like a path, use it directly
     if value:find("\\") then
