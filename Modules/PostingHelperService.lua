@@ -20,8 +20,10 @@
 
     Facts (verified 2026-10-14, wow-ui-source live 12.1.5.70391 + AuctionHouseDocumentation):
       - CommoditySearchResultInfo { unitPrice, quantity, numOwnerItems, containsOwnerItem }.
-      - ItemSearchResultInfo { buyoutAmount, quantity, containsOwnerItem }; buyoutAmount is per
-        unit (ItemSellFrame:OnSearchResultSelected writes it straight into the per-item PriceInput).
+      - ItemSearchResultInfo { buyoutAmount, quantity, containsOwnerItem, containsAccountItem };
+        buyoutAmount is per unit (ItemSellFrame:OnSearchResultSelected writes it straight into the
+        per-item PriceInput). containsAccountItem re-verified 2026-11-01 on warcraft.wiki.gg
+        (API_C_AuctionHouse.GetItemSearchResultInfo).
       - Item sell searches use GetItemKeyFromItem(itemLocation) with itemLevel / itemSuffix zeroed
         for equipment (AuctionHouseUtil.ConvertItemSellItemKey).
       - Sell frames: :GetItem() -> ItemLocation, :GetQuantity(), :GetDuration() (1/2/3),
@@ -195,7 +197,10 @@ local function ReadItemMarket(itemKey)
         if not ok or type(r) ~= "table" then break end
         local unit = tonumber(r.buyoutAmount)
         if unit and unit > 0 then
-            if r.containsOwnerItem then
+            -- containsAccountItem covers listings posted by a warband alt: they are ours too, and
+            -- treating them as competition made the helper undercut itself on every refresh
+            -- (AHPriceService.lua:2092 applies the same rule to the scan).
+            if r.containsOwnerItem or r.containsAccountItem then
                 if not m.ownLowest or unit < m.ownLowest then m.ownLowest = unit end
             else
                 m.totalQty = m.totalQty + (tonumber(r.quantity) or 1)
@@ -243,10 +248,17 @@ end
 
 local function ComputeFloor(itemID, avg, cfg)
     local cut = CutRate()
+    local econ = Econ()
     local floor, source = 0, nil
     local basis, basisSource = CostBasis(itemID)
-    if basis and basis > floor then floor, source = basis, basisSource end
-    local econ = Econ()
+    -- The floor is a posted (gross) price while the basis is what the unit cost us, so the basis
+    -- has to be grossed up the same way the vendor floor below is: posting at exactly the basis
+    -- nets basis * (1 - cut) minus the expected deposit loss, i.e. a guaranteed loss.
+    if basis and cut < 1 then
+        local depLoss = econ and econ.ExpectedDepositLossPerUnit and econ:ExpectedDepositLossPerUnit(itemID)
+        local bf = (basis + (tonumber(depLoss) or 0)) / (1 - cut)
+        if bf > floor then floor, source = bf, basisSource end
+    end
     local vsp = econ and econ.VendorSellPrice and econ:VendorSellPrice(itemID)
     if vsp and cut < 1 then
         local vf = vsp / (1 - cut)

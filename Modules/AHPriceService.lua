@@ -1324,7 +1324,7 @@ function AHPriceService:ProcessGearBrowse(gid)
     end
     local complete = okFull and full ~= false
     local pending = gs.pending
-    local best, qty, byIlvl = {}, {}, {}
+    local best, qty, byIlvl, ownOnly = {}, {}, {}, {}
     local ok, results = pcall(C_AuctionHouse.GetBrowseResults)
     if ok and type(results) == "table" then
         for i = 1, #results do
@@ -1334,11 +1334,20 @@ function AHPriceService:ProcessGearBrowse(gid)
             local price = row and tonumber(row.minPrice)
             local n = row and tonumber(row.totalQuantity) or 0
             if id and pending[id] and price and price > 0 and n > 0 then
-                if not best[id] or price < best[id] then best[id] = price end
-                qty[id] = (qty[id] or 0) + n
-                local lvl = tonumber(key.itemLevel) or 0
-                byIlvl[id] = byIlvl[id] or {}
-                if not byIlvl[id][lvl] or price < byIlvl[id][lvl] then byIlvl[id][lvl] = price end
+                -- BrowseResultInfo.containsOwnerItem (verified 2026-11-01, warcraft.wiki.gg
+                -- API_C_AuctionHouse.GetBrowseResults): the summary covers one of our own auctions,
+                -- so minPrice may be our own listing. Pricing off it makes the posting helper and
+                -- OwnedAuctionsService undercut us; the per-item path below excludes owner and
+                -- account listings, so leave the item to it.
+                if row.containsOwnerItem then
+                    ownOnly[id] = true
+                else
+                    if not best[id] or price < best[id] then best[id] = price end
+                    qty[id] = (qty[id] or 0) + n
+                    local lvl = tonumber(key.itemLevel) or 0
+                    byIlvl[id] = byIlvl[id] or {}
+                    if not byIlvl[id][lvl] or price < byIlvl[id][lvl] then byIlvl[id][lvl] = price end
+                end
             end
         end
     end
@@ -1347,7 +1356,7 @@ function AHPriceService:ProcessGearBrowse(gid)
         if best[itemID] then
             SavePrice(itemID, best[itemID], true, { qty = qty[itemID], qsrc = "b", byIlvl = byIlvl[itemID] })
             resolved = resolved + 1
-        elseif complete then
+        elseif complete and not ownOnly[itemID] then
             -- Current-expansion equipment absent from a complete browse of its classes: no listings.
             MarkNoListings(itemID)
             resolved = resolved + 1
@@ -1430,7 +1439,7 @@ local function ProcessBrowseBatchResults(bid)
             return
         end
     end
-    local priced = {}
+    local priced, ownOnly = {}, {}
     local ok, results = pcall(C_AuctionHouse.GetBrowseResults)
     if ok and type(results) == "table" then
         for ri = 1, #results do
@@ -1440,14 +1449,22 @@ local function ProcessBrowseBatchResults(bid)
                 if minPrice and minPrice > 0 then
                     -- BrowseResultInfo.totalQuantity (12.1.5 AuctionHouseDocumentation): listed units.
                     local id = row.itemKey.itemID
-                    -- Keep an existing order book when this browse row carries no depth.
-                    SavePrice(id, minPrice, true, { qty = tonumber(row.totalQuantity), qsrc = "b" })
-                    priced[id] = true
-                    local depth = AHPriceService._depthTargets
-                    if depth and depth[id] and ItemIsCommodity(id) then
-                        depth[id] = nil
-                        QueueLegacyFollowup(id)
-                        AHPriceService._totalItems = (AHPriceService._totalItems or 0) + 1
+                    -- containsOwnerItem (verified 2026-11-01, warcraft.wiki.gg
+                    -- API_C_AuctionHouse.GetBrowseResults): minPrice may be our own listing, and
+                    -- pricing off it makes the posting helper undercut us. The per-item path
+                    -- excludes owner / account listings, so leave the item to it.
+                    if row.containsOwnerItem then
+                        ownOnly[id] = true
+                    else
+                        -- Keep an existing order book when this browse row carries no depth.
+                        SavePrice(id, minPrice, true, { qty = tonumber(row.totalQuantity), qsrc = "b" })
+                        priced[id] = true
+                        local depth = AHPriceService._depthTargets
+                        if depth and depth[id] and ItemIsCommodity(id) then
+                            depth[id] = nil
+                            QueueLegacyFollowup(id)
+                            AHPriceService._totalItems = (AHPriceService._totalItems or 0) + 1
+                        end
                     end
                 end
             end
@@ -1467,7 +1484,12 @@ local function ProcessBrowseBatchResults(bid)
     end
     for itemID in pairs(pending) do
         if not priced[itemID] then
-            if browseFull then
+            if ownOnly[itemID] then
+                -- Only our own auctions were visible in the summary: the per-item search excludes
+                -- them and gives the real competing price.
+                QueueLegacyFollowup(itemID)
+                legacyQueued = legacyQueued + 1
+            elseif browseFull then
                 -- A complete browse lists every searched key that has listings, commodities included
                 -- (commodity browse rows are priced above): absent = no listings. Re-querying each one
                 -- through the 100/min per-item path is what made the end of a scan crawl.

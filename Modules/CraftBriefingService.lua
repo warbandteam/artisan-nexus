@@ -49,6 +49,13 @@ local function ProactiveAlert(topRow, store, scanKind)
     if topRow.margin < minProfit then
         return
     end
+    -- A price older than the freshness window makes `margin` fiction, and a raid warning is the
+    -- loudest surface in the addon: only alert on a row the EV engine stands behind. `fresh` is
+    -- the output price age (ProfitabilityService); `confidence` also folds in an unpriced or
+    -- stale reagent and an operation snapshot taken on another character.
+    if topRow.fresh == false or topRow.confidence == "low" then
+        return
+    end
     local sig = string.format("%s:%d:%d", tostring(topRow.spellID), topRow.margin, topRow.outputItem or 0)
     if store.lastAlertSignature == sig then
         return
@@ -142,6 +149,14 @@ function CraftBriefingService:Rebuild(scanKind)
     local silent = (scanKind == "ops" or scanKind == "settings" or scanKind == "schematics")
     store.scanKind = (silent and store.scanKind) or scanKind or "unknown"
     store.priceMode = useAverage and "avg" or "spot"
+    -- Whether the leading row is backed by a price inside profile.ahFreshTTL. The list still shows
+    -- stale rows (an empty briefing would be worse); this says so, and the same rule gates the
+    -- proactive alert. nil = no rows, so "stale" and "nothing to show" stay distinguishable.
+    if top[1] then
+        store.topFresh = top[1].fresh ~= false
+    else
+        store.topFresh = nil
+    end
     store.ownedProfessions = owned
     store.top = top
     store.warnings = warnings

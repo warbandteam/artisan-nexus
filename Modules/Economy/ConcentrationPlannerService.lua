@@ -139,16 +139,29 @@ local function EvaluateRecipe(spellID, profession, horizonDays)
 end
 
 --- Greedy allocation in descending gpc. Returns plan rows + marginal gpc (shadow price).
+--- The marginal gpc is a shadow price only while the pool actually binds: once every candidate
+--- has taken all the crafts its demand can absorb and points are still left, one more point buys
+--- nothing and is worth 0. Reporting the last funded recipe's gpc there made
+--- Economy:ConcentrationValue charge every concentration craft for a scarcity that does not
+--- exist, suppressing concentration use exactly when the pool was about to overflow.
 local function Allocate(candidates, pool)
     table.sort(candidates, function(a, b) return a.gpc > b.gpc end)
     local rows, remaining, marginal = {}, pool, 0
+    -- True while some candidate could still turn another point into gold (demand left, or no
+    -- demand data at all, or candidates we never reached because the pool ran out).
+    local unmetDemand = false
     for i = 1, #candidates do
         if remaining < 1 then
+            -- Out of points with candidates still unvisited: the pool is what binds.
+            unmetDemand = true
             break
         end
         local c = candidates[i]
         local byConc = math.floor(remaining / c.concPerCraft)
         local crafts = c.maxCrafts and math.min(byConc, c.maxCrafts) or byConc
+        if not c.maxCrafts or crafts < c.maxCrafts then
+            unmetDemand = true
+        end
         if crafts > 0 then
             local used = crafts * c.concPerCraft
             remaining = remaining - used
@@ -165,6 +178,9 @@ local function Allocate(candidates, pool)
                 demandConfidence = c.demandConfidence,
             }
         end
+    end
+    if not unmetDemand then
+        marginal = 0
     end
     return rows, marginal, remaining
 end
