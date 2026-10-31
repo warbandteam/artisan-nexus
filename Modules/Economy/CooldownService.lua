@@ -85,7 +85,18 @@ local function Prune(charStore, now)
         end
     end
     if #list > MAX_PER_CHAR then
-        table.sort(list, function(a, b) return (a.recordedAt or 0) > (b.recordedAt or 0) end)
+        -- Every row touched by one ScanOpenProfession pass shares the same `recordedAt` (one
+        -- time() per chunk step), so sorting on it alone left the comparator returning false for
+        -- most pairs and the evicted row effectively random -- a five-day cooldown with real gold
+        -- on it could go while a long-ready row stayed. Keep the furthest-future cooldown, which
+        -- is the one we cannot re-derive by looking at the profession window.
+        table.sort(list, function(a, b)
+            local ar, br = tonumber(a.readyAt) or 0, tonumber(b.readyAt) or 0
+            if ar ~= br then return ar > br end
+            local arec, brec = tonumber(a.recordedAt) or 0, tonumber(b.recordedAt) or 0
+            if arec ~= brec then return arec > brec end
+            return (tonumber(a.spellID) or 0) < (tonumber(b.spellID) or 0)
+        end)
         for i = MAX_PER_CHAR + 1, #list do
             charStore[list[i].spellID] = nil
         end
@@ -312,7 +323,8 @@ function CooldownService:RemindReady()
     if not g then
         return
     end
-    local today = date("%Y-%m-%d")
+    -- Anchored on the realm daily reset, not the local client day.
+    local today = ns.Utilities:GetResetPeriodKey()
     g.cooldownReminder = g.cooldownReminder or {}
     if g.cooldownReminder.lastDay == today then
         return

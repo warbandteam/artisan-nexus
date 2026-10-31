@@ -33,6 +33,28 @@ function Utilities:GetCharacterGUID()
     return guid
 end
 
+--- Key for "once per daily-reset period" state (cooldown and concentration reminders).
+--- date("%Y-%m-%d") is the LOCAL client day, while cooldowns and concentration regen roll on the
+--- realm's daily reset, so a player whose local midnight falls on the other side of that reset got
+--- the reminder suppressed on the day it was due, or twice around the boundary.
+--- C_DateAndTime.GetSecondsUntilDailyReset() -> number (verified 2026-11-01, warcraft.wiki.gg
+--- API_C_DateAndTime.GetSecondsUntilDailyReset; added 9.0.2). Bucketing the NEXT reset instant
+--- gives one stable key for the whole period between two resets, whatever the local timezone.
+--- The page does not state the reference point for the value, so the local-day key remains the
+--- fallback when the call is unavailable or returns nothing usable.
+---@return string
+function Utilities:GetResetPeriodKey()
+    local f = C_DateAndTime and C_DateAndTime.GetSecondsUntilDailyReset
+    if f then
+        local ok, secs = pcall(f)
+        secs = ok and tonumber(secs) or nil
+        if secs and secs >= 0 then
+            return "r" .. tostring(math.floor((time() + secs) / 86400))
+        end
+    end
+    return "l" .. date("%Y-%m-%d")
+end
+
 --- AN-native "characters" collector (driven by ns.CharacterData, skipped while Warband Nexus covers
 --- the roster): upsert the current character into `db.global.charRegistry[guid]` (display metadata
 --- only — name/realm/class refresh on every login; GUID stays stable).

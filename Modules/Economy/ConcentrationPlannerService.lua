@@ -95,7 +95,14 @@ local function EvaluateRecipe(spellID, profession, horizonDays)
     if not ev or not ev.Evaluate then
         return nil
     end
-    local ok, res = pcall(ev.Evaluate, ev, spellID, { profession = profession })
+    -- Same pricing basis the Hub ranks on: the shadow price this feeds back into
+    -- Economy:ConcentrationValue lands in EVERY profit figure, so it must not be computed on a
+    -- different basis than the rows it contaminates.
+    local prof = ns.db and ns.db.profile
+    local ok, res = pcall(ev.Evaluate, ev, spellID, {
+        profession = profession,
+        useAverage = prof and prof.craftBriefingPriceMode == "avg" or nil,
+    })
     if not ok then
         return nil
     end
@@ -150,6 +157,8 @@ local function Allocate(candidates, pool)
     -- True while some candidate could still turn another point into gold (demand left, or no
     -- demand data at all, or candidates we never reached because the pool ran out).
     local unmetDemand = false
+    -- Remaining crafts the market can absorb per output item, shared across recipes.
+    local demandBudget = {}
     for i = 1, #candidates do
         if remaining < 1 then
             -- Out of points with candidates still unvisited: the pool is what binds.
@@ -158,9 +167,22 @@ local function Allocate(candidates, pool)
         end
         local c = candidates[i]
         local byConc = math.floor(remaining / c.concPerCraft)
-        local crafts = c.maxCrafts and math.min(byConc, c.maxCrafts) or byConc
-        if not c.maxCrafts or crafts < c.maxCrafts then
+        -- Demand is a property of the OUTPUT ITEM, not of the recipe. Two recipes producing the
+        -- same item (two quality tiers resolve to the same itemID often enough) each claimed the
+        -- whole market, so the plan could allocate twice the concentration the market can absorb
+        -- and still call both sides sold. The budget is now spent down as crafts are assigned.
+        local cap = c.maxCrafts
+        if cap and c.itemID then
+            local left = demandBudget[c.itemID]
+            if left == nil then left = cap end
+            cap = math.min(cap, math.max(0, left))
+        end
+        local crafts = cap and math.min(byConc, cap) or byConc
+        if not cap or crafts < cap then
             unmetDemand = true
+        end
+        if cap and c.itemID and crafts > 0 then
+            demandBudget[c.itemID] = math.max(0, (demandBudget[c.itemID] or c.maxCrafts) - crafts)
         end
         if crafts > 0 then
             local used = crafts * c.concPerCraft
@@ -172,8 +194,12 @@ local function Allocate(candidates, pool)
                 crafts = crafts,
                 concUsed = math.floor(used + 0.5),
                 gpc = c.gpc,
-                expectedProfit = math.floor(crafts * c.profitPerCraft + 0.5),
-                demandCapped = c.maxCrafts ~= nil and crafts == c.maxCrafts,
+                -- The allocation ranks by gpc (profit ABOVE the same craft without
+                -- concentration), so the plan's value is that delta. Reporting the total profit
+                -- counted gold the player would have earned without spending a single point.
+                expectedProfit = math.floor(crafts * c.gpc * c.concPerCraft + 0.5),
+                totalProfit = math.floor(crafts * c.profitPerCraft + 0.5),
+                demandCapped = cap ~= nil and crafts == cap,
                 demandPerDay = c.demandPerDay,
                 demandConfidence = c.demandConfidence,
             }
@@ -364,7 +390,8 @@ function ConcentrationPlannerService:CheckOverflowAlert()
     if not g then
         return
     end
-    local today = date("%Y-%m-%d")
+    -- Anchored on the realm daily reset, not the local client day.
+    local today = ns.Utilities:GetResetPeriodKey()
     g.concentrationPlanner = g.concentrationPlanner or {}
     if g.concentrationPlanner.lastAlertDay == today then
         return
