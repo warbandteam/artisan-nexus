@@ -306,26 +306,25 @@ local function DispatchCraftBegin(recipeSpellID)
 end
 
 --- Spell-based item enchants that are not professions — shaman weapon imbues
---- (Flametongue/Windfury Weapon), weapon oils and stones — raise the same
---- TRADE_SKILL_CRAFT_BEGIN + TRADE_SKILL_ITEM_CRAFTED_RESULT pair as a craft, with
---- isEnchant set and the enchanted item as itemID. Nothing enters the bags, so they
---- must not reach the session loot toast, the ledger or the queue. A real enchanting
---- craft keeps its profession through RecipeService, so only the ownerless casts drop.
+--- (Flametongue/Windfury Weapon), weapon oils and stones — raise
+--- TRADE_SKILL_ITEM_CRAFTED_RESULT with isEnchant set and the enchanted item as itemID,
+--- while no profession recipe owns the cast. Verified in-game 2026-10-31 (Flametongue
+--- Weapon): no TRADE_SKILL_CRAFT_BEGIN fires at all, so pendingSpellID is nil or stale,
+--- and each cast gets its own operationID. Nothing enters the bags, so they must not
+--- reach the session loot toast, the ledger or the queue. A real enchanting craft
+--- resolves to a profession through RecipeService and still goes through.
 ---@param data table|nil CraftingItemResultData
 ---@return boolean
 local function IsNonRecipeEnchant(data)
     if type(data) ~= "table" or not data.isEnchant then
         return false
     end
-    local spellID = tonumber(CraftEventService.pendingSpellID)
-    if not spellID then
-        return false
-    end
     local rs = ns.RecipeService
     if not (rs and rs.GetProfession) then
         return false
     end
-    return rs:GetProfession(spellID) == nil
+    local spellID = CraftEventService:ResolveSpellForResult(data, CraftEventService.pendingSpellID)
+    return spellID == nil or rs:GetProfession(spellID) == nil
 end
 
 local function DispatchCraftResult(data)
