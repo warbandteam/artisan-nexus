@@ -245,12 +245,10 @@ local function SummaryFromEstimate(spellID, itemID)
     local profit
     local econ = ns.Economy
     if unit and econ then
-        -- Price the sale the way CraftEVService does: one legal undercut below the reference,
-        -- then net of cut and expected deposit loss. Valuing it at the bare reference assumed we
-        -- sell AT the current cheapest listing rather than beneath it, so this fallback read
-        -- higher than the Hub row for the same recipe.
-        local saleUnit = econ.SaleUnitPrice and econ:SaleUnitPrice(unit) or unit
-        profit = econ:NetSaleValue(itemID, saleUnit, yield) - cost
+        -- Same contract and same basis as CraftEVService, so this fallback cannot read higher
+        -- than the Hub row for the same recipe.
+        local net = econ.ValueOutput and econ:ValueOutput(itemID, unit, yield, { undercut = true })
+        if net then profit = net - cost end
     end
     return { cost = cost, yield = yield, profit = profit, goldPerConc = BriefingGoldPerConc(spellID), source = "estimate" }
 end
@@ -391,7 +389,9 @@ local function BuildDetailed(entry, itemID)
     end
 
     if Cfg("showNetAfterCut") and econ and price and source ~= "vendor" then
-        local net = econ:NetSaleValue(itemID, price, 1)
+        -- Display line: "if I sold at the price shown above", so the reference itself, not an
+        -- undercut of it. Stated explicitly rather than left to the default.
+        local net = econ:ValueOutput(itemID, price, 1, { undercut = false })
         net = net and math.floor(net + 0.5)
         if net and net > 0 then
             -- NetSaleValue subtracts the expected deposit loss as well as the cut, so the label

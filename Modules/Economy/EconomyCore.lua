@@ -178,13 +178,10 @@ end
 ---@param unitPrice number
 ---@param qty number|nil default 1
 ---@return number copper
+--- Kept as the "sell at exactly this price" case of ValueOutput below, which is the contract
+--- every caller should state its intent through.
 function Economy:NetSaleValue(itemID, unitPrice, qty)
-    qty = tonumber(qty) or 1
-    unitPrice = tonumber(unitPrice) or 0
-    if unitPrice <= 0 or qty <= 0 then return 0 end
-    local cut = self:CutRate()
-    local gross = unitPrice * qty * (1 - cut)
-    return gross - self:ExpectedDepositLossPerUnit(itemID) * qty
+    return (self:ValueOutput(itemID, unitPrice, tonumber(qty) or 1, { undercut = false })) or 0
 end
 
 --- Unit price a new listing actually gets: one legal undercut below the market reference, rounded
@@ -201,6 +198,44 @@ function Economy:SaleUnitPrice(unitPrice)
     -- At the AH's minimum price there is no room to undercut: match the reference.
     if posted <= 0 then return unitPrice end
     return posted
+end
+
+--- THE valuation contract: what selling `qty` of `itemID` against a market reference of
+--- `unitPrice` is expected to put in the mailbox. Every surface that answers "what is this craft
+--- worth" goes through here, so they cannot drift apart again; each caller states its intent
+--- rather than assembling its own combination of SaleUnitPrice / NetSaleValue / raw price.
+---
+--- `opts.undercut` (default true) decides whether we price the sale at one legal undercut below
+--- the reference (what a seller who wants to move stock actually gets) or at the reference itself
+--- (what "if I sold at exactly this price" means on a tooltip). It was the silent difference
+--- between the EV engine and the craft ledger, which made predicted-vs-realized read optimistic
+--- about reality and pessimistic about the model.
+--- `opts.cut` and `opts.deposit` (both default true) turn off the house cut and the expected
+--- deposit loss for callers that want a gross figure.
+---@param itemID number
+---@param unitPrice number market reference price per unit
+---@param qty number
+---@param opts table|nil { undercut?: boolean, cut?: boolean, deposit?: boolean }
+---@return number|nil net copper (nil when unitPrice is not usable)
+---@return number|nil saleUnit copper per unit the sale was priced at
+function Economy:ValueOutput(itemID, unitPrice, qty, opts)
+    unitPrice = tonumber(unitPrice) or 0
+    qty = tonumber(qty) or 0
+    if unitPrice <= 0 or qty <= 0 then return nil, nil end
+    opts = opts or {}
+    local saleUnit = unitPrice
+    if opts.undercut ~= false then
+        saleUnit = self:SaleUnitPrice(unitPrice)
+        if not saleUnit or saleUnit <= 0 then saleUnit = unitPrice end
+    end
+    local net = saleUnit * qty
+    if opts.cut ~= false then
+        net = net * (1 - self:CutRate())
+    end
+    if opts.deposit ~= false then
+        net = net - self:ExpectedDepositLossPerUnit(itemID) * qty
+    end
+    return net, saleUnit
 end
 
 ---@param itemID number

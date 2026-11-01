@@ -79,6 +79,23 @@ local function Price(itemID)
     return nil
 end
 
+--- Cost of `qty` reagents, priced the way CraftEVService prices them: Economy:BuyCost walks the
+--- stored order book and takes the vendor price when it is cheaper. A flat unit price understated
+--- what a thin market really costs to buy out, so realized cost read low against predicted cost.
+---@return number|nil total, number|nil unit
+local function ReagentCost(itemID, qty)
+    qty = tonumber(qty) or 0
+    if not itemID or qty <= 0 then return nil, nil end
+    local econ = ns.Economy
+    if econ and econ.BuyCost then
+        local total = (econ:BuyCost(itemID, qty))
+        if total then return total, total / qty end
+    end
+    local p = Price(itemID)
+    if p then return p * qty, p end
+    return nil, nil
+end
+
 ---------------------------------------------------------------------------
 -- Pending operations (settle window)
 ---------------------------------------------------------------------------
@@ -316,9 +333,9 @@ local function ActualCost(spellID, alloc)
     local cost, missing, estimated, used = 0, 0, 0, {}
     local function Add(itemID, qty)
         if not itemID or qty <= 0 then return end
-        local p = Price(itemID)
-        used[#used + 1] = { itemID = itemID, qty = qty, price = p }
-        if p then cost = cost + p * qty else missing = missing + 1 end
+        local total, unit = ReagentCost(itemID, qty)
+        used[#used + 1] = { itemID = itemID, qty = qty, price = unit }
+        if total then cost = cost + total else missing = missing + 1 end
     end
     -- Fixed slots from the schematic; required ModifiedReagent slots the allocation left out.
     for i = 1, #order do
@@ -504,10 +521,13 @@ local function BuildRow(op)
         if used and #used > 0 then row.reagents = used end
         if missing and missing > 0 then row.costMissing = missing end
     end
+    -- Resourcefulness returns are reagents we keep, so they are worth what we would otherwise
+    -- have paid for them: the same buy cost the craft's own reagents are priced at, not a flat
+    -- unit price.
     local rv = 0
     for i = 1, #returned do
-        local p = returned[i].itemID and Price(returned[i].itemID)
-        if p then rv = rv + p * returned[i].qty end
+        local total = returned[i].itemID and (ReagentCost(returned[i].itemID, returned[i].qty))
+        if total then rv = rv + total end
     end
     if rv > 0 then row.returnedValue = rv end
     local pred = PredictedEV(spellID, spent > 0)
@@ -522,11 +542,12 @@ local function BuildRow(op)
         if p then
             priced = true
             value = value + p * o.qty
-            if econ and econ.NetSaleValue then
-                net = net + econ:NetSaleValue(o.itemID, p, o.qty)
-            else
-                net = net + p * o.qty
-            end
+            -- Same contract and same basis as CraftEVService (Economy:ValueOutput, undercut):
+            -- valuing realized output at the bare reference while the prediction undercut it made
+            -- every predicted-vs-realized comparison flatter us. Rows written before this change
+            -- carry the old, higher basis.
+            local outNet = econ and econ.ValueOutput and econ:ValueOutput(o.itemID, p, o.qty, { undercut = true })
+            net = net + (outNet or (p * o.qty))
         end
     end
     if priced then

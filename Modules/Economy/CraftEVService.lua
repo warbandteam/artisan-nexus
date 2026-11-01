@@ -398,7 +398,12 @@ function CraftEVService:Evaluate(spellID, opts)
         -- output's price would value a rank-2 craft at the rank-1 price, or the other way round).
         local item = OutputItemForTier(sch, tier > 0 and tier or nil)
         local unit, fromHistory = OutputUnitPrice(item, ctx.useAverage)
-        local saleUnit = unit and econ:SaleUnitPrice(unit) or nil
+        -- One contract for every surface that values an output (Economy:ValueOutput); a craft is
+        -- sold by undercutting, so this is the undercut basis.
+        local revenueNet, saleUnit
+        if unit then
+            revenueNet, saleUnit = econ:ValueOutput(item, unit, yield, { undercut = true })
+        end
         for i = 1, #missing do
             if not missingSeen[missing[i]] then
                 missingSeen[missing[i]] = true
@@ -413,7 +418,7 @@ function CraftEVService:Evaluate(spellID, opts)
             fromHistory = fromHistory,
             yield = yield,
             revenueGross = saleUnit and saleUnit * yield or nil,
-            revenueNet = saleUnit and econ:NetSaleValue(item, saleUnit, yield) or nil,
+            revenueNet = revenueNet,
             reagentCost = cost,
             alloc = used,
             slotPicks = picks,

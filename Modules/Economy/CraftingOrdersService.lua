@@ -113,8 +113,10 @@ local function RewardValue(reward)
         end
         local price = ns.AHPriceService and ns.AHPriceService.GetPrice and ns.AHPriceService:GetPrice(itemID)
         if price and price > 0 then
-            if econ and econ.NetSaleValue then
-                return econ:NetSaleValue(itemID, price, count), false
+            if econ and econ.ValueOutput then
+                -- A reward we would list and sell, so the undercut basis, same as a craft.
+                local net = econ:ValueOutput(itemID, price, count, { undercut = true })
+                if net then return net, false end
             end
             return price * count, false
         end
