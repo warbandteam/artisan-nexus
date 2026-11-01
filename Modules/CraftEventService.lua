@@ -155,7 +155,19 @@ end
 
 --- Units a single result event put in the bags.
 --- `multicraft` is the number of extra items (Blizzard_ProfessionsCraftingOutputLog shows it
---- as a separate "+N" row). Whether `quantity` already includes those extras is UNVERIFIED
+--- as a separate "+N" row).
+---
+--- EVIDENCE THAT THE DEFAULT BELOW IS WRONG (checked 2026-11-01, wow-ui-source live): that log
+--- sets the result button's count from `resultData.quantity` alone
+--- (Blizzard_ProfessionsCraftingOutputLog.lua:46) and gives the Multicraft row no count at all,
+--- only a tooltip formatting `resultData.multicraft` into a description (:72-82). If `quantity`
+--- excluded the extras, Blizzard's own log would show fewer items than the craft produced. So
+--- `quantity` most likely ALREADY includes them, and the "not included" default here
+--- double-counts a proc whenever quantity <= quantityMax -- which also inflates the multicraft
+--- calibration that feeds every recipe's expected value.
+--- NOT flipped on that inference alone: it changes what gets written to the ledger. The stored
+--- rows keep `multicraft` separately, so a migration can recompute them once one in-game proc
+--- settles it. Whether `quantity` already includes those extras is still UNVERIFIED
 --- (OutputLog only shows `quantity` as the item count and `multicraft` in a tooltip):
 --- when quantity exceeds the recipe's quantityMax the extras are taken as included,
 --- otherwise they are added on top. quantityMax comes from the cached RecipeService

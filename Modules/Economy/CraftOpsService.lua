@@ -126,6 +126,12 @@ local function StatNameMap()
 end
 
 --- Parse CraftingOperationInfo.bonusStats / GatheringOperationInfo.bonusStats.
+--- `ratingPct` is a 0-100 percentage, so dividing by 100 here is correct. Neither warcraft.wiki.gg
+--- nor Blizzard_APIDocumentationGenerated states the unit (both give only "number"), but Blizzard's
+--- own consumer does: ProfessionsCrafterDetailsStatLineMixin:InitBonusStat takes ratingPct as
+--- `pctValue`, and when the line displays as a percentage it formats that value straight into
+--- "%d%%" (Blizzard_ProfessionsTemplates/Blizzard_ProfessionsRecipeCrafterDetails.lua:98-104,
+--- 120-122, wow-ui-source live, checked 2026-11-01). A 0-1 fraction would render as "0%".
 ---@param bonusStats table[]|nil
 ---@return table { multicraft = 0..1, resourcefulness = 0..1, ingenuity = 0..1, raw = { [name] = pct } }
 function CraftOpsService:ParseBonusStats(bonusStats)
