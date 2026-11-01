@@ -171,6 +171,8 @@ L["RECIPE_MATCHER_UNPRICED_FMT"] = "(%d unpriced)"
 L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"] = "Sincroniza los precios de la subasta para valorar reagentes."
 
 L["HUB_FARM_GOTO_TT"] = "Haz clic para abrir el botín de sesión de esta profesión."
+L["HUB_SHOP_AH_GOTO_TT"] = "Click to search the Auction House for this reagent."
+L["AH_BROWSE_BUSY"] = "Finish or pause the AH scan first."
 
 L["HUB_HARVEST_BANNER_FMT"] = "%d / %d recetas en caché (%d%%). Abre tus profesiones una vez."
 L["RECIPE_MATCHER_STATUS_PARTIAL"] = "%d / %d recetas en caché (%d%%)"

@@ -2027,6 +2027,46 @@ function AHPriceService:IsKnownUnlisted(itemID)
     return (time() - t) < ttl
 end
 
+--- Put an item in front of the player on the Buy tab so they can buy it with Blizzard's own
+--- controls. We only search: C_AuctionHouse.SendBrowseQuery carries no HasRestrictions, while
+--- StartCommoditiesPurchase and PlaceBid both do (AuctionHouseDocumentation.lua, 12.1.5 live),
+--- so an addon cannot complete the purchase and must not pretend to. Deliberately no call into
+--- AuctionHouseFrame's own methods either — buying runs through that frame, and taint picked up
+--- here would surface as a blocked action on the player's Buy click.
+--- ExactMatch keeps a reagent name from landing on a similarly named item.
+---@param itemID number
+---@return boolean started false when the AH is shut, a scan owns the query budget, or the name is not cached yet
+function AHPriceService:BrowseItemAtAH(itemID)
+    itemID = tonumber(itemID)
+    if not itemID or not AHIsOpen() then
+        return false
+    end
+    --- A scan snapshots and restores Blizzard's active query; a search in the middle of one
+    --- would be overwritten by the next batch anyway.
+    if self._scanning then
+        Notify(L("AH_BROWSE_BUSY", "Finish or pause the AH scan first."))
+        return false
+    end
+    local name = C_Item and C_Item.GetItemNameByID and C_Item.GetItemNameByID(itemID)
+    if issecretvalue and issecretvalue(name) then
+        return false
+    end
+    if type(name) ~= "string" or name == "" then
+        --- Not cached yet: ask for it, the caller can click again once it arrives.
+        if C_Item and C_Item.RequestLoadItemDataByID then
+            pcall(C_Item.RequestLoadItemDataByID, itemID)
+        end
+        return false
+    end
+    local ok = pcall(C_AuctionHouse.SendBrowseQuery, {
+        searchString = name,
+        sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } },
+        filters = { Enum.AuctionHouseFilter.ExactMatch },
+        itemClassFilters = {},
+    })
+    return ok == true
+end
+
 --- Resolve the in-flight commodity query. `final` = COMMODITY_SEARCH_RESULTS_RECEIVED (Blizzard's
 --- "results loaded" signal, Blizzard_AuctionHouseCommoditiesBuyFrame.lua): only then is an empty
 --- result trusted as "no listings"; an empty UPDATED may be a partial refresh.

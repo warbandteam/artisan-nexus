@@ -86,6 +86,8 @@ L["HUB_CLEAR_SHOP_BTN"] = "Clear list"
 L["HUB_CLEAR_QUEUE_BTN"] = "Clear queue"
 L["HUB_PROF_FILTER_ALL"] = "All"
 L["HUB_FARM_GOTO_TT"] = "Click to open Session loot for this profession."
+L["HUB_SHOP_AH_GOTO_TT"] = "Click to search the Auction House for this reagent."
+L["AH_BROWSE_BUSY"] = "Finish or pause the AH scan first."
 L["HUB_HARVEST_BANNER_FMT"] = "%d / %d recipes cached (%d%%). Open your professions once."
 L["HUB_PROF_FILTER_TT"] = "Filter by profession (all Hub pages)."
 

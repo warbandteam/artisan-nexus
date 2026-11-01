@@ -177,6 +177,8 @@ L["RECIPE_MATCHER_UNPRICED_FMT"] = "(%d unpriced)"
 L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"] = "同步拍卖行价格以计算材料成本。"
 
 L["HUB_FARM_GOTO_TT"] = "点击打开该专业的会话战利品。"
+L["HUB_SHOP_AH_GOTO_TT"] = "Click to search the Auction House for this reagent."
+L["AH_BROWSE_BUSY"] = "Finish or pause the AH scan first."
 
 L["HUB_HARVEST_BANNER_FMT"] = "已缓存 %d / %d 配方（%d%%）。请各打开一次专业。"
 L["RECIPE_MATCHER_STATUS_PARTIAL"] = "已缓存 %d / %d 配方（%d%%）"

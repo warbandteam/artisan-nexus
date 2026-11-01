@@ -226,6 +226,9 @@ local function BuyRowEnter(row, d)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(string.format(SafeL("HUB_SHOP_GATHER_FMT", "Gatherable: %s"), FarmLabel(cat)), 0.6, 0.8, 1)
         GameTooltip:AddLine(SafeL("HUB_FARM_GOTO_TT", "Click to open Session loot for this profession."), 0.7, 0.7, 0.7)
+    elseif (d.short or 0) > 0 and ns.Economy and ns.Economy.IsAuctionHouseOpen and ns.Economy:IsAuctionHouseOpen() then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(SafeL("HUB_SHOP_AH_GOTO_TT", "Click to search the Auction House for this reagent."), 0.7, 0.7, 0.7)
     end
     if d.altDetails and #d.altDetails > 0 then
         GameTooltip:AddLine(" ")
@@ -260,6 +263,13 @@ local function ItemRowClick(row, d, button)
     local cat = farmCategory[d.itemID]
     if cat then
         OpenFarmTab(cat)
+        return
+    end
+    --- Bought, not gathered: with the auction house open, put it on the Buy tab so the
+    --- player can buy it there. The purchase itself stays Blizzard's (see BrowseItemAtAH).
+    local ahs = ns.AHPriceService
+    if ahs and ahs.BrowseItemAtAH then
+        ahs:BrowseItemAtAH(d.itemID)
     end
 end
 

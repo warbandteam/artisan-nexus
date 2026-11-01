@@ -171,6 +171,8 @@ L["RECIPE_MATCHER_UNPRICED_FMT"] = "(%d unpriced)"
 L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"] = "재료 가격을 보려면 경매장 가격을 동기화하세요."
 
 L["HUB_FARM_GOTO_TT"] = "클릭하여 이 전문 기술의 세션 전리품을 여세요."
+L["HUB_SHOP_AH_GOTO_TT"] = "Click to search the Auction House for this reagent."
+L["AH_BROWSE_BUSY"] = "Finish or pause the AH scan first."
 
 L["HUB_HARVEST_BANNER_FMT"] = "%d / %d 레시피 캐시됨 (%d%%). 전문 기술을 한 번씩 여세요."
 L["RECIPE_MATCHER_STATUS_PARTIAL"] = "%d / %d 레시피 캐시됨 (%d%%)"
