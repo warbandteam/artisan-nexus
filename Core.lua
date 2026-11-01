@@ -231,6 +231,11 @@ local defaults = {
             ownedReagentsAtSellValue = true,
             --- Use intermediate crafted reagents' craft cost when cheaper than buying (make vs buy).
             makeVsBuy = true,
+            --- Reagent cost basis: "market" = what it would cost to buy now (default),
+            --- "actual" = what we actually paid (SalesLedgerService cost basis, decayed weighted
+            --- average of real purchases), "lower" = the cheaper of the two. "actual" answers
+            --- "am I making money on the mats I actually bought", which market pricing cannot.
+            costBasis = "market",
             --- Concentration planner horizon (days of regen + current pool to allocate).
             plannerHorizonDays = 2,
             --- Market deals: current min at or below this share of the 7-day mean.

@@ -238,6 +238,30 @@ function Economy:ValueOutput(itemID, unitPrice, qty, opts)
     return net, saleUnit
 end
 
+--- What `qty` of a reagent cost us, on the configured basis. "actual" uses the decayed weighted
+--- average of real purchases the sales ledger keeps (SalesLedgerService:GetAvgBuyPrice), which
+--- until now nothing but the posting floor consumed; "lower" takes the cheaper of that and the
+--- market. Falls back to the market whenever we have never bought the item.
+---@param itemID number
+---@param qty number
+---@param marketTotal number|nil already-computed market cost for the same qty
+---@return number|nil copper total, string|nil source "actual"|"market"
+function Economy:AcquisitionCost(itemID, qty, marketTotal)
+    qty = tonumber(qty) or 0
+    if not itemID or qty <= 0 then return nil, nil end
+    local basis = self:Config().costBasis
+    if basis ~= "actual" and basis ~= "lower" then return marketTotal, marketTotal and "market" or nil end
+    local ledger = ns.SalesLedgerService
+    local avg = ledger and ledger.GetAvgBuyPrice and ledger:GetAvgBuyPrice(itemID)
+    avg = tonumber(avg)
+    if not avg or avg <= 0 then return marketTotal, marketTotal and "market" or nil end
+    local actual = avg * qty
+    if basis == "lower" and marketTotal and marketTotal < actual then
+        return marketTotal, "market"
+    end
+    return actual, "actual"
+end
+
 ---@param itemID number
 ---@return table|nil raw ahPrices row { buyout, updatedAt, qty?, book? }
 function Economy:GetMarketRow(itemID)

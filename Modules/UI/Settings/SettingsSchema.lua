@@ -466,6 +466,19 @@ local CRAFTING_ECONOMY = {
                 "Values reagents you own at their net sale price."),
             EconToggle("makeVsBuy", "CONFIG_ECON_MAKE_VS_BUY", "Make vs buy",
                 "Uses craft cost when cheaper than buying."),
+            Text({ type = "radio", key = "economy.costBasis",
+                values = LocaleOptions({
+                    { "market", "CONFIG_ECON_BASIS_MARKET", "Buy price now" },
+                    { "actual", "CONFIG_ECON_BASIS_ACTUAL", "What you paid",
+                        "CONFIG_ECON_BASIS_ACTUAL_DESC", "Uses your own purchases when known." },
+                    { "lower", "CONFIG_ECON_BASIS_LOWER", "Whichever is lower" },
+                }),
+                get = function()
+                    local v = EconGet("costBasis")
+                    return (v == "actual" or v == "lower") and v or "market"
+                end,
+                set = function(v) EconSet("costBasis", v) end,
+            }, "CONFIG_ECON_BASIS_LABEL", "Reagent cost basis"),
             EconGoldSlider("concentrationValue", "CONFIG_ECON_CONC_VALUE", "Concentration value",
                 "Gold per point. Auto uses the planner's estimate.", {
                 min = 0, max = 50, step = 0.5, hint = ConcentrationHint,

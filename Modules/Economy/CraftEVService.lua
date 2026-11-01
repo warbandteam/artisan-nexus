@@ -106,7 +106,15 @@ local function BuyCostFor(itemID, qty, ctx)
     end
     if econ and econ.BuyCost then
         local c, src = econ:BuyCost(itemID, qty)
-        if c then return c, src end
+        if c then
+            -- profile.economy.costBasis: value a reagent at what we actually paid for it when the
+            -- sales ledger knows, instead of only at what it would cost to buy now.
+            if econ.AcquisitionCost then
+                local a, asrc = econ:AcquisitionCost(itemID, qty, c)
+                if a then return a, asrc or src end
+            end
+            return c, src
+        end
     end
     local p = ns.AHPriceService and ns.AHPriceService.GetPrice and ns.AHPriceService:GetPrice(itemID)
     if p then return p * qty, "price" end
