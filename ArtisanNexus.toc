@@ -87,6 +87,7 @@ Modules\Data\MidnightReagentCatalog.lua
 Modules\Data\CharacterDataProvider.lua
 Modules\SessionLootService.lua
 Modules\AHPriceService.lua
+Modules\Economy\ReagentPurchaseService.lua
 Modules\PriceHistoryService.lua
 Modules\Economy\EconomyCore.lua
 Modules\Economy\VendorPriceService.lua

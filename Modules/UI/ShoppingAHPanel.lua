@@ -53,6 +53,18 @@ local function PurchaseRows()
     return out
 end
 
+local function ShowQuote(row, quote)
+    if not row.buy then return end
+    if not quote then
+        row.buy:Hide()
+        return
+    end
+    row.buy:SetText(string.format(L("AH_PANEL_BUY_FMT", "Buy %d"), quote.quantity))
+    row.buy:SetWidth(math.max(54, row.buy:GetFontString():GetStringWidth() + 16))
+    row.buy:Show()
+    row.cost:SetText(Money(quote.total))
+end
+
 local function RowClick(row)
     local itemID = row and row._anItemID
     if not itemID then
@@ -61,6 +73,16 @@ local function RowClick(row)
     local ahs = ns.AHPriceService
     if ahs and ahs.BrowseItemAtAH then
         ahs:BrowseItemAtAH(itemID)
+    end
+    --- Our own quote, read from a fresh listing search rather than cached scan data:
+    --- it is what the Buy button commits to and what the confirm step checks against.
+    local buyer = ns.ReagentPurchaseService
+    if buyer and buyer.RequestQuote then
+        buyer:RequestQuote(itemID, row._anShort or 1, function(quote)
+            if row._anItemID == itemID then
+                ShowQuote(row, quote)
+            end
+        end)
     end
 end
 
@@ -104,6 +126,26 @@ local function AcquireRow(index)
 
     row.name:SetPoint("RIGHT", row.need, "LEFT", -6, 0)
 
+    --- The purchase has to start inside the player's own click (StartCommoditiesPurchase
+    --- is #hwevent), so this is a real button rather than a scripted follow-up.
+    row.buy = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    row.buy:SetHeight(18)
+    row.buy:SetWidth(54)
+    row.buy:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+    row.buy:Hide()
+    --- Reserve the button's strip whether or not it is showing, so the cost column does
+    --- not jump sideways the moment a quote arrives.
+    row.cost:ClearAllPoints()
+    row.cost:SetPoint("RIGHT", row.buy, "LEFT", -6, 0)
+    row.buy:SetScript("OnClick", function(self)
+        local buyer = ns.ReagentPurchaseService
+        if buyer and buyer.Buy and row._anItemID then
+            if buyer:Buy(row._anItemID) then
+                self:Disable()
+            end
+        end
+    end)
+
     row:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight", "ADD")
     row:SetScript("OnClick", RowClick)
     row:SetScript("OnEnter", RowEnter)
@@ -115,6 +157,12 @@ end
 
 local function PaintRow(row, data)
     row._anItemID = data.itemID
+    row._anShort = data.short or 1
+    --- A quote belongs to the click that fetched it; a repaint means the shortfall moved.
+    if row.buy then
+        row.buy:Hide()
+        row.buy:Enable()
+    end
     row.icon:SetTexture((ns.GetItemIconFileID and ns.GetItemIconFileID(data.itemID)) or 134400)
     local name = (ns.GetItemDisplayName and ns.GetItemDisplayName(data.itemID)) or ("item:" .. tostring(data.itemID))
     row.name:SetText(name)
