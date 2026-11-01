@@ -927,8 +927,20 @@ function SalesLedgerService:GetSummary(days)
         if b.bought > 0 then b.avgBuy = b.spent / b.bought end
     end
     -- Deposits lost = paid - refunded; untracked posts would make this negative, so clamp.
+    -- KNOWN GAP (audit B28): the refunds come from SALES in the window while the payments come
+    -- from POSTS in the window, so a sale whose post predates the window contributes a refund with
+    -- no matching payment and the clamp swallows it. Attributing a deposit to its own auction
+    -- needs auctionID carried from the post through to the outcome.
     sum.deposits = math.max(0, sum.depositsPaid - sum.depositsRefunded)
-    sum.net = saleNet - sum.deposits - sum.buys + sum.orderTips
+    -- Auction trading and crafting orders are different businesses and used to share one `net`,
+    -- which made order margin unreadable. They are reported apart; `net` stays the combined
+    -- figure so existing callers keep their meaning.
+    sum.auctionNet = saleNet - sum.deposits - sum.buys
+    sum.orderNet = sum.orderTips
+    -- KNOWN GAP (audit B29): reagents the crafter bought for an order land in `buys`, so they are
+    -- deducted from auctionNet rather than from orderNet. Order margin still reads high and
+    -- auction margin low until the order rows carry their own reagent cost.
+    sum.net = sum.auctionNet + sum.orderNet
     return sum
 end
 

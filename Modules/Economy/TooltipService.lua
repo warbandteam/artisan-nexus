@@ -243,8 +243,14 @@ local function SummaryFromEstimate(spellID, itemID)
     local yield = (rs.GetOutputQuantity and rs:GetOutputQuantity(spellID)) or 1
     local unit = ns.AHPriceService and ns.AHPriceService:GetPrice(itemID)
     local profit
-    if unit and ns.Economy then
-        profit = ns.Economy:NetSaleValue(itemID, unit, yield) - cost
+    local econ = ns.Economy
+    if unit and econ then
+        -- Price the sale the way CraftEVService does: one legal undercut below the reference,
+        -- then net of cut and expected deposit loss. Valuing it at the bare reference assumed we
+        -- sell AT the current cheapest listing rather than beneath it, so this fallback read
+        -- higher than the Hub row for the same recipe.
+        local saleUnit = econ.SaleUnitPrice and econ:SaleUnitPrice(unit) or unit
+        profit = econ:NetSaleValue(itemID, saleUnit, yield) - cost
     end
     return { cost = cost, yield = yield, profit = profit, goldPerConc = BriefingGoldPerConc(spellID), source = "estimate" }
 end

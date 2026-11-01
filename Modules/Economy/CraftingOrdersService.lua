@@ -119,9 +119,22 @@ local function RewardValue(reward)
             return price * count, false
         end
         --- HEURISTIC (UNVERIFIED): patron knowledge rewards are unpriced items whose name contains
-        --- "Knowledge" (enUS); 1 KP per unit is assumed. Other clients fall through to vendor value.
-        local name = GetItemInfo and GetItemInfo(itemID)
-        if type(name) == "string" and name:find("Knowledge", 1, true) then
+        --- "Knowledge"; 1 KP per unit is assumed.
+        --- KNOWN LIMITATION: the match word is English, so on a localized client a knowledge reward
+        --- falls through to the vendor value (~0) and patron orders rank too low. Fixing that needs
+        --- the real item IDs in Modules/Data/*, or the word in each locale -- neither is invented here.
+        --- The name is only read from the item cache: C_Item.GetItemInfo blocks on a miss, which
+        --- CLAUDE.md forbids, and this runs while evaluating a whole order list. On a miss the load
+        --- is requested so the NEXT evaluation has it; nothing here listens for
+        --- GET_ITEM_INFO_RECEIVED, so the value stays heuristic until the list refreshes.
+        local name
+        if C_Item and C_Item.IsItemDataCachedByID and C_Item.IsItemDataCachedByID(itemID) then
+            name = C_Item.GetItemInfo and C_Item.GetItemInfo(itemID)
+        elseif C_Item and C_Item.RequestLoadItemDataByID then
+            C_Item.RequestLoadItemDataByID(itemID)
+        end
+        if type(name) == "string" and not (issecretvalue and issecretvalue(name))
+            and name:find("Knowledge", 1, true) then
             return (tonumber(cfg and cfg.knowledgePointValue) or 0) * count, true
         end
         local vsp = econ and econ.VendorSellPrice and econ:VendorSellPrice(itemID)
