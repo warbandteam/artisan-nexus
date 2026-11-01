@@ -349,11 +349,9 @@ local function WarmupFontPath(fontPath, slotIndex)
     if not fontPath or fontPath == "" then return end
     if warmedUpPaths[fontPath] then return end  -- already warm
     local fs = AcquireWarmupFontString(slotIndex or 1)
-    --- FontInstance:SetFont returns a value only on EditBox; on a FontString it returns
-    --- nothing even when the font loaded (warcraft.wiki.gg, API_FontInstance_SetFont).
-    --- A missing or unreadable file surfaces as the pcall erroring, never as a falsy return.
-    local ok = pcall(function()
-        fs:SetFont(fontPath, 14, "OUTLINE")
+    local ok = false
+    pcall(function()
+        ok = fs:SetFont(fontPath, 14, "OUTLINE")
     end)
     if ok then
         fs:SetText("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
@@ -645,12 +643,12 @@ function FontManager:SafeSetFont(fontString, sizeCategory, opts)
         flags = ""
     end
     
-    --- Only the pcall can report failure here: SetFont returns nothing on a FontString.
+    local ok = false
     local success = pcall(function()
-        fontString:SetFont(fontPath, fontSize, flags)
+        ok = fontString:SetFont(fontPath, fontSize, flags)
     end)
-
-    if not success then
+    
+    if not success or not ok then
         -- Primary font failed to load (e.g. a locale font that is not installed). Prefer the
         -- bundled default (Expressway: broad Latin/Turkish coverage) over the WoW builtin, so
         -- text never regresses to a glyph-less fallback. Try a preloaded object first.
@@ -659,11 +657,12 @@ function FontManager:SafeSetFont(fontString, sizeCategory, opts)
         if preloaded then
             applied = pcall(function()
                 fontString:SetFontObject(preloaded)
-                fontString:SetFont(fontPath, fontSize, flags)
-            end)
+                ok = fontString:SetFont(fontPath, fontSize, flags)
+            end) and ok
         end
         if not applied then
-            local fbOk = pcall(function() fontString:SetFont(DEFAULT_PROFILE_FONT_PATH, fontSize, flags) end)
+            local fbOk = false
+            pcall(function() fbOk = fontString:SetFont(DEFAULT_PROFILE_FONT_PATH, fontSize, flags) end)
             if not fbOk then
                 pcall(function() fontString:SetFont(BUILTIN_FALLBACK_FONT_PATH, fontSize, flags) end)
             end
@@ -854,9 +853,9 @@ function FontManager:ApplyBarOverlayFont(fontString)
         flags = "OUTLINE"
     end
     local existingText = fontString:GetText()
-    --- Only the pcall can report failure here: SetFont returns nothing on a FontString.
-    local ok = pcall(function()
-        fontString:SetFont(fontFace, fontSize, flags)
+    local ok = false
+    pcall(function()
+        ok = fontString:SetFont(fontFace, fontSize, flags)
     end)
     if not ok then
         pcall(function()
@@ -976,16 +975,15 @@ function FontManager:ApplyFont(fontString, category, opts)
     -- Save existing text before font change (for re-render)
     local existingText = fontString:GetText()
     
-    -- Try SetFont with resolved path. Only the pcall can report failure:
-    -- SetFont returns nothing on a FontString.
-    local success, err = pcall(function()
-        fontString:SetFont(fontFace, fontSize, flags)
+    -- Try SetFont with resolved path
+    local ok = false
+    local success = pcall(function()
+        ok = fontString:SetFont(fontFace, fontSize, flags)
     end)
-
-    if not success then
+    
+    if not success or not ok then
         DebugPrint("|cffff0000[AN FontManager]|r Font load failed for: " .. tostring(fontFace)
-            .. " size=" .. tostring(fontSize) .. " flags=" .. tostring(flags)
-            .. " err=" .. tostring(err))
+            .. " size=" .. tostring(fontSize) .. " flags=" .. tostring(flags))
         -- Try preloaded FontObject (guaranteed loaded at file time)
         local preloaded = PRELOADED_FONTS[fontFace]
         if preloaded then
@@ -996,8 +994,9 @@ function FontManager:ApplyFont(fontString, category, opts)
             end)
         else
             -- Last resort: default WoW font
-            local fallbackOk = pcall(function()
-                fontString:SetFont(BUILTIN_FALLBACK_FONT_PATH, fontSize, flags)
+            local fallbackOk = false
+            pcall(function()
+                fallbackOk = fontString:SetFont(BUILTIN_FALLBACK_FONT_PATH, fontSize, flags)
             end)
             if not fallbackOk then
                 if fontString.SetFontObject then
