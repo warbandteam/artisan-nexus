@@ -12,13 +12,22 @@
       Quantities are only comparable within one source (MarketIntelService demand estimate).
       }
 
-    Cap per item: HISTORY_MAX_SAMPLES (default 96 ≈ 4 days at 1h cadence).
+    Cap per item: HISTORY_MAX_SAMPLES samples AND HISTORY_MAX_AGE_SEC of age, whichever bites
+    first, so the buffer never reaches further back than it claims to (the last sample is always
+    kept). GetStats reports spanSec: the time its samples actually cover, which can be far less
+    than the requested window.
 ]]
 
 local ADDON_NAME, ns = ...
 
 local HISTORY_MAX_SAMPLES = 96
 local DEDUP_WINDOW_SEC    = 5 * 60   -- merge samples within 5min into the latest
+--- Age cap alongside the count cap. The count cap alone meant the buffer's reach depended on how
+--- often the player scanned: at the 5-minute dedup floor 96 samples is eight hours, so a
+--- "7-day average" could be computed from less than a day while reading as a week. Samples older
+--- than this are dropped, so the buffer never holds more than it claims; the count cap still
+--- bounds a heavy scanner. A sample is kept while it is the only one for its item (see Prune).
+local HISTORY_MAX_AGE_SEC = 8 * 24 * 3600
 
 local PriceHistoryService = {}
 
@@ -57,6 +66,12 @@ function PriceHistoryService:Push(itemID, unitPrice, qty, qsrc)
         samples[#samples + 1] = { t = now, p = unitPrice, q = qty, qs = qty and qsrc or nil }
     end
     while #samples > HISTORY_MAX_SAMPLES do
+        table.remove(samples, 1)
+    end
+    -- Samples are ascending by t, so expired ones are at the front. Never drop the last sample:
+    -- an item nobody has scanned in a week still has a last known price worth keeping.
+    local cutoff = now - HISTORY_MAX_AGE_SEC
+    while #samples > 1 and (samples[1].t or 0) < cutoff do
         table.remove(samples, 1)
     end
 end
@@ -104,6 +119,10 @@ function PriceHistoryService:GetStats(itemID, windowSec)
         oldest = oldest and oldest.p or nil,
         firstAt = oldest and oldest.t or nil,
         lastAt  = latest and latest.t or nil,
+        -- What the samples actually cover, vs what was asked for: an "avg" over the last 6 hours
+        -- should not be presented as a 7-day average just because 7 days were requested.
+        windowSec = windowSec,
+        spanSec = (oldest and latest) and math.max(0, (latest.t or 0) - (oldest.t or 0)) or 0,
     }
 end
 

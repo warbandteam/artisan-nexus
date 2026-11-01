@@ -293,7 +293,10 @@ local defaults = {
         overallCraftedEvents = {},
         --- Craft output lifetime totals: [itemID] = { count, lastAt, name? }
         craftedLootHistory = {},
-        --- AH unit prices (copper). [itemID] = { buyout = number, updatedAt = unix }
+        --- AH unit prices (copper), written by AHPriceService.SavePrice:
+        --- [itemID] = { buyout, updatedAt, qty?, book? = { {p, q}, ... } cheapest-first levels,
+        ---   qsrc? = "c" commodity book | "b" browse summary | "i" one item listing,
+        ---   byIlvl? = { [itemLevel] = copper } for equipment }
         ahPrices = {},
         --- RecipeService harvested schematics from C_TradeSkillUI.
         --- [spellID] = { name, profession, reagents = { {itemID, qty, slotType}, ... }, updated }
