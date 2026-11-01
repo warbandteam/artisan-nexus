@@ -87,20 +87,28 @@ function PriceHistoryService:GetSamples(itemID)
 end
 
 --- Aggregate stats over a recent window. windowSec defaults to 7 days.
+---
+--- `avg` is TIME-WEIGHTED: each sample's price counts for as long as it stood, so an average is
+--- about the period, not about when the player happened to scan. A plain mean over samples let a
+--- busy evening of scanning outvote three quiet days, which is exactly backwards for a figure
+--- used as a price basis. `avgSimple` keeps the unweighted mean for anything that wants it.
 ---@param itemID number
 ---@param windowSec number|nil
----@return table { count, min, max, avg, latest, oldest }
+---@return table { count, min, max, avg, avgSimple, latest, oldest, firstAt, lastAt, windowSec, spanSec }
 function PriceHistoryService:GetStats(itemID, windowSec)
     windowSec = windowSec or (7 * 24 * 3600)
     local samples = self:GetSamples(itemID)
-    local cutoff = time() - windowSec
+    local now = time()
+    local cutoff = now - windowSec
     local n, sum, mn, mx = 0, 0, nil, nil
     local latest, oldest
+    local kept = {}
     for i = 1, #samples do
         local s = samples[i]
         if s.t and s.t >= cutoff and type(s.p) == "number" and s.p > 0 then
             n = n + 1
             sum = sum + s.p
+            kept[n] = s
             if not mn or s.p < mn then mn = s.p end
             if not mx or s.p > mx then mx = s.p end
             if not oldest or s.t < oldest.t then oldest = s end
@@ -110,11 +118,23 @@ function PriceHistoryService:GetStats(itemID, windowSec)
     if n == 0 then
         return { count = 0 }
     end
+    -- Each sample holds until the next one; the last holds until now. With a single sample, or if
+    -- every sample shares a timestamp, there is no span to weight by and the plain mean stands.
+    local weighted, span = 0, 0
+    for i = 1, n do
+        local dt = ((i < n) and (kept[i + 1].t or 0) or now) - (kept[i].t or 0)
+        if dt > 0 then
+            weighted = weighted + kept[i].p * dt
+            span = span + dt
+        end
+    end
+    local avg = (span > 0) and (weighted / span) or (sum / n)
     return {
         count  = n,
         min    = mn,
         max    = mx,
-        avg    = math.floor(sum / n + 0.5),
+        avg    = math.floor(avg + 0.5),
+        avgSimple = math.floor(sum / n + 0.5),
         latest = latest and latest.p or nil,
         oldest = oldest and oldest.p or nil,
         firstAt = oldest and oldest.t or nil,
