@@ -179,6 +179,11 @@ L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"] = "同步拍賣場價格以計算材�
 L["HUB_FARM_GOTO_TT"] = "點擊開啟該專業的工作階段戰利品。"
 L["HUB_SHOP_AH_GOTO_TT"] = "Click to search the Auction House for this reagent."
 L["AH_BROWSE_BUSY"] = "Finish or pause the AH scan first."
+L["AH_PANEL_TITLE"] = "Shopping List"
+L["AH_PANEL_EMPTY"] = "Nothing to buy - the queue's reagents are covered."
+L["AH_PANEL_ROW_TT"] = "Click to search this reagent on the Buy tab."
+L["AH_PANEL_TOTAL_FMT"] = "Needed: %s"
+L["AH_PANEL_SHORT_FMT"] = "Short by %s"
 
 L["HUB_HARVEST_BANNER_FMT"] = "已快取 %d / %d 配方（%d%%）。請各開啟一次專業。"
 L["RECIPE_MATCHER_STATUS_PARTIAL"] = "已快取 %d / %d 配方（%d%%）"

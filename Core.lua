@@ -383,6 +383,9 @@ function ArtisanNexus:OnInitialize()
     if ns.SessionLootOverlayUI and ns.SessionLootOverlayUI.Init then
         ns.SessionLootOverlayUI:Init()
     end
+    if ns.ShoppingAHPanel and ns.ShoppingAHPanel.Init then
+        ns.ShoppingAHPanel:Init()
+    end
     if ns.GatheringOverloadIndicator and ns.GatheringOverloadIndicator.Init then
         ns.GatheringOverloadIndicator:Init()
     end

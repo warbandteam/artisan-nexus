@@ -1,4 +1,4 @@
-## Interface: 120105
+﻿## Interface: 120105
 ## Title: Artisan Nexus
 ## Notes: Professions QoL for WoW Midnight — session loot (fishing & gathering), AH prices, overload hints, craft queue, minimap launcher.
 ## Author: Artisan Nexus
@@ -153,5 +153,6 @@ Modules\UI.lua
 Modules\UI\UI_MainShell.lua
 Modules\UI\UI_TabHost.lua
 Modules\UI\ProfessionSidecarUI.lua
+Modules\UI\ShoppingAHPanel.lua
 Config.lua
 Modules\MinimapButton.lua

@@ -173,6 +173,11 @@ L["RECIPE_MATCHER_REAGENT_COST_SCAN_HINT"] = "Synchronisez les prix HV pour chif
 L["HUB_FARM_GOTO_TT"] = "Cliquer pour ouvrir le butin de session pour ce métier."
 L["HUB_SHOP_AH_GOTO_TT"] = "Click to search the Auction House for this reagent."
 L["AH_BROWSE_BUSY"] = "Finish or pause the AH scan first."
+L["AH_PANEL_TITLE"] = "Shopping List"
+L["AH_PANEL_EMPTY"] = "Nothing to buy - the queue's reagents are covered."
+L["AH_PANEL_ROW_TT"] = "Click to search this reagent on the Buy tab."
+L["AH_PANEL_TOTAL_FMT"] = "Needed: %s"
+L["AH_PANEL_SHORT_FMT"] = "Short by %s"
 
 L["HUB_HARVEST_BANNER_FMT"] = "%d / %d recettes en cache (%d%%). Ouvrez vos métiers une fois."
 L["RECIPE_MATCHER_STATUS_PARTIAL"] = "%d / %d recettes en cache (%d%%)"
