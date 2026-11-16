@@ -47,9 +47,15 @@ function Utilities:TouchCharRegistry()
         rec = {}
         g.charRegistry[guid] = rec
     end
-    local name = UnitName("player")
+    local name, nameSecond = UnitName("player")
     if name and not (issecretvalue and issecretvalue(name)) then
         rec.name = name
+    end
+    --- [WN DataService] WoW Forever characters have a surname and UnitName returns it as the second
+    --- value; retail puts the realm there, so only read it as a surname where surnames exist.
+    if ns.Constants and ns.Constants.IS_FOREVER_BUILD and type(nameSecond) == "string" and nameSecond ~= ""
+        and not (issecretvalue and issecretvalue(nameSecond)) then
+        rec.surname = nameSecond
     end
     local realm = GetNormalizedRealmName and GetNormalizedRealmName()
     if type(realm) == "string" and realm ~= "" and not (issecretvalue and issecretvalue(realm)) then
@@ -69,6 +75,42 @@ function Utilities:TouchCharRegistry()
     return guid
 end
 
+--[[
+    [WN Utilities:GetCharacterKey] Name-Realm key: display labels, legacy data, GUID-less fallback only.
+    WoW Forever: first names repeat on a realm ("Elementalist Vhorzen", "Elementalist Ashford"), so
+    the identity there is first name + SURNAME (UnitName's 2nd value on Forever; registry rows store
+    it as `surname`). Live calls (no name) add it; row callers pass `row.surname`. Retail has no
+    surname, so its keys are unchanged.
+]]
+---@param name string|nil
+---@param realm string|nil
+---@param surname string|nil
+---@return string|nil key "Name-Realm" (spaces removed)
+function Utilities:GetCharacterKey(name, realm, surname)
+    local isForever = ns.Constants and ns.Constants.IS_FOREVER_BUILD
+    if name == nil then
+        local liveName, second = UnitName("player")
+        name = liveName
+        if isForever then surname = second end
+    end
+    if not name or (issecretvalue and issecretvalue(name)) then return nil end
+    if isForever and type(surname) == "string" and not (issecretvalue and issecretvalue(surname)) and surname ~= "" then
+        name = name .. surname
+    end
+    if not realm then
+        local norm = GetNormalizedRealmName and GetNormalizedRealmName()
+        if type(norm) == "string" and not (issecretvalue and issecretvalue(norm)) and norm ~= "" then
+            realm = norm
+        else
+            realm = GetRealmName and GetRealmName() or ""
+        end
+    end
+    if not realm or (issecretvalue and issecretvalue(realm)) then return nil end
+    name = name:gsub("%s+", "")
+    realm = realm:gsub("%s+", "")
+    return name .. "-" .. realm
+end
+
 --- Display label for a registry GUID: "Name-Realm", "Name", or localized Unknown.
 ---@param guid string|nil
 ---@return string
@@ -86,11 +128,16 @@ end
 function Utilities:GetCharacterNameAndRealm(guid)
     local rec = ns.CharacterData:GetCharacter(guid)
     if rec and rec.name then
+        --- WoW Forever: "Elementalist Vhorzen" -- the first name alone does not tell two characters apart.
+        local name = rec.name
+        if type(rec.surname) == "string" and rec.surname ~= "" then
+            name = name .. " " .. rec.surname
+        end
         local realm = rec.realm
         if realm and realm ~= "" and not (issecretvalue and issecretvalue(realm)) then
-            return rec.name, realm
+            return name, realm
         end
-        return rec.name, ""
+        return name, ""
     end
     return (ns.L and ns.L["CHAR_UNKNOWN"]) or "Unknown character", ""
 end
@@ -666,6 +713,22 @@ local function FallbackOwnsFishingBySkillList()
     return false
 end
 
+--- Profession spell-book indices from GetProfessions(), compacted (no nil holes), every return read.
+--- Retail answers (prof1, prof2, archaeology, fishing, cooking); WoW Forever answers First Aid in the
+--- third slot (WN /wn charprobe) and its Professions UI reads more slots, so take select("#") values
+--- rather than a fixed five. Any slot may be nil, which is why `{ GetProfessions() }` + `#` is unsafe.
+---@return integer[]
+function Utilities.GetProfessionIndices()
+    local out = {}
+    if not GetProfessions then return out end
+    local n = select("#", GetProfessions())
+    local all = { GetProfessions() }
+    for i = 1, n do
+        if all[i] then out[#out + 1] = all[i] end
+    end
+    return out
+end
+
 --- True when the character has learned `skillLineID` (direct ProfessionInfo lookup, then GetProfessions return 7).
 ---@param skillLineID number|nil
 ---@return boolean
@@ -693,8 +756,8 @@ function Utilities.PlayerOwnsProfessionSkillLine(skillLineID)
     -- GetProfessions returns prof1, prof2, archaeology, fishing, cooking; any may be nil, so no
     -- ipairs (it stopped at a missing primary and hid Fishing). Only return 7 is the skill line:
     -- matching every numeric return made a skill rank of 182/186 look like Herbalism/Mining.
-    local idxs = { GetProfessions() }
-    for slot = 1, 5 do
+    local idxs = Utilities.GetProfessionIndices()
+    for slot = 1, #idxs do
         local profIdx = idxs[slot]
         if profIdx then
             local ok, _, _, _, _, _, _, skillLine = pcall(GetProfessionInfo, profIdx)

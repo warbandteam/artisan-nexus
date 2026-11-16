@@ -164,6 +164,14 @@ local function ShownToggle(path, labelKey, labelFb, descFb, apply)
     })
 end
 
+--- Hide a row on a client without system `featureKey` (Modules/Capabilities.lua, WoW Forever).
+local function Gate(featureKey, row)
+    row.visible = function()
+        return not ns.Capabilities or ns.Capabilities:Supports(featureKey)
+    end
+    return row
+end
+
 local function Slider(key, labelKey, labelFb, descFb, opts)
     local row = Text({ type = "slider", key = key }, labelKey, labelFb, descFb)
     for k, v in pairs(opts) do
@@ -318,16 +326,16 @@ local GATHERING_LOOT = {
                     onChange = function(on) Send(E.MODULE_TOGGLED, "fishing", on) end,
                 }),
             Toggle("fishingLootSoundEnabled", "CONFIG_FISHING_LOOT_SOUND", "Catch sound", nil, { parent = "modulesEnabled.fishing" }),
-            Toggle("overloadNodeIndicatorEnabled", "CONFIG_OVERLOAD_NODE_INDICATOR", "Overload node indicator",
+            Gate("overload", Toggle("overloadNodeIndicatorEnabled", "CONFIG_OVERLOAD_NODE_INDICATOR", "Overload node indicator",
                 "Marks hovered nodes that look overloaded.", {
                     onChange = function() Send(E.GATHERING_OVERLOAD_HINT_UPDATED, nil) end,
-                }),
-            Toggle("overloadTrackerHudEnabled", "CONFIG_OVERLOAD_TRACKER_HUD", "Overload Tracker",
+                })),
+            Gate("overload", Toggle("overloadTrackerHudEnabled", "CONFIG_OVERLOAD_TRACKER_HUD", "Overload Tracker",
                 "Floating overload cooldown. Needs Herbalism or Mining.", {
                     parent = "overloadNodeIndicatorEnabled",
                     onChange = function() ns.GatheringOverloadIndicator:RefreshTracker() end,
-                }),
-            ShownToggle("overloadActionButton.hidden", "CONFIG_OVERLOAD_CAST_BUTTON", "Overload cast button",
+                })),
+            Gate("overload", ShownToggle("overloadActionButton.hidden", "CONFIG_OVERLOAD_CAST_BUTTON", "Overload cast button",
                 "Floating button that casts the next overload.",
                 function(on)
                     if on then
@@ -335,7 +343,7 @@ local GATHERING_LOOT = {
                     else
                         ns.GatheringOverloadActionButton:Hide()
                     end
-                end),
+                end)),
             Toggle("bagPressureGuardEnabled", "CONFIG_BAG_PRESSURE_GUARD", "Bag pressure guard",
                 "Warn when free bag slots are low.", {
                     onChange = function(on)
@@ -446,14 +454,14 @@ local CRAFTING_ECONOMY = {
                         ns.CraftQueueActionButton:Hide()
                     end
                 end),
-            Toggle("includeWarbandBank", "CONFIG_WARBAND_BANK", "Count Warband bank",
+            Gate("warbandBank", Toggle("includeWarbandBank", "CONFIG_WARBAND_BANK", "Count Warband bank",
                 "Counts Warband bank reagents as owned.", {
                     onChange = function()
                         --- The bag cache was built with the old warband-bank setting.
                         ns.RecipeService:InvalidateBagCache()
                         NotifyShopping()
                     end,
-                }),
+                })),
             Toggle("shoppingIncludeFinishing", "CONFIG_SHOPPING_FINISHING", "Shopping: finishing reagents",
                 "Adds optional finishing reagents to the list.",
                 { onChange = NotifyShopping }),
@@ -466,23 +474,23 @@ local CRAFTING_ECONOMY = {
                 "Values reagents you own at their net sale price."),
             EconToggle("makeVsBuy", "CONFIG_ECON_MAKE_VS_BUY", "Make vs buy",
                 "Uses craft cost when cheaper than buying."),
-            EconGoldSlider("concentrationValue", "CONFIG_ECON_CONC_VALUE", "Concentration value",
+            Gate("concentration", EconGoldSlider("concentrationValue", "CONFIG_ECON_CONC_VALUE", "Concentration value",
                 "Gold per point. Auto uses the planner's estimate.", {
                 min = 0, max = 50, step = 0.5, hint = ConcentrationHint,
                 format = function(v) return FmtGold(v, LT("CONFIG_ECON_VALUE_AUTO", "Auto")) end,
-            }),
-            EconSlider("plannerHorizonDays", "CONFIG_ECON_PLANNER_HORIZON", "Planner horizon",
+            })),
+            Gate("concentration", EconSlider("plannerHorizonDays", "CONFIG_ECON_PLANNER_HORIZON", "Planner horizon",
                 "Days of regeneration the planner spends.", {
                 min = 1, max = 7, step = 1, format = FmtDays,
-            }),
-            EconGoldSlider("knowledgePointValue", "CONFIG_ECON_KP_VALUE", "Knowledge point value",
+            })),
+            Gate("craftingOrders", EconGoldSlider("knowledgePointValue", "CONFIG_ECON_KP_VALUE", "Knowledge point value",
                 "Gold per Knowledge point in order rewards.", {
                 min = 0, max = 2000, step = 10, format = FmtGoldOff,
-            }),
-            EconGoldSlider("moxieValue", "CONFIG_ECON_MOXIE_VALUE", "Moxie value",
+            })),
+            Gate("craftingOrders", EconGoldSlider("moxieValue", "CONFIG_ECON_MOXIE_VALUE", "Moxie value",
                 "Gold per Moxie in order rewards.", {
                 min = 0, max = 500, step = 5, format = FmtGoldOff,
-            }),
+            })),
         } },
         { title = LT("SETTINGS_SECTION_CRAFT_BRIEFING", "Craft briefing"), rows = {
             Toggle("craftBriefingEnabled", "CONFIG_CRAFT_BRIEFING", "Craft briefing",
@@ -492,9 +500,9 @@ local CRAFTING_ECONOMY = {
             Toggle("craftBriefingOwnedOnly", "CONFIG_CRAFT_BRIEFING_OWNED", "My professions only",
                 "Skips professions this character lacks.",
                 { parent = "craftBriefingEnabled", onChange = RebuildBriefing }),
-            Toggle("craftBriefingConcentrationHints", "CONFIG_CRAFT_BRIEFING_CONC", "Concentration hints",
+            Gate("concentration", Toggle("craftBriefingConcentrationHints", "CONFIG_CRAFT_BRIEFING_CONC", "Concentration hints",
                 "Shows the extra profit from concentration.",
-                { parent = "craftBriefingEnabled", onChange = RebuildBriefing }),
+                { parent = "craftBriefingEnabled", onChange = RebuildBriefing })),
             Toggle("craftBriefingEquipmentHints", "CONFIG_CRAFT_BRIEFING_EQUIP", "Profession gear hints",
                 "Warn about empty tool slots or better gear in bags.",
                 { parent = "craftBriefingEnabled", onChange = RebuildBriefing }),
@@ -520,8 +528,8 @@ local CRAFTING_ECONOMY = {
             }),
         } },
         { title = LT("CONFIG_ECON_ALERTS", "Daily reminders"), columns = 2, rows = {
-            Toggle("concentrationOverflowAlert", "CONFIG_CONC_OVERFLOW_ALERT", "Concentration cap warning",
-                "Daily chat note when a pool is full or nearly full."),
+            Gate("concentration", Toggle("concentrationOverflowAlert", "CONFIG_CONC_OVERFLOW_ALERT", "Concentration cap warning",
+                "Daily chat note when a pool is full or nearly full.")),
             Toggle("cooldownReadyReminder", "CONFIG_COOLDOWN_READY_REMINDER", "Cooldown reminder",
                 "Daily chat note listing ready profession cooldowns."),
         } },
@@ -669,10 +677,10 @@ local ADVANCED = {
                 "Share of reagents returned per Resourcefulness proc.", {
                 min = 0, max = 1, step = 0.05, format = FmtShare,
             }),
-            EconSlider("ingenuityRefundFactor", "CONFIG_ECON_INGENUITY", "Ingenuity concentration refund",
+            Gate("concentration", EconSlider("ingenuityRefundFactor", "CONFIG_ECON_INGENUITY", "Ingenuity concentration refund",
                 "Share of concentration refunded per Ingenuity proc.", {
                 min = 0, max = 1, step = 0.05, format = FmtShare,
-            }),
+            })),
         } },
     },
 }

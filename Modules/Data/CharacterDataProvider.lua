@@ -7,22 +7,27 @@
       "native" AN's own collectors (ProfessionSnapshotService pools, CooldownService, RecipeService
                learnedBy, the Utilities charRegistry, and the reagent item snapshot in this file)
 
-    A capability uses WN when the bridge is available, WN exposes the public method in WN_METHOD and
+    A capability reads WN when the bridge is available, WN exposes the public method in WN_METHOD and
     WN tracks the logged-in character (WN collects profession / item data only for tracked characters,
-    warband-nexus ProfessionService.lua:20 IsCurrentCharacterTracked). While WN covers a capability,
-    the matching native collector registers no events and writes no SavedVariables; consumers read
+    warband-nexus ProfessionService.lua:20 IsCurrentCharacterTracked). The native collectors ALWAYS
+    write the logged-in character's GUID rows (they are cheap), whatever the backend: a character WN
+    does not track, or every character after WN is removed, still has AN's own data. Reads merge:
+    WN rows first, then native rows for every GUID WN does not track (WnTrackedGuids). Consumers read
     through this module only. The current character's concentration is always read live.
 
-    Native SavedVariables written here / by the native collectors stay readable after WN is installed
-    (WN may be removed later), but stop being refreshed; rows not refreshed for STALE_SEC (30 days) are
-    pruned on enable (professionSnapshots, itemSnapshots; recipeCooldowns prunes itself).
+    Native rows not refreshed for STALE_SEC (30 days) are pruned on enable (professionSnapshots,
+    itemSnapshots; recipeCooldowns prunes itself). PurgeCharacter(guid) forgets one character in every
+    per-character store (Overview > Characters, right-click).
 
     Public API (all reads; never mutate returned tables):
       IsUsingWarbandNexus() -> boolean                 any capability served by WN
       GetBackend(capability) -> "wn"|"native"
       UsesNative(capability) -> boolean               collectors gate event wiring / SV writes on this
-      GetCharacters() -> { [guid] = {guid, name, realm, classFile, lastSeen, source} }
+      GetCharacters() -> { [guid] = {guid, name, realm, surname, classFile, lastSeen, source} }
       GetCharacter(guid) -> row|nil
+      GetCharacterProfessions(guid) -> { at, list = { {skillLine, name, icon, rank, maxRank} } }|nil
+      GetRecipeCountForCharacter(guid) -> number      recipes recorded as learned (learnedBy)
+      PurgeCharacter(guid) -> boolean                 never the logged-in character
       GetConcentrationPools() -> { {guid, charKey, charName, classFile, profession, professionName,
           skillLineID, currencyID, current, max, ratePerHour, secondsToCap, capped, source = "an"|"wn",
           live, at} }
@@ -34,7 +39,9 @@
       GetItemCountsAcrossCharacters(itemID) -> { total, bags, banks, chars = { {guid?, name, classFile,
           bagCount, bankCount, total} }, warbandBank, source }   other characters only (the current
           character's live counts come from RecipeService:GetBagCounts)
-    Message: Constants.EVENTS.CHARACTER_DATA_SOURCE_CHANGED { [capability] = backend } on every switch.
+    Messages: Constants.EVENTS.CHARACTER_DATA_SOURCE_CHANGED { [capability] = backend } on every switch;
+      CHARACTER_PROFESSIONS_UPDATED guid when the logged-in character's professions changed;
+      CHARACTER_PURGED guid after PurgeCharacter.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -93,22 +100,50 @@ local function FindMeInRoster(roster, guid)
     if type(roster) ~= "table" then
         return nil
     end
-    local name = UnitName("player")
+    local name, nameSecond = UnitName("player")
     local realm = GetNormalizedRealmName and GetNormalizedRealmName()
-    if issecretvalue and (issecretvalue(name) or issecretvalue(realm)) then
-        name, realm = nil, nil
+    if issecretvalue and (issecretvalue(name) or issecretvalue(realm) or issecretvalue(nameSecond)) then
+        name, realm, nameSecond = nil, nil, nil
     end
+    --- WoW Forever: first names repeat on a realm, so a name match also needs the surname, and a row
+    --- that carries another character's GUID is never "me" [WN CharacterService OwnedByLivePlayer].
+    local forever = ns.Constants and ns.Constants.IS_FOREVER_BUILD
+    local surname = forever and type(nameSecond) == "string" and nameSecond ~= "" and nameSecond or nil
     local byName
     for i = 1, #roster do
         local c = roster[i]
         if guid and (c.guid == guid or c.key == guid) then
             return c
         end
-        if name and c.name == name and (c.realm == realm or c.realm == nil) then
+        if name and c.name == name and (c.realm == realm or c.realm == nil)
+            and (not forever or (c.guid == nil and c.surname == surname)) then
             byName = byName or c
         end
     end
     return byName
+end
+
+--- GUIDs Warband Nexus collects data for (tracked characters). Native rows of every other GUID are
+--- merged into the reads, so a character WN does not track is never hidden behind the WN backend.
+---@return table<string, boolean>
+function CharacterData:WnTrackedGuids()
+    local memo = self._wnGuidMemo
+    if memo and GetTime() - memo.t < MEMO_SEC then
+        return memo.set
+    end
+    local set = {}
+    local bridge = ns.WarbandNexusBridge
+    local roster = bridge and bridge:IsAvailable() and bridge:GetCharacters() or nil
+    if type(roster) == "table" then
+        for i = 1, #roster do
+            local c = roster[i]
+            if c.guid and c.isTracked then
+                set[c.guid] = true
+            end
+        end
+    end
+    self._wnGuidMemo = { t = GetTime(), set = set }
+    return set
 end
 
 --- Re-pick the backend of every capability. Sends CHARACTER_DATA_SOURCE_CHANGED when one switched
@@ -157,10 +192,13 @@ function CharacterData:GetBackend(capability)
     return self._backend[capability] or "native"
 end
 
+--- Should AN's own collector for `capability` run? Always: the native rows of the logged-in character
+--- are written whatever the read backend is, so no character depends on Warband Nexus alone.
 ---@param capability string
 ---@return boolean
 function CharacterData:UsesNative(capability)
-    return self:GetBackend(capability) ~= "wn"
+    local _ = capability
+    return true
 end
 
 ---@return boolean true when at least one capability is served by Warband Nexus
@@ -176,6 +214,7 @@ end
 function CharacterData:InvalidateCaches()
     self._rosterMemo = nil
     self._poolsMemo = nil
+    self._wnGuidMemo = nil
     wipe(self._knowers)
 end
 
@@ -201,6 +240,7 @@ function CharacterData:GetCharacters()
                     guid = guid,
                     name = rec.name,
                     realm = rec.realm,
+                    surname = rec.surname,
                     classFile = rec.class,
                     lastSeen = rec.lastSeen,
                     source = "an",
@@ -217,6 +257,7 @@ function CharacterData:GetCharacters()
                     guid = c.guid,
                     name = c.name,
                     realm = c.realm,
+                    surname = c.surname,
                     classFile = c.classFile,
                     lastSeen = c.lastSeen,
                     source = "wn",
@@ -409,6 +450,8 @@ function CharacterData:GetConcentrationPools()
 
     local g = Global()
     local snaps = g and g.professionSnapshots
+    local concFromWN = self:GetBackend("concentration") == "wn"
+    local wnGuids = concFromWN and self:WnTrackedGuids() or nil
     if type(snaps) == "table" then
         for guid, store in pairs(snaps) do
             if type(store) == "table" then
@@ -418,10 +461,10 @@ function CharacterData:GetConcentrationPools()
                         LearnCurrency(profKey, row.concCurrencyID, row.concCycleMS, row.concPerCycle)
                         local max = tonumber(row.concMax)
                         local isMine = guid == myGuid
-                        --- Persisted rows feed alts only on the native backend; the current character's
-                        --- row is a fallback when the live read returned nothing for that profession.
+                        --- Persisted rows feed every alt WN does not cover; the current character's row
+                        --- is a fallback when the live read returned nothing for that profession.
                         local wanted = (isMine and not mineLive[profKey])
-                            or (not isMine and self:GetBackend("concentration") == "native")
+                            or (not isMine and not (wnGuids and wnGuids[guid]))
                         if wanted and max and max > 0 then
                             local rec = self:GetCharacter(guid)
                             out[#out + 1] = PoolRow({
@@ -558,17 +601,27 @@ function CharacterData:GetRecipeKnowers(spellID)
                 isMe = isMe == true,
             }
         end
-    else
-        local rs = ns.RecipeService
-        local sch = rs and rs:GetSchematic(spellID)
-        if sch and type(sch.learnedBy) == "table" then
-            for guid in pairs(sch.learnedBy) do
+    end
+    --- Native learnedBy: every knower on the native backend; on WN, the GUIDs WN does not track.
+    local fromWN = self:GetBackend("recipes") == "wn"
+    local wnGuids = fromWN and self:WnTrackedGuids() or nil
+    local meListed = false
+    for i = 1, #out do
+        if out[i].isMe then meListed = true end
+    end
+    local rs = ns.RecipeService
+    local sch = rs and rs:GetSchematic(spellID)
+    if sch and type(sch.learnedBy) == "table" then
+        for guid in pairs(sch.learnedBy) do
+            local isMe = guid == myGuid
+            -- The logged-in character's own harvest is fresh: use it whenever WN did not list it.
+            if (isMe and not meListed) or (not isMe and not (wnGuids and wnGuids[guid])) then
                 local rec = self:GetCharacter(guid)
                 out[#out + 1] = {
                     guid = guid,
                     charName = CharName(guid),
                     classFile = rec and rec.classFile or nil,
-                    isMe = guid == myGuid,
+                    isMe = isMe,
                 }
             end
         end
@@ -613,7 +666,7 @@ end
 function CharacterData:IsKnownByAny(spellID)
     local rs = ns.RecipeService
     local sch = rs and rs:GetSchematic(spellID)
-    if self:GetBackend("recipes") == "wn" and self:GetKnownByCount(spellID) > 0 then
+    if self:GetKnownByCount(spellID) > 0 then
         return true
     end
     if not sch then
@@ -623,22 +676,24 @@ function CharacterData:IsKnownByAny(spellID)
 end
 
 --- Harvest hook (RecipeService): record whether the current character knows `row`'s recipe.
---- Native backend keeps `learnedBy[guid]`; with WN covering recipes nothing per-character is written
---- and `learned` stays "known by someone" from WN's crafter list.
+--- `learnedBy[guid]` is always kept (whatever the read backend); `learned` = known by someone, from
+--- learnedBy plus Warband Nexus' crafter list when WN covers recipes.
 ---@param row table schematic row
 ---@param spellID number
 ---@param learned boolean
 function CharacterData:RecordLearned(row, spellID, learned)
     local guid = MyGUID()
-    if self:UsesNative("recipes") and guid then
+    -- Knower list is derived from learnedBy / WN; drop the cached copy so counts follow the harvest.
+    self._knowers[NormalizeSpellID(spellID)] = nil
+    if guid then
         row.learnedBy = row.learnedBy or {}
         row.learnedBy[guid] = learned and true or nil
-        row.learned = next(row.learnedBy) ~= nil
-        -- Knower list is derived from learnedBy; drop the cached copy so counts follow the harvest.
-        self._knowers[NormalizeSpellID(spellID)] = nil
-    elseif self:GetBackend("recipes") == "wn" then
-        self._knowers[NormalizeSpellID(spellID)] = nil
-        row.learned = learned or self:GetKnownByCount(spellID) > 0
+    end
+    local anyNative = type(row.learnedBy) == "table" and next(row.learnedBy) ~= nil
+    if self:GetBackend("recipes") == "wn" then
+        row.learned = learned or anyNative or self:GetKnownByCount(spellID) > 0
+    elseif guid then
+        row.learned = anyNative
     else
         row.learned = learned
     end
@@ -721,9 +776,6 @@ end
 --- Native collector: snapshot the current character's catalog reagents (bags always; character bank
 --- and warband bank only while the bank is open, otherwise the previous bank snapshot is kept).
 function CharacterData:CaptureItems()
-    if not self:UsesNative("items") then
-        return
-    end
     local guid = MyGUID()
     local store = ItemStore()
     if not guid or not store then
@@ -738,7 +790,9 @@ function CharacterData:CaptureItems()
     row.bags = ScanContainers(self._carriedBags, set)
     if self._bankOpen then
         row.bank = ScanContainers(BagList("CharacterBankTab_", 1, 6), set)
-        store.warband = { at = time(), counts = ScanContainers(BagList("AccountBankTab_", 1, 5), set) }
+        if not ns.SupportsFeature or ns.SupportsFeature("warbandBank") then
+            store.warband = { at = time(), counts = ScanContainers(BagList("AccountBankTab_", 1, 5), set) }
+        end
     end
     row.bank = row.bank or {}
     row.at = time()
@@ -764,28 +818,34 @@ function CharacterData:GetItemCountsAcrossCharacters(itemID)
     if not itemID then
         return nil
     end
-    if self:GetBackend("items") == "wn" then
+    local store = ItemStore()
+    local fromWN = self:GetBackend("items") == "wn"
+    local wnGuids
+    local res
+    if fromWN then
         local c = ns.WarbandNexusBridge:GetDetailedItemCounts(itemID)
-        if not c then
-            return nil
-        end
-        return {
-            total = c.altTotal,
-            bags = c.altBags,
-            banks = c.altBanks,
-            chars = c.altDetails,
-            warbandBank = c.warbandBank,
+        res = {
+            total = c and c.altTotal or 0,
+            bags = c and c.altBags or 0,
+            banks = c and c.altBanks or 0,
+            chars = {},
+            warbandBank = c and c.warbandBank or 0,
             source = "wn",
         }
+        local details = c and c.altDetails or {}
+        for i = 1, #details do
+            res.chars[i] = details[i]
+        end
+        wnGuids = self:WnTrackedGuids()
+    else
+        res = { total = 0, bags = 0, banks = 0, chars = {}, warbandBank = 0, source = "an" }
     end
-    local store = ItemStore()
     if not store then
-        return nil
+        return fromWN and res or nil
     end
     local myGuid = MyGUID()
-    local res = { total = 0, bags = 0, banks = 0, chars = {}, warbandBank = 0, source = "an" }
     for guid, row in pairs(store.chars) do
-        if guid ~= myGuid and type(row) == "table" then
+        if guid ~= myGuid and type(row) == "table" and not (wnGuids and wnGuids[guid]) then
             local bag = type(row.bags) == "table" and row.bags[itemID] or 0
             local bank = type(row.bank) == "table" and row.bank[itemID] or 0
             if bag + bank > 0 then
@@ -795,7 +855,7 @@ function CharacterData:GetItemCountsAcrossCharacters(itemID)
                 res.banks = res.banks + bank
                 res.chars[#res.chars + 1] = {
                     guid = guid,
-                    name = rec and rec.name or CharName(guid),
+                    name = CharName(guid),
                     classFile = rec and rec.classFile or nil,
                     bagCount = bag,
                     bankCount = bank,
@@ -804,10 +864,185 @@ function CharacterData:GetItemCountsAcrossCharacters(itemID)
             end
         end
     end
-    local wb = store.warband
-    res.warbandBank = (type(wb) == "table" and type(wb.counts) == "table" and wb.counts[itemID]) or 0
-    table.sort(res.chars, function(a, b) return a.total > b.total end)
+    if not fromWN then
+        local wb = store.warband
+        res.warbandBank = (type(wb) == "table" and type(wb.counts) == "table" and wb.counts[itemID]) or 0
+    end
+    table.sort(res.chars, function(a, b) return (a.total or 0) > (b.total or 0) end)
     return res
+end
+
+--==========================================================================
+-- Professions per character (native, every login)
+--==========================================================================
+
+--- GetProfessionInfo returns (name, texture, rank, maxRank, numSpells, spellOffset, skillLine, ...):
+--- Blizzard_ProfessionsBook.lua:125 (retail) and Camelot/Blizzard_ProfessionsBook.lua:57 (Forever).
+---@return table[] { {skillLine, name, icon, rank, maxRank} } sorted by skillLine
+local function ReadLiveProfessions()
+    local out = {}
+    if not GetProfessionInfo or not ns.Utilities.GetProfessionIndices then
+        return out
+    end
+    local idxs = ns.Utilities.GetProfessionIndices()
+    for i = 1, #idxs do
+        local ok, name, icon, rank, maxRank, _, _, skillLine = pcall(GetProfessionInfo, idxs[i])
+        if ok and not (issecretvalue and (issecretvalue(name) or issecretvalue(rank) or issecretvalue(skillLine))) then
+            skillLine = tonumber(skillLine)
+            if skillLine and type(name) == "string" and name ~= "" then
+                out[#out + 1] = {
+                    skillLine = skillLine,
+                    name = name,
+                    icon = icon,
+                    rank = tonumber(rank) or 0,
+                    maxRank = tonumber(maxRank) or 0,
+                }
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.skillLine < b.skillLine end)
+    return out
+end
+
+local function SameProfessions(a, b)
+    if type(a) ~= "table" or #a ~= #b then
+        return false
+    end
+    for i = 1, #b do
+        local x, y = a[i], b[i]
+        if x.skillLine ~= y.skillLine or x.rank ~= y.rank or x.maxRank ~= y.maxRank or x.name ~= y.name then
+            return false
+        end
+    end
+    return true
+end
+
+--- Native collector: persist the logged-in character's professions into charProfessions[guid].
+--- Sends CHARACTER_PROFESSIONS_UPDATED only when a profession, rank or cap actually changed.
+---@return boolean changed
+function CharacterData:CaptureProfessions()
+    local guid = MyGUID()
+    local g = Global()
+    if not guid or not g then
+        return false
+    end
+    local list = ReadLiveProfessions()
+    if type(g.charProfessions) ~= "table" then
+        g.charProfessions = {}
+    end
+    local prev = g.charProfessions[guid]
+    local changed = not (prev and SameProfessions(prev.list, list))
+    g.charProfessions[guid] = { at = time(), list = list }
+    if changed then
+        Notify(E.CHARACTER_PROFESSIONS_UPDATED, guid)
+    end
+    return changed
+end
+
+function CharacterData:ScheduleProfessionCapture()
+    if self._profPending then
+        return
+    end
+    self._profPending = true
+    C_Timer.After(ITEM_CAPTURE_DEBOUNCE_SEC, function()
+        CharacterData._profPending = false
+        if CharacterData._profWired then
+            CharacterData:CaptureProfessions()
+        end
+    end)
+end
+
+--- SKILL_LINES_CHANGED (SkillInfoDocumentation) and LEARNED_SPELL_IN_SKILL_LINE
+--- (SpellBookDocumentation) exist in both the retail and the Forever API documentation.
+function CharacterData:WireProfessionCollector()
+    if self._profWired then
+        return
+    end
+    self._profWired = true
+    local owner = self._profOwner or ns.NewEventOwner("CharacterDataProfessions")
+    self._profOwner = owner
+    owner:RegisterEvent("SKILL_LINES_CHANGED", function()
+        CharacterData:ScheduleProfessionCapture()
+    end)
+    owner:RegisterEvent("LEARNED_SPELL_IN_SKILL_LINE", function()
+        CharacterData:ScheduleProfessionCapture()
+    end)
+    -- GetProfessions can answer empty right at login; read once the client has settled.
+    self:ScheduleProfessionCapture()
+end
+
+---@param guid string|nil
+---@return table|nil { at, list = { {skillLine, name, icon, rank, maxRank} } }
+function CharacterData:GetCharacterProfessions(guid)
+    local g = Global()
+    local row = guid and g and type(g.charProfessions) == "table" and g.charProfessions[guid]
+    return type(row) == "table" and row or nil
+end
+
+--- Recipes this character is recorded as knowing (native learnedBy; filled when its profession
+--- windows were opened).
+---@param guid string|nil
+---@return number
+function CharacterData:GetRecipeCountForCharacter(guid)
+    local g = Global()
+    local sch = g and g.recipeSchematics
+    if not guid or type(sch) ~= "table" then
+        return 0
+    end
+    local n = 0
+    for _, row in pairs(sch) do
+        if type(row) == "table" and type(row.learnedBy) == "table" and row.learnedBy[guid] then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+--==========================================================================
+-- Forget a character
+--==========================================================================
+
+--- Remove one character from every per-character store AN keeps by GUID: registry, professions,
+--- concentration snapshots, item snapshot, recipe cooldowns, learnedBy, gold series and owned
+--- auctions. Event history (loot, craft and sales ledgers) is kept: those are past events, and the
+--- rows fall back to "Unknown character" for the name. Never the logged-in character (its rows
+--- would be rewritten at once). Sends CHARACTER_PURGED after the write.
+---@param guid string
+---@return boolean removed
+function CharacterData:PurgeCharacter(guid)
+    local g = Global()
+    if type(guid) ~= "string" or guid == "" or not g or guid == MyGUID() then
+        return false
+    end
+    local function drop(tbl)
+        if type(tbl) == "table" and tbl[guid] ~= nil then
+            tbl[guid] = nil
+        end
+    end
+    drop(g.charRegistry)
+    drop(g.charProfessions)
+    drop(g.professionSnapshots)
+    drop(g.recipeCooldowns)
+    if type(g.itemSnapshots) == "table" then
+        drop(g.itemSnapshots.chars)
+    end
+    if type(g.salesLedger) == "table" and type(g.salesLedger.gold) == "table" then
+        drop(g.salesLedger.gold.chars)
+    end
+    if type(g.ownedAuctions) == "table" then
+        drop(g.ownedAuctions.chars)
+    end
+    if type(g.recipeSchematics) == "table" then
+        for _, row in pairs(g.recipeSchematics) do
+            if type(row) == "table" and type(row.learnedBy) == "table" and row.learnedBy[guid] then
+                row.learnedBy[guid] = nil
+                row.learned = next(row.learnedBy) ~= nil
+            end
+        end
+    end
+    self:InvalidateCaches()
+    Notify(E.CHARACTER_PURGED, guid)
+    return true
 end
 
 --==========================================================================
@@ -835,6 +1070,8 @@ function CharacterData:PruneStale()
             end
         end
     end
+    --- charProfessions is the roster's profession list: kept as long as the character is in the
+    --- registry (PurgeCharacter removes both), so an alt not played for a month keeps its row.
     local items = g.itemSnapshots
     if type(items) == "table" and type(items.chars) == "table" then
         local list = {}
@@ -863,12 +1100,13 @@ function CharacterData:ApplyNativeCollectors()
     if not self._enabled then
         return
     end
-    if self:UsesNative("characters") then
-        ns.Utilities:TouchCharRegistry()
-    end
+    --- Every login refreshes the GUID row (name / realm / surname / class / lastSeen), WN or not, so
+    --- AN's ledgers and loot rows always resolve a name.
+    ns.Utilities:TouchCharRegistry()
+    self:WireProfessionCollector()
     local owner = self._itemOwner or ns.NewEventOwner("CharacterDataItems")
     self._itemOwner = owner
-    local wantItems = self:UsesNative("items")
+    local wantItems = true
     if wantItems and not self._itemsWired then
         self._itemsWired = true
         --- BAG_UPDATE_DELAYED / BANKFRAME_OPENED / BANKFRAME_CLOSED / PLAYERBANKSLOTS_CHANGED /
@@ -930,6 +1168,10 @@ function CharacterData:Disable()
     end
     self._enabled = false
     self._itemsWired = false
+    self._profWired = false
+    if self._profOwner then
+        self._profOwner:UnregisterAllEvents()
+    end
     if self._eventOwner then
         self._eventOwner:UnregisterAllMessages()
     end

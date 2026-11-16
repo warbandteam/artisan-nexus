@@ -79,6 +79,9 @@ function ns.UI_RefreshRouter.RegisterMainShellListeners(ctx)
         -- Crafting row names are inked by craft status (reagents in bags / bank / warband bank); the
         -- shopping list's have / buy counts follow purchases, mail, crafts and auctions posted.
         { "BAG_STOCK_UPDATED", { crafting = true, plan = true } },
+        -- Overview > Characters lists every character's professions.
+        { "CHARACTER_PROFESSIONS_UPDATED", { overview = true } },
+        { "CHARACTER_PURGED", ANY },
     }
     for i = 1, #AN_TAB_REFRESH do
         local msg = Constants.EVENTS[AN_TAB_REFRESH[i][1]]

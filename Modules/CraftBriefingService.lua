@@ -90,7 +90,8 @@ function CraftBriefingService:Rebuild(scanKind)
 
     local useAverage = p and p.craftBriefingPriceMode == "avg"
     local owned = rs:GetOwnedCraftProfessions()
-    local compareConc = not p or p.craftBriefingConcentrationHints ~= false
+    local compareConc = (not p or p.craftBriefingConcentrationHints ~= false)
+        and (not ns.SupportsFeature or ns.SupportsFeature("concentration"))
     local ownedOnly = (p and p.craftBriefingOwnedOnly ~= false)
     local listOpts = {
         harvestedOnly = true,

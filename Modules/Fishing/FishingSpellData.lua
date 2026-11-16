@@ -163,8 +163,8 @@ local function ScanSpellBookForFishingCastSpellId()
     end
 
     if GetProfessions and C_SpellBook.GetSpellBookSkillLineInfo then
-        local pr = { GetProfessions() }
-        for i = 1, 5 do
+        local pr = ns.Utilities.GetProfessionIndices()
+        for i = 1, #pr do
             local profIdx = pr[i]
             if profIdx then
                 local okLi, skillLineInfo = pcall(C_SpellBook.GetSpellBookSkillLineInfo, profIdx)

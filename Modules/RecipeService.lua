@@ -931,7 +931,8 @@ function RecipeService:ScanBags()
     end
     local bags = { 0, 1, 2, 3, 4, 5 }
     local profile = ns.db and ns.db.profile
-    local includeWarband = not profile or profile.includeWarbandBank ~= false
+    local includeWarband = (not profile or profile.includeWarbandBank ~= false)
+        and (not ns.SupportsFeature or ns.SupportsFeature("warbandBank"))
     if includeWarband and Enum and Enum.BagIndex then
         local BI = Enum.BagIndex
         for i = 1, 5 do
@@ -1421,8 +1422,7 @@ function RecipeService:GetOwnedCraftProfessions()
     end
 
     if GetProfessions and GetProfessionInfo then
-        local p1, p2, p3, p4, p5 = GetProfessions()
-        local idxs = { p1, p2, p3, p4, p5 }
+        local idxs = ns.Utilities.GetProfessionIndices()
         for i = 1, #idxs do
             local profIdx = idxs[i]
             if profIdx then

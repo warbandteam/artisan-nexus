@@ -288,6 +288,7 @@ function WarbandNexusBridge:GetCharacters()
                 guid = guid,
                 name = c.name,
                 realm = c.realm,
+                surname = c.surname, -- WoW Forever only (WN DataService)
                 classFile = c.classFile,
                 lastSeen = c.lastSeen,
                 isTracked = c.isTracked == true,

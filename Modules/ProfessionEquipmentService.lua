@@ -173,8 +173,8 @@ end
 local function OwnedBaseSkillLines()
     local set = {}
     if not (GetProfessions and GetProfessionInfo) then return set end
-    local idxs = { GetProfessions() }
-    for i = 1, 5 do
+    local idxs = ns.Utilities.GetProfessionIndices()
+    for i = 1, #idxs do
         local profIdx = idxs[i]
         if profIdx then
             local ok, _, _, _, _, _, _, skillLine = pcall(GetProfessionInfo, profIdx)
