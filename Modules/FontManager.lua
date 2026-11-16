@@ -250,7 +250,7 @@ local SCALE_PRESET_MULTIPLIER = {
 local function GetScaleMultiplier()
     -- GUARD: Check if namespace and DB exist (race condition protection)
     if not ns or not ns.db then
-        DebugPrint("|cffffff00[WN FontManager]|r WARNING: Database not ready, using default scale (1.0)")
+        DebugPrint("|cffffff00[AN FontManager]|r WARNING: Database not ready, using default scale (1.0)")
         return 1.0
     end
     
@@ -341,6 +341,42 @@ local function AcquireWarmupFontString(index)
 end
 
 --[[
+    Apply a font and report whether it stuck, plus why it did not.
+
+    SetFont DOES return a success boolean on a FontString: SimpleFontStringAPIDocumentation.lua
+    declares `Returns = { { Name = "success", Type = "bool", Nilable = false } }`, exactly as
+    SimpleEditBoxAPIDocumentation.lua does. warcraft.wiki.gg annotates that return "(exclusive to
+    EditBox)" and is wrong; only the Font object (SimpleFontAPIDocumentation.lua) declares none.
+    Trust the documented return, and keep the GetFont() cross-check for the Font-object case.
+
+    The second return is the reason, so a caller can say WHY instead of only that it happened:
+    a failure line without it is why this was misdiagnosed twice.
+    @param fontObject FontString|EditBox
+    @return boolean applied
+    @return string|nil reason "error:<msg>" | "rejected" | "unset"
+]]
+local function TrySetFont(fontObject, path, size, flags)
+    if not fontObject or not fontObject.SetFont then return false, "unset" end
+    local ok, result = pcall(fontObject.SetFont, fontObject, path, size, flags)
+    if not ok then
+        return false, "error:" .. tostring(result)
+    end
+    if result == false then
+        return false, "rejected"
+    end
+    if fontObject.GetFont then
+        local applied = fontObject:GetFont()
+        if issecretvalue and issecretvalue(applied) then
+            return true
+        end
+        if type(applied) ~= "string" or applied == "" then
+            return false, "unset"
+        end
+    end
+    return true
+end
+
+--[[
     Warm up a single font path: force GPU rasterization by rendering text off-screen.
     @param fontPath string - Font file path
     @param slotIndex number - Pool slot (allows multiple concurrent warm-ups)
@@ -349,10 +385,7 @@ local function WarmupFontPath(fontPath, slotIndex)
     if not fontPath or fontPath == "" then return end
     if warmedUpPaths[fontPath] then return end  -- already warm
     local fs = AcquireWarmupFontString(slotIndex or 1)
-    local ok = false
-    pcall(function()
-        ok = fs:SetFont(fontPath, 14, "OUTLINE")
-    end)
+    local ok = TrySetFont(fs, fontPath, 14, "OUTLINE")
     if ok then
         fs:SetText("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
         warmedUpPaths[fontPath] = true
@@ -421,7 +454,7 @@ function FontManager:GetFontSize(category)
     end
     -- GUARD: Check if namespace and DB exist (race condition protection)
     if not ns or not ns.db then
-        DebugPrint("|cffffff00[WN FontManager]|r WARNING: Database not ready, using default font size")
+        DebugPrint("|cffffff00[AN FontManager]|r WARNING: Database not ready, using default font size")
         local defaults = {
             header = 16,
             title = 14,
@@ -569,16 +602,19 @@ local function ResolveFontFaceFromDB(db)
         key = PATH_TO_LSM_KEY[value]
         db.fontFace = key
     end
-    -- Primary: resolve via LSM
+    -- Primary: our own bundled/builtin keys resolve to OUR files. LSM media keys are global, so a
+    -- sibling addon that registers the same key first (Warband Nexus ships the same font names)
+    -- would otherwise hand us ITS copy of the .ttf -- same glyphs, but a foreign path in logs and
+    -- a broken font the moment that addon is disabled or ships a different file.
+    if LSM_KEY_TO_PATH[key] then
+        return LSM_KEY_TO_PATH[key]
+    end
+    -- Third-party LSM fonts (SharedMedia packs, other addons): resolve via LSM
     if LSM and LSM.Fetch and LSM.MediaType then
         local path = LSM:Fetch(LSM.MediaType.FONT, key)
         if path and path ~= "" then
             return path
         end
-    end
-    -- Fallback: resolve key via built-in lookup (LSM not loaded)
-    if LSM_KEY_TO_PATH[key] then
-        return LSM_KEY_TO_PATH[key]
     end
     -- Last resort: if value looks like a path, use it directly
     if value:find("\\") then
@@ -640,28 +676,21 @@ function FontManager:SafeSetFont(fontString, sizeCategory, opts)
         flags = ""
     end
     
-    local ok = false
-    local success = pcall(function()
-        ok = fontString:SetFont(fontPath, fontSize, flags)
-    end)
+    local ok = TrySetFont(fontString, fontPath, fontSize, flags)
     
-    if not success or not ok then
+    if not ok then
         -- Primary font failed to load (e.g. a locale font that is not installed). Prefer the
         -- bundled default (Expressway: broad Latin/Turkish coverage) over the WoW builtin, so
         -- text never regresses to a glyph-less fallback. Try a preloaded object first.
         local applied = false
         local preloaded = PRELOADED_FONTS[fontPath]
         if preloaded then
-            applied = pcall(function()
-                fontString:SetFontObject(preloaded)
-                ok = fontString:SetFont(fontPath, fontSize, flags)
-            end) and ok
+            pcall(function() fontString:SetFontObject(preloaded) end)
+            applied = TrySetFont(fontString, fontPath, fontSize, flags)
         end
         if not applied then
-            local fbOk = false
-            pcall(function() fbOk = fontString:SetFont(DEFAULT_PROFILE_FONT_PATH, fontSize, flags) end)
-            if not fbOk then
-                pcall(function() fontString:SetFont(BUILTIN_FALLBACK_FONT_PATH, fontSize, flags) end)
+            if not TrySetFont(fontString, DEFAULT_PROFILE_FONT_PATH, fontSize, flags) then
+                TrySetFont(fontString, BUILTIN_FALLBACK_FONT_PATH, fontSize, flags)
             end
         end
         FontManager:ApplyReadableEdge(fontString, sizeCategory or "body", flagOpts)
@@ -850,14 +879,8 @@ function FontManager:ApplyBarOverlayFont(fontString)
         flags = "OUTLINE"
     end
     local existingText = fontString:GetText()
-    local ok = false
-    pcall(function()
-        ok = fontString:SetFont(fontFace, fontSize, flags)
-    end)
-    if not ok then
-        pcall(function()
-            fontString:SetFont(BUILTIN_FALLBACK_FONT_PATH, fontSize, flags)
-        end)
+    if not TrySetFont(fontString, fontFace, fontSize, flags) then
+        TrySetFont(fontString, BUILTIN_FALLBACK_FONT_PATH, fontSize, flags)
     end
     ClearReadableEdge(fontString)
     if existingText and not (issecretvalue and issecretvalue(existingText)) and existingText ~= "" then
@@ -973,28 +996,20 @@ function FontManager:ApplyFont(fontString, category, opts)
     local existingText = fontString:GetText()
     
     -- Try SetFont with resolved path
-    local ok = false
-    local success = pcall(function()
-        ok = fontString:SetFont(fontFace, fontSize, flags)
-    end)
-    
-    if not success or not ok then
-        DebugPrint("|cffff0000[WN FontManager]|r Font load failed for: " .. tostring(fontFace))
+    local applied, reason = TrySetFont(fontString, fontFace, fontSize, flags)
+    if not applied then
+        DebugPrint("|cffff0000[AN FontManager]|r Font load failed for: " .. tostring(fontFace)
+            .. " size=" .. tostring(fontSize) .. " flags=" .. tostring(flags)
+            .. " why=" .. tostring(reason))
         -- Try preloaded FontObject (guaranteed loaded at file time)
         local preloaded = PRELOADED_FONTS[fontFace]
         if preloaded then
-            pcall(function()
-                fontString:SetFontObject(preloaded)
-                -- Override size/flags from the prototype
-                fontString:SetFont(fontFace, fontSize, flags)
-            end)
+            pcall(function() fontString:SetFontObject(preloaded) end)
+            -- Override size/flags from the prototype
+            TrySetFont(fontString, fontFace, fontSize, flags)
         else
             -- Last resort: default WoW font
-            local fallbackOk = false
-            pcall(function()
-                fallbackOk = fontString:SetFont(BUILTIN_FALLBACK_FONT_PATH, fontSize, flags)
-            end)
-            if not fallbackOk then
+            if not TrySetFont(fontString, BUILTIN_FALLBACK_FONT_PATH, fontSize, flags) then
                 if fontString.SetFontObject then
                     fontString:SetFontObject("GameFontNormal")
                 end
