@@ -27,3 +27,10 @@ ignore:
   - Pack-ArtisanNexus.ps1
   - PUBLISHING.md
   - tools
+  - scripts
+  # BEGIN retail-only (WoW Forever artifacts never ship in the retail zip)
+  - ArtisanNexus_Forever.toc
+  - ArtisanNexus_Camelot.toc
+  - CHANGELOG_FOREVER.md
+  - .pkgmeta-forever
+  # END retail-only

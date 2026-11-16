@@ -1087,7 +1087,9 @@ function SalesLedgerService:Enable()
             if SalesLedgerService._enabled then SnapshotMoney() end
         end)
     end)
-    owner:RegisterEvent("ACCOUNT_MONEY", SnapshotWarband)
+    if not ns.SupportsFeature or ns.SupportsFeature("warbandBank") then
+        owner:RegisterEvent("ACCOUNT_MONEY", SnapshotWarband)
+    end
     owner:RegisterEvent("PLAYER_ENTERING_WORLD", function()
         SnapshotMoney()
         SnapshotWarband()

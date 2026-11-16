@@ -16,6 +16,27 @@ local ArtisanNexus = LibStub("AceAddon-3.0"):NewAddon(
 
 ns.ArtisanNexus = ArtisanNexus
 
+--- [WN Core.lua] Events a client does not know raise inside AceEvent's RegisterEvent. WoW Forever
+--- runs the Mainline UI but is a different game type, so skip what the client does not have
+--- instead of taking the whole login chain down with it.
+local _AceRegisterEvent = ArtisanNexus.RegisterEvent
+ns.UNSUPPORTED_EVENTS = {}
+function ArtisanNexus:RegisterEvent(event, ...)
+    local ok = pcall(_AceRegisterEvent, self, event, ...)
+    if not ok then
+        ns.UNSUPPORTED_EVENTS[event] = true
+        if ns.DebugPrint then
+            ns.DebugPrint("|cffffff00[AN]|r event not available on this client: " .. tostring(event))
+        end
+    end
+    return ok
+end
+
+--- [WN ModuleManager.lua] Does this client have system `key`? See Modules/Capabilities.lua.
+function ArtisanNexus:SupportsFeature(key)
+    return (not ns.Capabilities) or ns.Capabilities:Supports(key)
+end
+
 local L = LibStub("AceLocale-3.0"):GetLocale("ArtisanNexus")
 --- Warband Nexus UI framework convention (Modules/UI/*): `ns.L[key]` is nil for a missing key and
 --- the caller supplies the English fallback. AceLocale's read metatable returns the key itself
@@ -330,6 +351,16 @@ ns.DEFAULTS = defaults
 
 function ArtisanNexus:OnInitialize()
     self.db = LibStub("AceDB-3.0"):New("ArtisanNexusDB", defaults, true)
+    --[[ [WN Core.lua] WoW Forever: first names repeat on a realm and GetRealmName can answer "PvE"
+        instead of the realm, so AceDB's "Name - Realm" char key would merge two characters. Use the
+        GUID -- the identity every db.global row already uses -- before anything reads db.char
+        (AceDB builds the section lazily from db.keys.char). Retail keeps AceDB's own key. ]]
+    if ns.Constants and ns.Constants.IS_FOREVER_BUILD and self.db.keys and rawget(self.db, "char") == nil then
+        local guid = UnitGUID and UnitGUID("player")
+        if type(guid) == "string" and not (issecretvalue and issecretvalue(guid)) and guid ~= "" then
+            self.db.keys.char = guid
+        end
+    end
     ns.db = self.db
 
     self.db.RegisterCallback(self, "OnProfileChanged", "OnProfileChanged")
@@ -715,6 +746,20 @@ function ArtisanNexus:SlashCommand(input)
     if input == "config" then
         if ns.OpenAddonSettings then
             ns.OpenAddonSettings()
+        end
+        return
+    end
+    if input == "caps" then
+        local C = ns.Capabilities
+        if not C then return end
+        local snap, isForever = C:Snapshot()
+        self:Print("client: " .. (isForever and "WoW Forever" or "retail"))
+        for i = 1, #snap do
+            self:Print("   " .. snap[i].key .. ": " .. (snap[i].value and "|cff40ff40yes|r" or "|cffff6060no|r"))
+        end
+        local rows = C:DeepProbe()
+        for i = 1, #rows do
+            self:Print("   " .. rows[i][1] .. " = " .. rows[i][2])
         end
         return
     end

@@ -32,6 +32,7 @@ Locales\zhTW.lua
 
 # Core (Constants and Migration before Core.lua — DB defaults use ns.Constants)
 Modules\Constants.lua
+Modules\Capabilities.lua
 Modules\DebugPrint.lua
 Modules\Utilities.lua
 Modules\MigrationService.lua

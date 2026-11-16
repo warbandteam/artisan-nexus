@@ -6,6 +6,7 @@ Run from repo root:  python .github/scripts/preflight_release.py
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,7 @@ LOCALES = ROOT / "Locales"
 CONSTANTS = ROOT / "Modules" / "Constants.lua"
 TOC = ROOT / "ArtisanNexus.toc"
 CHANGELOG = ROOT / "CHANGELOG.md"
+CHANGELOG_FOREVER = ROOT / "CHANGELOG_FOREVER.md"
 
 TOC_LOCALE_NAMES = {
     "deDE.lua",
@@ -49,7 +51,8 @@ def locale_syntax_errors(path: Path) -> list[str]:
 
 def read_version_from_constants() -> str | None:
     text = CONSTANTS.read_text(encoding="utf-8")
-    m = re.search(r'ADDON_VERSION\s*=\s*"([^"]+)"', text)
+    # Lookbehind: FOREVER_ADDON_VERSION / RETAIL_ADDON_VERSION must not match the retail field.
+    m = re.search(r'(?<![A-Z_])ADDON_VERSION\s*=\s*"([^"]+)"', text)
     return m.group(1) if m else None
 
 
@@ -102,6 +105,54 @@ def main() -> int:
         errors.append("Could not parse ## Version from ArtisanNexus.toc")
     if const_ver and toc_ver and const_ver != toc_ver:
         errors.append(f"Version mismatch: Constants={const_ver!r} TOC={toc_ver!r}")
+
+    # [WN preflight] The WoW Forever TOCs are generated from ArtisanNexus.toc (## Version included):
+    # a version bump without regenerating them would ship a Forever build that reports the previous
+    # version.
+    flavor = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_flavor_tocs.py"), "--check"],
+                            capture_output=True, text=True)
+    if flavor.returncode != 0:
+        errors.append("Forever TOCs stale: run python scripts/build_flavor_tocs.py ("
+                      + (flavor.stderr or flavor.stdout).strip() + ")")
+
+    # WoW Forever release line: FOREVER_ADDON_VERSION, CHANGELOG_FOREVER.md, CHANGELOG_FOREVER_V*.
+    fm = re.search(r'FOREVER_ADDON_VERSION\s*=\s*"([^"]+)"', CONSTANTS.read_text(encoding="utf-8"))
+    forever_ver = fm.group(1) if fm else None
+    if not forever_ver:
+        errors.append("Could not parse FOREVER_ADDON_VERSION from Modules/Constants.lua")
+    else:
+        fnum = re.match(r"^(\d+)\.(\d+)\.(\d+)", forever_ver)
+        fkey = ("CHANGELOG_FOREVER_V" + "".join(fnum.groups())) if fnum else None
+        if not fkey:
+            errors.append(f"Could not derive CHANGELOG_FOREVER key from {forever_ver!r}")
+        else:
+            for name in sorted(TOC_LOCALE_NAMES):
+                path = LOCALES / name
+                if not path.is_file():
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if fkey not in keys_from_locale(path):
+                    errors.append(f"{name}: missing {fkey} for Forever version {forever_ver}")
+                for prefix in ("CHANGELOG_V", "CHANGELOG_FOREVER_V"):
+                    n = len(re.findall(r'L\["' + prefix + r'\d+"\]', text))
+                    if n > 1:
+                        errors.append(f"{name}: {n} {prefix}* keys -- keep only the current version's")
+        if not CHANGELOG_FOREVER.is_file():
+            errors.append("CHANGELOG_FOREVER.md missing at repo root")
+        elif not re.search(rf"(?m)^## v{re.escape(forever_ver)}\b",
+                           CHANGELOG_FOREVER.read_text(encoding="utf-8")):
+            errors.append(f"CHANGELOG_FOREVER.md has no ## v{forever_ver} section")
+
+    # On a release tag, the tag must name the version being shipped:
+    # vX.Y.Z = retail (ADDON_VERSION), forever-vX.Y.Z = WoW Forever (FOREVER_ADDON_VERSION).
+    ref = os.environ.get("GITHUB_REF_NAME", "")
+    if os.environ.get("GITHUB_REF_TYPE") == "tag" and ref:
+        if ref.startswith("forever-v"):
+            if forever_ver and ref != f"forever-v{forever_ver}":
+                errors.append(f"Tag {ref} does not match FOREVER_ADDON_VERSION {forever_ver}")
+        elif ref.startswith("v"):
+            if const_ver and ref != f"v{const_ver}":
+                errors.append(f"Tag {ref} does not match ADDON_VERSION {const_ver}")
 
     version = const_ver or toc_ver
     if version:

@@ -10,6 +10,10 @@
       Net, 7 days       SalesLedgerService:GetSummary(7).net, tooltip = GetSummary(1).net -> Ledger
       Undercut auctions OwnedAuctionsService:GetUndercut, tooltip = active auctions (GetOwned) -> Auction House
       Top crafts        the five most profitable crafts of the Best craft list; row click = Best craft
+      Characters        every known character (ns.CharacterData roster: AN registry + Warband Nexus):
+                        professions with skill / cap (charProfessions, written at each login), recipes
+                        recorded as known, last seen. Right-click an AN-only character: forget it
+                        (CharacterData:PurgeCharacter, confirmed).
     Title-card subtitle: what the page is for, then AH price freshness (AHPriceService:GetCacheStats),
     orange when stale. Top crafts header: profitable recipe count on the right.
 
@@ -247,6 +251,131 @@ end
 local topRows = {}
 
 -- ─────────────────────────────────────────────────────────────────
+-- Characters (ns.CharacterData roster + per-character professions)
+-- ─────────────────────────────────────────────────────────────────
+
+local CHAR_COLS = {
+    { key = "name", label = SafeL("HUB_OV_COL_CHARACTER", "Character"), width = 170 },
+    { key = "profs", label = SafeL("HUB_COL_PROFESSION", "Profession"), flex = 1, min = COL.NAME_MIN },
+    { key = "recipes", label = SafeL("HUB_OV_COL_RECIPES", "Recipes"), width = 70, align = "RIGHT" },
+    { key = "seen", label = SafeL("HUB_OV_COL_LAST_SEEN", "Last seen"), width = 90, align = "RIGHT" },
+}
+
+--- Class color through C_ClassColor (warcraft.wiki.gg API_C_ClassColor.GetClassColor -> ColorMixin).
+local function ClassHex(classFile)
+    if not (classFile and C_ClassColor and C_ClassColor.GetClassColor) then return nil end
+    local ok, cc = pcall(C_ClassColor.GetClassColor, classFile)
+    if not ok or not cc or not cc.GetRGB then return nil end
+    local r, g, b = cc:GetRGB()
+    if type(r) ~= "number" then return nil end
+    return string.format("%02x%02x%02x", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+end
+
+local function ProfessionsText(guid)
+    local cd = ns.CharacterData
+    local row = cd and Call(cd, "GetCharacterProfessions", guid)
+    local list = type(row) == "table" and row.list or nil
+    if type(list) ~= "table" or #list == 0 then
+        return nil
+    end
+    local parts = {}
+    for i = 1, #list do
+        local p = list[i]
+        if (p.maxRank or 0) > 0 then
+            parts[#parts + 1] = string.format("%s %d/%d", tostring(p.name), p.rank or 0, p.maxRank)
+        else
+            parts[#parts + 1] = tostring(p.name)
+        end
+    end
+    return table.concat(parts, ", ")
+end
+
+local charRows = {}
+local function CharacterRows()
+    wipe(charRows)
+    local cd = ns.CharacterData
+    local roster = cd and Call(cd, "GetCharacters")
+    if type(roster) ~= "table" then
+        return charRows
+    end
+    local myGuid = ns.Utilities and ns.Utilities:GetCharacterGUID()
+    for guid, c in pairs(roster) do
+        charRows[#charRows + 1] = {
+            guid = guid,
+            name = ns.Utilities:GetCharacterDisplayName(guid),
+            classFile = c.classFile,
+            lastSeen = tonumber(c.lastSeen),
+            source = c.source,
+            isMe = guid == myGuid,
+        }
+    end
+    table.sort(charRows, function(a, b)
+        if a.isMe ~= b.isMe then return a.isMe end
+        return (a.lastSeen or 0) > (b.lastSeen or 0)
+    end)
+    return charRows
+end
+
+local function CharValue(col, r)
+    local k = col.key
+    if k == "name" then
+        local hex = ClassHex(r.classFile)
+        return hex and ("|cff" .. hex .. r.name .. "|r") or r.name, "Bright"
+    elseif k == "profs" then
+        local text = ProfessionsText(r.guid)
+        if not text then
+            return Dim(SafeL("HUB_OV_CHAR_NO_PROFS", "Log in once to record")), "Muted"
+        end
+        return text, "Normal"
+    elseif k == "recipes" then
+        local n = Call(ns.CharacterData, "GetRecipeCountForCharacter", r.guid) or 0
+        return n > 0 and tostring(n) or Dim(DASH), "Normal"
+    end
+    if r.isMe then
+        return Ink(SafeL("HUB_OV_CHAR_ONLINE", "Online"), "success"), "Normal"
+    end
+    if not r.lastSeen or r.lastSeen <= 0 then
+        return Dim(DASH)
+    end
+    return FormatDuration(time() - r.lastSeen), "Muted"
+end
+
+local function CanForget(r)
+    return r and not r.isMe and r.source ~= "wn"
+end
+
+local function CharRowEnter(row, r)
+    if not r then return end
+    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(r.name, 1, 1, 1)
+    local profs = ProfessionsText(r.guid)
+    if profs then
+        GameTooltip:AddLine(profs, 0.75, 0.75, 0.75, true)
+    end
+    GameTooltip:AddLine(SafeL("HUB_OV_CHAR_RECIPES_HINT", "Recipes are recorded when the character opens its profession window."),
+        0.6, 0.6, 0.6, true)
+    if r.source == "wn" then
+        GameTooltip:AddLine(SafeL("HUB_OV_CHAR_FROM_WN", "Roster from Warband Nexus: remove the character there."), 0.6, 0.6, 0.6, true)
+    elseif CanForget(r) then
+        GameTooltip:AddLine(SafeL("HUB_OV_CHAR_FORGET_HINT", "Right-click: forget this character"), 0.7, 0.7, 0.7)
+    end
+    GameTooltip:Show()
+end
+
+local function CharRowClick(row, r, button)
+    if button ~= "RightButton" or not CanForget(r) then return end
+    local W = ns.ArtisanWindow
+    if not (W and W.Confirm) then return end
+    local guid = r.guid
+    W.Confirm(string.format(SafeL("HUB_OV_CHAR_FORGET_CONFIRM",
+        "Forget %s? Its professions, recipes, bag counts, cooldowns, gold history and auctions are removed from Artisan Nexus.\n\nThis cannot be undone!"),
+        r.name), nil, function()
+        -- Service writes and sends CHARACTER_PURGED; the refresh router repaints every tab.
+        Call(ns.CharacterData, "PurgeCharacter", guid)
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────────
 -- Tab
 -- ─────────────────────────────────────────────────────────────────
 
@@ -311,6 +440,15 @@ function ArtisanNexus:DrawOverviewTab(parent)
                 count = string.format(SafeL("HUB_CRAFT_GROUP_COUNT_FMT", "%d profitable"), #crafts),
             }) then
             body:Table("top", TOP_COLS, topRows, TopValue, { onRowClick = TopRowClick, onRowEnter = TopRowEnter })
+        end
+    end
+
+    local chars = CharacterRows()
+    if #chars > 0 then
+        if body:Section("chars", SafeL("HUB_OV_CHARACTERS", "Characters"), {
+                count = string.format(SafeL("HUB_OV_CHAR_COUNT_FMT", "%d characters"), #chars),
+            }) then
+            body:Table("chars", CHAR_COLS, chars, CharValue, { onRowClick = CharRowClick, onRowEnter = CharRowEnter })
         end
     end
     return body.y

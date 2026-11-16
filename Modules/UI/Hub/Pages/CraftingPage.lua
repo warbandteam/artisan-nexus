@@ -311,6 +311,13 @@ local SORT_OPTIONS = {
     { key = "cost", label = SafeL("HUB_SORT_COST", "Craft cost (lowest)"), sortKey = "cost", asc = true },
     { key = "name", label = SafeL("HUB_SORT_NAME", "Name (A-Z)"), sortKey = "recipe", asc = true },
 }
+--- No concentration on this client (WoW Forever): drop the gold-per-concentration sort; a saved
+--- "gpc" key then resolves to the profit fallback in ResolveSort.
+if ns.SupportsFeature and not ns.SupportsFeature("concentration") then
+    for i = #SORT_OPTIONS, 1, -1 do
+        if SORT_OPTIONS[i].key == "gpc" then table.remove(SORT_OPTIONS, i) end
+    end
+end
 
 --- profile.hubCraftSort = { key = <SORT_OPTIONS key> } (the dropdown writes .key); legacy
 --- hubProfitSort == "concentration" maps to gold per concentration.

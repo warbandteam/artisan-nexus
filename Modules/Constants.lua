@@ -9,6 +9,11 @@ local ADDON_NAME, ns = ...
 local Constants = {
     ADDON_VERSION = "0.4.0-beta1",
 
+    --- WoW Forever release line (tag forever-vX.Y.Z, CHANGELOG_FOREVER.md, CHANGELOG_FOREVER_V*).
+    --- Must match ## Version in the generated ArtisanNexus_Forever.toc (scripts/build_flavor_tocs.py).
+    FOREVER_ADDON_VERSION = "0.1.0",
+    FOREVER_ADDON_RELEASE_DATE = "2026-11-12",
+
     --- Artisan's Acuity (soulbound reagent currency-item; never priced or bought from the AH).
     --- Verified 2026-10-14 via wago.tools ItemSparse build 12.1.5.70391 (Bonding = 1).
     ARTISANS_ACUITY_ITEM_ID = 210814,
@@ -104,6 +109,11 @@ local Constants = {
         --- Payload: `{ [capability] = "wn"|"native" }` for every capability (characters, concentration,
         --- recipes, items, cooldowns).
         CHARACTER_DATA_SOURCE_CHANGED = "AN_CHARACTER_DATA_SOURCE_CHANGED",
+        --- ns.CharacterData persisted the logged-in character's professions and a profession, rank or
+        --- cap changed (db.global.charProfessions[guid]). Payload: guid.
+        CHARACTER_PROFESSIONS_UPDATED = "AN_CHARACTER_PROFESSIONS_UPDATED",
+        --- ns.CharacterData:PurgeCharacter removed a character from every per-character store. Payload: guid.
+        CHARACTER_PURGED = "AN_CHARACTER_PURGED",
         --- WN framework keys (SharedWidgets.lua registers them for its class-colour cache at load; a nil
         --- message name errors in AceEvent). AN keeps no db.global.characters roster and never sends them.
         CHARACTER_UPDATED = "AN_CHARACTER_UPDATED",
@@ -141,6 +151,30 @@ local Constants = {
         MAIN_WINDOW_VISIBILITY_CHANGED = "AN_MAIN_WINDOW_VISIBILITY_CHANGED",
     },
 }
+
+--- [WN Constants.lua] One addon, two release lines. On a WoW Forever client the Forever version and
+--- its changelog key prefix replace the retail ones at load, so everything that reads ADDON_VERSION
+--- (login line, migration stamp) reports the build the player actually installed. Detection is
+--- inlined because Constants loads before Modules/Capabilities.lua (same test as IsForeverClient).
+do
+    local forever = false
+    if WOW_PROJECT_ID and WOW_PROJECT_CAMELOT and WOW_PROJECT_ID == WOW_PROJECT_CAMELOT then
+        forever = true
+    else
+        local ok, iv = pcall(function() return (select(4, GetBuildInfo())) end)
+        if ok and type(iv) == "string" then iv = tonumber(iv) end
+        forever = ok and type(iv) == "number" and iv >= 16000 and iv < 20000 or false
+    end
+    Constants.IS_FOREVER_BUILD = forever
+    Constants.RETAIL_ADDON_VERSION = Constants.ADDON_VERSION
+    if forever then
+        Constants.ADDON_VERSION = Constants.FOREVER_ADDON_VERSION
+        Constants.ADDON_RELEASE_DATE = Constants.FOREVER_ADDON_RELEASE_DATE
+        Constants.CHANGELOG_KEY_PREFIX = "CHANGELOG_FOREVER_V"
+    else
+        Constants.CHANGELOG_KEY_PREFIX = "CHANGELOG_V"
+    end
+end
 
 ns.Constants = Constants
 --- WN SharedWidgets / UI.lua read the main-window logo from here (WN Constants.lua sets the same alias).

@@ -1,0 +1,49 @@
+name: Quality
+
+# WoW Forever gates on every push and PR (port of the Warband Nexus quality.yml Forever steps):
+# the generated Forever TOCs must match ArtisanNexus.toc, every file the Forever TOC keeps must load
+# without the retail-only files, and the Forever identity / capability rules must hold.
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: Forever gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The game runs Lua 5.1; lua5.1 lives in universe and has been dropped from some newer
+      # archives, so fall back to 5.4 rather than failing the run (the tests support both).
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 || sudo apt-get install -y lua5.4
+
+      - name: Flavor TOCs (WoW Forever build in sync with ArtisanNexus.toc)
+        run: python scripts/build_flavor_tocs.py --check
+
+      - name: Forever TOC load, identity rules, per-character data
+        run: |
+          if command -v lua5.1 >/dev/null 2>&1; then LUA=lua5.1; else LUA=lua5.4; fi
+          $LUA .github/scripts/test_forever_toc_load.lua
+          $LUA .github/scripts/test_forever_same_first_name.lua
+          $LUA .github/scripts/test_character_data_merge.lua

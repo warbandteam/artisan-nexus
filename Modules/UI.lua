@@ -1805,7 +1805,16 @@ local TAB_TO_MODULE = {
     plans = "plans",
 }
 
+--- Tab key -> Capabilities key [WN UI_MainShell TAB_CAPABILITY]. A system the client does not have
+--- (WoW Forever) hides its tab; the persisted-lastTab clamp in UI_TabHost then falls back.
+local TAB_CAPABILITY = {
+    concentration = "concentration",
+    orders = "craftingOrders",
+}
+
 local function IsTabModuleEnabled(key)
+    local capKey = TAB_CAPABILITY[key]
+    if capKey and ns.Capabilities and not ns.Capabilities:Supports(capKey) then return false end
     local moduleKey = TAB_TO_MODULE[key]
     if not moduleKey then return true end
     local db = WarbandNexus and WarbandNexus.db and WarbandNexus.db.profile

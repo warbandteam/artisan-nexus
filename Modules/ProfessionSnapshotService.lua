@@ -4,8 +4,9 @@
 
     Also the AN-native concentration collector behind ns.CharacterData: the current character's pools
     are always read live (ReadOwnedPools); they are persisted to db.global.professionSnapshots[guid]
-    and refreshed out of the window (login, CURRENCY_DISPLAY_UPDATE) only while
-    ns.CharacterData:UsesNative("concentration") — with Warband Nexus covering alts nothing is written.
+    and refreshed out of the window (login, CURRENCY_DISPLAY_UPDATE) while
+    ns.CharacterData:UsesNative("concentration"), which is always true: the native row is written even
+    when Warband Nexus serves the reads, so no character depends on WN alone.
 ]]
 
 local ADDON_NAME, ns = ...
@@ -34,6 +35,9 @@ end
 ---@return table|nil { currencyID, current, max, cycleMS, perCycle }
 local function ReadConcentration(skillLineID)
     if not skillLineID or not C_TradeSkillUI or not C_TradeSkillUI.GetConcentrationCurrencyID then
+        return nil
+    end
+    if ns.SupportsFeature and not ns.SupportsFeature("concentration") then
         return nil
     end
     local ok, currencyID = pcall(C_TradeSkillUI.GetConcentrationCurrencyID, skillLineID)
@@ -78,6 +82,9 @@ local function ReadKnowledge(skillLineID)
     --- old table-shaped read never resolved. Unspent knowledge comes from the
     --- spec currency instead.
     if not skillLineID or not C_ProfSpecs or not C_ProfSpecs.GetCurrencyInfoForSkillLine then
+        return nil
+    end
+    if ns.SupportsFeature and not ns.SupportsFeature("professionKnowledge") then
         return nil
     end
     local ok, info = pcall(C_ProfSpecs.GetCurrencyInfoForSkillLine, skillLineID)
@@ -196,10 +203,9 @@ end
 ---@return table[] { skillLineID (base), childSkillLineID, catalogKey, professionName, currencyID, current, max, cycleMS, perCycle }
 function ProfessionSnapshotService:ReadOwnedPools()
     local out = {}
-    local p1, p2, p3, p4, p5 = GetProfessions()
-    local idxs = { p1, p2, p3, p4, p5 }
+    local idxs = ns.Utilities.GetProfessionIndices()
     self._concCurrencyIDs = self._concCurrencyIDs or {}
-    for i = 1, 5 do
+    for i = 1, #idxs do
         local profIdx = idxs[i]
         if profIdx then
             local ok, name, _, _, _, _, _, skillLine = pcall(GetProfessionInfo, profIdx)

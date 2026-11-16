@@ -1,9 +1,14 @@
 name: Release
 
+# Two release lines, one CurseForge / Wago project (port of Warband Nexus release.yml):
+#   vX.Y.Z          retail      .pkgmeta          ArtisanNexus.toc         CHANGELOG.md
+#   forever-vX.Y.Z  WoW Forever .pkgmeta-forever  ArtisanNexus_Forever.toc CHANGELOG_FOREVER.md
+# Each tag builds and uploads only its own zip, tagged only with its own game version.
 on:
   push:
     tags:
       - "v*"
+      - "forever-v*"
   workflow_dispatch:
 
 permissions:
@@ -38,5 +43,55 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Flavor from the tag; game version from that flavor's TOC Interface (120105 -> 12.1.5,
+      # 16001 -> 1.60.1), so the upload is tagged for that game only.
+      - name: Select release flavor
+        id: flavor
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == forever-v* ]]; then
+            flavor=forever; toc=ArtisanNexus_Forever.toc
+            # The tag already says forever: the packager would append its own "-forever" again
+            # ("forever-v0.1.0-forever"), so name the zip and the upload label from the tag alone.
+            pkgargs="-m .pkgmeta-forever -n {package-name}-{project-version}:{project-version}"
+            # The packager validates the game version against ArtisanNexus.toc (the package-as
+            # name): in this CI checkout only, that file becomes the Forever TOC, so every TOC in
+            # the Forever zip is a Forever one.
+            cp ArtisanNexus_Forever.toc ArtisanNexus.toc
+            # Bindings.xml loads under every TOC; the overload button it names is retail-only
+            # (scripts/build_flavor_tocs.py RETAIL_ONLY), so drop that binding from this zip.
+            sed -i '/ArtisanNexusOverloadActionButton/,/<\/Binding>/d' Bindings.xml
+          else
+            flavor=retail; toc=ArtisanNexus.toc; pkgargs=""
+          fi
+          iface=$(grep -m1 '^## Interface:' "$toc" | sed 's/^## Interface:[[:space:]]*//; s/[[:space:]].*//; s/,.*//')
+          iface="${iface//[^0-9]/}"
+          gamever="$((iface / 10000)).$(((iface / 100) % 100)).$((iface % 100))"
+          echo "flavor=$flavor" >> "$GITHUB_OUTPUT"
+          echo "args=$pkgargs -g $gamever" >> "$GITHUB_OUTPUT"
+          echo "Release flavor: $flavor ($toc, game version $gamever)"
+
       - name: Package and upload (CurseForge + Wago + GitHub Release)
         uses: BigWigsMods/packager@v2
+        with:
+          args: ${{ steps.flavor.outputs.args }}
+
+      - name: Notify Discord (release bot)
+        if: success()
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_RELEASE_CHANNEL_ID: ${{ secrets.DISCORD_RELEASE_CHANNEL_ID }}
+          # "announcements" channel: changelog + store links + @everyone heads-up. Webhook of that
+          # channel preferred; bot token + channel id also work. Unset secrets skip the post.
+          DISCORD_ANNOUNCEMENTS_WEBHOOK: ${{ secrets.DISCORD_ANNOUNCEMENTS_WEBHOOK }}
+          DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ${{ secrets.DISCORD_ANNOUNCEMENTS_CHANNEL_ID }}
+          DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          AN_RELEASE_FLAVOR: ${{ steps.flavor.outputs.flavor }}
+        # [no-announce] in the tag message or the tagged commit's message ships silently (no Discord).
+        run: |
+          # actions/checkout can leave an annotated tag as a lightweight one; refetch it.
+          git fetch --force --quiet origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME" || true
+          if { git tag -l --format='%(contents)' "$GITHUB_REF_NAME"; git log -1 --format=%B; } | grep -qF '[no-announce]'; then
+            echo "Tag $GITHUB_REF_NAME is marked [no-announce] - skipping Discord."
+            exit 0
+          fi
+          python .github/scripts/post_discord_release.py
